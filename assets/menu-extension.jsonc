@@ -1,0 +1,11 @@
+// Optional: merge these properties into the existing JSONC object. Never replace
+// ~/.config/omarchy/extensions/omarchy-menu.jsonc or discard its comments.
+{
+  "work-account": {
+    "label": "Work account"
+  },
+  "work-account.status": {
+    "label": "Integration status",
+    "action": "omarchy-launch-terminal bash -lc 'omarchy-himmelblau status; read -r -p \"Press Enter to close\"'"
+  }
+}

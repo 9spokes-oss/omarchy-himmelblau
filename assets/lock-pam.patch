@@ -1,0 +1,10 @@
+--- a/omarchy-lock-password
++++ b/omarchy-lock-password
+@@ -1,5 +1,7 @@
+ #%PAM-1.0
+ auth       required                    pam_faillock.so preauth silent deny=10 unlock_time=120
++auth       [success=1 default=ignore] pam_localuser.so
++auth       [success=3 ignore=ignore default=bad] pam_himmelblau.so ignore_unknown_user
+ -auth      [success=2 default=ignore]  pam_systemd_home.so
+ auth       [success=1 default=bad]     pam_unix.so try_first_pass nullok
+ auth       [default=die]               pam_faillock.so authfail deny=10 unlock_time=120

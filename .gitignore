@@ -1,0 +1,31 @@
+# Local credentials and private configuration
+.env
+.env.*
+!.env.example
+private/
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+id_ed25519*
+known_hosts
+
+# Disposable VM and package artifacts
+runtime/
+media/
+disks/
+firmware/
+build/
+pkg/
+*.iso
+*.qcow2
+*.fd
+*.pkg.tar.*
+*.log
+
+# Local development
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
