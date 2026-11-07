@@ -210,7 +210,7 @@ def validate_scope(data, domain, user, apply_policy=False):
     wanted = managed_keys(domain, user, apply_policy)
     for _, _, key, value in ini_lines((data or b'').decode()):
         if key in wanted and value.lower() != wanted[key].lower():
-            raise Error(f'Conflicting scoped Himmelblau key in configuration hierarchy: {key}')
+            raise Error(f'Himmelblau configuration sets a conflicting {key}')
         if key == 'domains' and any(item.strip() != domain for item in value.lower().split(',')):
             raise Error('Additional configured domains require manual scope review')
 
@@ -247,18 +247,18 @@ def configuration_scope(domain, user, apply_policy=False):
     parent = CONFIG.parent
     if (not parent.is_dir() or parent.stat().st_uid != os.geteuid()
             or stat.S_IMODE(parent.stat().st_mode) != 0o755):
-        raise Error('Main configuration directory must already be root-owned 0755; protected/missing directory requires manual review')
+        raise Error(f'{parent} must be an existing root-owned 0755 directory')
     if current is not None:
         metadata = CONFIG.stat()
         if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644:
-            raise Error('Existing main configuration must be root-owned 0644; protected/foreign configuration requires manual review')
+            raise Error(f'{CONFIG} must be root-owned 0644')
     # The local main file supersedes vendor/runtime mains, but drop-ins merge.
     # Supporting arbitrary operator drop-in precedence is deliberately out of scope.
     for layer in (*CONFIG_LAYERS, CONFIG):
         directory = Path(str(layer) + '.d')
         safe(directory / '.guard')
         if directory.exists() and any(directory.glob('*.conf')):
-            raise Error(f'Himmelblau configuration drop-ins require manual review: {directory}')
+            raise Error(f'Unsupported Himmelblau drop-in configuration: {directory}')
     server = read_generated_config()
     if server is not None:
         validate_scope(server, domain, user, apply_policy)
@@ -308,7 +308,7 @@ def administrator(user):
         canonical = pwd.getpwnam(account.pw_name)
         reverse = pwd.getpwuid(account.pw_uid)
     except KeyError:
-        raise Error('Admin opt-in requires a resolvable, round-trip NSS identity') from None
+        raise Error(f'{user} does not resolve through NSS') from None
     name, uid = account.pw_name, account.pw_uid
     if (uid < 1000 or name.upper() in ('ALL', 'DEFAULTS', 'USER_ALIAS', 'RUNAS_ALIAS', 'HOST_ALIAS', 'CMND_ALIAS', 'ROOT')
             or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.@-]{0,255}', name)):
@@ -352,7 +352,7 @@ def check_identity(state, allow_legacy=False):
     if state.get('identity') is None and allow_legacy:
         return principal
     if state.get('identity') != principal:
-        raise Error('Managed identity missing or NSS mapping changed; explicit reviewed repair required')
+        raise Error('Saved identity is missing or no longer matches NSS')
     recovery_parent()
     if allow_legacy and read(RECOVERY_ACCOUNT) is None:
         return principal
@@ -373,9 +373,9 @@ def check_admin_identity(state, allow_legacy=False):
         legacy = (f'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n'
                   f'#{principal["uid"]} ALL=(ALL:ALL) ALL\n').encode()
         if not allow_legacy or read(SUDOERS) != legacy:
-            raise Error('Legacy numeric admin authorization requires explicit repair with unchanged NSS identity')
+            raise Error('Legacy numeric sudo rule needs repair or has changed')
     elif saved != principal:
-        raise Error('Saved admin principal mapping changed; refusing automatic authorization changes')
+        raise Error('Saved admin identity no longer matches NSS')
     elif read(SUDOERS) != admin_rule(principal):
         raise Error('Canonical admin rule drift')
     return principal
@@ -503,7 +503,7 @@ def setup(domain, user, admin=False):
     if read(STATE) is not None:
         state = load_state()
         if (state['domain'], state['user'], state['admin']) != (domain, user, admin):
-            raise Error('Existing setup has different scope; rollback before changing scope')
+            raise Error('Existing setup uses a different domain, user or admin setting')
         doctor()
         print('Already set up; no changes')
         return
@@ -511,7 +511,7 @@ def setup(domain, user, admin=False):
     principal = administrator(user)
     recovery_parent()
     if read(RECOVERY_ACCOUNT) is not None:
-        raise Error('Recovery principal policy exists without managed state')
+        raise Error(f'{RECOVERY_ACCOUNT} exists but is not managed')
     configuration_scope(domain, user)
     changes = []
     def add(path, data, mode=0o644):
@@ -521,10 +521,10 @@ def setup(domain, user, admin=False):
     add(RECOVERY_ACCOUNT, identity_file(principal))
     original_pam = stock_pam()
     if read(PAM) is not None:
-        raise Error('Dedicated PAM service exists without managed state; review manually')
+        raise Error(f'{PAM} exists but is not managed')
     add(PAM, patch_source('lock-pam', original_pam))
     if read(PIN_PAM) is not None:
-        raise Error('PIN replacement PAM service exists without managed state')
+        raise Error(f'{PIN_PAM} exists but is not managed')
     add(PIN_PAM, PIN_PAM_CONTENT)
     # Validate source, but never write Omarchy's packaged lock QML.
     lock = read(LOCK)
@@ -534,7 +534,7 @@ def setup(domain, user, admin=False):
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     add(CONFIG, managed_config(read(CONFIG), domain, user), 0o644)
     if COPY_THEME.exists() or COPY_THEME.is_symlink():
-        raise Error('Companion SDDM theme already exists without managed state')
+        raise Error(f'{COPY_THEME} exists but is not managed')
     if THEME.is_symlink() or not THEME.is_dir():
         raise Error('Expected original SDDM theme directory')
     theme_files = sorted(THEME.rglob('*'))
@@ -552,11 +552,11 @@ def setup(domain, user, admin=False):
     if not any(p.name == 'Main.qml' for p in theme_files):
         raise Error('Original theme Main.qml missing')
     if read(OVERRIDE) is not None:
-        raise Error('SDDM override already exists without managed state')
+        raise Error(f'{OVERRIDE} exists but is not managed')
     add(OVERRIDE, b'[Theme]\nCurrent=omarchy-himmelblau\n')
     if admin:
         if read(SUDOERS) is not None:
-            raise Error('Companion sudoers file already exists without managed state')
+            raise Error(f'{SUDOERS} exists but is not managed')
         content = admin_rule(principal)
         validate_sudo_rule(content)
         add(SUDOERS, content, 0o440)
@@ -583,10 +583,9 @@ def setup(domain, user, admin=False):
         try:
             undo_setup()
         except Exception:
-            raise Error('Setup interrupted; automatic rollback blocked. Originals retained in root state; inspect manually.') from None
-        raise Error('Setup failed; files changed by this attempt were restored.') from None
-    print('Root setup complete. No daemon restart, authentication, join or session reload was performed.')
-    print('In an unlocked graphical user session, run enable-user, then log out/in before lock testing.')
+            raise Error(f'Setup failed and could not be undone; originals are in {STATE}') from None
+        raise Error('Setup failed and was undone') from None
+    print('Root setup complete.')
 
 
 def policy_mode(state):
@@ -606,7 +605,7 @@ def policy(enable):
     if issues:
         raise Error('\n'.join(issues))
     if policy_mode(state) == enable:
-        print('Requested local policy mode already selected; no changes')
+        print(f'apply_policy is already {str(enable).lower()}; no changes')
         return
     # Generated configuration loads last. Never rewrite it or ignore conflicts.
     validate_scope(read_generated_config(), state['domain'], state['user'], enable)
@@ -652,25 +651,24 @@ def policy(enable):
             atomic(CONFIG, before, 0o644)
             atomic(STATE, old_state, 0o600)
         except Exception:
-            raise Error(f'Policy rollback incomplete; recoverable originals retained at {backup}') from None
+            raise Error(f'Policy change failed and could not be undone; originals are in {backup}') from None
         unlink_durable(backup)
-        raise Error('Policy change failed; previous configuration and state restored') from None
+        raise Error('Policy change failed and was undone') from None
     unlink_durable(backup)
-    print(f'Local apply_policy={str(enable).lower()} selected. No service restart or tenant operation performed.')
-    print('This setting does not establish compliance or undo any enrollment or previously applied policy.')
+    print(f'Set apply_policy = {str(enable).lower()}.')
 
 
 def stock_pam():
     data = read(STOCK_PAM)
     if data is None or digest(data) != manifest('lock-pam')['before']:
-        raise Error('Stock Omarchy PAM is modified/unsupported; restore a reviewed pristine source before setup or repair')
+        raise Error(f'{STOCK_PAM} is not the supported pristine version')
     return data
 
 
 def require_complete_configuration(domain, user, apply_policy=False):
     current = read(CONFIG)
     if managed_config(current, domain, user, apply_policy) != current:
-        raise Error('Managed Himmelblau configuration keys are missing; refusing effective-scope assumptions')
+        raise Error(f'{CONFIG} is missing managed keys')
 
 
 def native_payload_contract():
@@ -740,11 +738,11 @@ def native_sddm_contract():
     try:
         result = run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], text=True)
     except (OSError, subprocess.SubprocessError):
-        raise Error('Reviewed native sddm-himmelblau 0.21.0-3 package required') from None
+        raise Error('sddm-himmelblau 0.21.0-3 is not installed') from None
     if result.stdout.strip() != 'sddm-himmelblau 0.21.0-3':
-        raise Error('Unsupported native SDDM package version; review required')
+        raise Error('Unsupported native SDDM package version')
     if read(SDDM_PIN_PAM) != SDDM_PIN_PAM_CONTENT:
-        raise Error('Native SDDM PIN service missing/drifted; reinstall the native package explicitly')
+        raise Error(f'Native SDDM PIN service is missing or changed: {SDDM_PIN_PAM}')
     metadata = SDDM_PIN_PAM.stat()
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644:
         raise Error('Unsafe native SDDM PIN service ownership/mode')
@@ -754,7 +752,7 @@ def no_pending_recovery(transaction=None):
     for operation in ('repair', 'policy'):
         journal = STATE.parent / f'{operation}-backup.json'
         if read(journal) is not None and journal != transaction:
-            raise Error(f'Pending {operation} recovery backup; inspect manually: {journal}')
+            raise Error(f'Pending {operation} recovery journal: {journal}')
 
 
 def root_issues(state, *, transaction=None):
@@ -762,7 +760,7 @@ def root_issues(state, *, transaction=None):
     try:
         no_pending_recovery(transaction)
         if state.get('transaction') is not None:
-            raise Error('Interrupted root transaction; run explicit recover from a safe recovery session')
+            raise Error('Interrupted root transaction; run recover first')
         check_identity(state)
         check_admin_identity(state)
         configuration_scope(state['domain'], state['user'], policy_mode(state))
@@ -771,7 +769,7 @@ def root_issues(state, *, transaction=None):
         native_sddm_contract()
         supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
         if digest(read(COPY_THEME / 'Main.qml') or b'') != manifest('sddm-conversation')['after']:
-            raise Error('SDDM conversation theme requires explicit root repair')
+            raise Error('SDDM conversation theme needs explicit root repair')
     except Error as error:
         issues.append(str(error))
     for entry in state['files']:
@@ -806,7 +804,7 @@ def doctor():
     issues = root_issues(state)
     if issues:
         raise Error('\n'.join(issues))
-    print('Managed root files and supported upstream source match. Running daemon capability negotiation, authentication and sessions are not tested.')
+    print('Managed root files and upstream sources match.')
 
 
 def repair():
@@ -815,7 +813,7 @@ def repair():
     backup = STATE.parent / 'repair-backup.json'
     no_pending_recovery()
     if state.get('transaction') is not None:
-        raise Error('Interrupted root transaction; run explicit recover first')
+        raise Error('Interrupted root transaction; run recover first')
     native_sddm_contract()
     principal = check_identity(state, allow_legacy=True)
     check_admin_identity(state, allow_legacy=True)
@@ -932,11 +930,11 @@ def repair():
                 directory.chmod(mode)
             atomic(STATE, old_state, 0o600)
         except Exception:
-            raise Error(f'Repair rollback incomplete; recoverable originals retained at {backup}') from None
+            raise Error(f'Repair failed and could not be undone; originals are in {backup}') from None
         unlink_durable(backup)
-        raise Error('Repair failed; previous files and state restored') from None
+        raise Error('Repair failed and was undone') from None
     unlink_durable(backup)
-    print('Root repair complete. No daemon restart or session reload performed; existing user clones remain unchanged.')
+    print('Root repair complete.')
 
 
 def journal_step(path, journal, target, phase):
@@ -955,7 +953,7 @@ def recover(recovery_only=False):
             return
         raise Error('No interrupted managed transaction to recover')
     if len(pending) != 1 or state.get('transaction'):
-        raise Error('Conflicting recovery records; manual inspection required')
+        raise Error('More than one recovery record exists')
     backup = pending[0]
     metadata = backup.stat()
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
@@ -968,14 +966,15 @@ def recover(recovery_only=False):
     if current_state != before_state and digest(current_state) != journal.get('after_state'):
         raise Error('Recovery refuses unknown state drift')
     # Validate every target before restoring any file, including already restored files.
-    for entry in journal.get('files', []):
+    for entry in journal['files']:
         path = Path(entry['path'])
         current = read(path)
         original = base64.b64decode(entry['data']) if entry['data'] is not None else None
-        if 'after' not in entry or (current != original and (current is None or digest(current) != entry['after'])):
-            raise Error('Recovery refuses unknown target drift or legacy unbounded journal')
-        if current is not None and (path.stat().st_uid != os.geteuid() or stat.S_IMODE(path.stat().st_mode) != entry['mode']):
-            raise Error('Recovery refuses target permission drift')
+        if current != original and (current is None or digest(current) != entry['after']):
+            raise Error(f'Recovery refuses unknown target drift: {path}')
+        if current is not None and (path.stat().st_uid != os.geteuid()
+                                    or stat.S_IMODE(path.stat().st_mode) != entry['mode']):
+            raise Error(f'Recovery refuses target permission drift: {path}')
     for name, mode in journal.get('directories', {}).items():
         path = Path(name)
         safe(path / '.guard')
@@ -1000,7 +999,7 @@ def recover(recovery_only=False):
     atomic(STATE, before_state, 0o600)
     journal_step(backup, journal, '@state', 'restored')
     unlink_durable(backup)
-    print('Interrupted transaction restored to its previous managed state. No services or tenant operations performed.')
+    print('Interrupted transaction restored.')
 
 
 def valid_journal(journal):
@@ -1019,7 +1018,7 @@ def valid_journal(journal):
 
 def require_no_live_locker(recovery_only=False):
     if recovery_only:
-        print('Recovery-only override: runtime safety is not verified; independent recovery access is required.')
+        print('Skipping the live session check (--recovery-only).')
         return
     try:
         result = run(['/usr/bin/loginctl', 'list-sessions', '--json=short'], text=True, timeout=5)
@@ -1039,9 +1038,9 @@ def require_no_live_locker(recovery_only=False):
                 raise Error('A graphical session remains active')
         processes = run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'], check=False, timeout=5)
         if processes.returncode != 1:
-            raise Error('Locker/compositor processes remain or process state is unknown')
+            raise Error('Locker or compositor processes are running')
     except (OSError, ValueError, subprocess.SubprocessError, Error):
-        raise Error('Rollback/recovery requires all graphical/locker sessions exited; unknown state is refused. Use --recovery-only only from independent recovery access.') from None
+        raise Error('A graphical session or locker is still running, or session state is unknown') from None
 
 
 def rollback(recovery_only=False):
@@ -1049,7 +1048,7 @@ def rollback(recovery_only=False):
     no_pending_recovery()
     require_no_live_locker(recovery_only)
     restore_managed_files(state)
-    print('Root managed files restored. Required beforehand: disable the clone and exit every session using it; keepLoaded code survives disabling. User clone/hooks remain separate.')
+    print('Root managed files restored.')
 
 
 def undo_setup():
@@ -1150,7 +1149,7 @@ def user_paths():
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', user) or '..' in user:
         raise Error('Unsupported native clone user ID')
     if (user + '.lock').startswith('omarchy.'):
-        raise Error('Native clone ID would use the reserved omarchy. namespace; enable-user is unsupported for this username')
+        raise Error(f'Clone ID {user}.lock is in the reserved omarchy. namespace')
     paths = (home / '.config/omarchy/plugins' / (user + '.lock'),
              home / '.local/state/omarchy-himmelblau/state.json',
              home / '.config/omarchy/hooks/post-update.d/omarchy-himmelblau-check')
@@ -1175,7 +1174,7 @@ def unlocked():
         raise Error('Unable to verify unlocked Quickshell state') from None
     keys = ('locked', 'requested', 'pending', 'sessionLocked', 'secure', 'authenticating')
     if any(state.get(key) is not False for key in keys):
-        raise Error('Session locked/authenticating or state unknown; refusing clone changes')
+        raise Error('Session is locked or its lock state is unknown')
 
 
 def clone_hashes(clone):
@@ -1217,34 +1216,34 @@ def legacy_user_status(quiet=False):
     user, clone, statefile, hook = user_paths()
     data = read(statefile)
     if data is None:
-        raise Error('No managed user clone; run enable-user in an unlocked graphical session')
+        raise Error('No managed user lock clone')
     state = user_state(data, statefile)
     if state.get('phase') != 'ready':
-        raise Error('Partial native clone setup; keep unlocked, inspect clone, disable it explicitly, and recover before retrying')
+        raise Error('Partial native clone setup from an interrupted enable-user')
     recorded = dict(state['upstream_files'])
     service = manifest('lock-conversation')
     if recorded.get('Service.qml') == service.get('previous_after'):
         recorded['Service.qml'] = service['after']
     if upstream_hashes() != recorded:
-        raise Error('Upstream lock plugin changed after cloning; explicit review and a new native clone are required')
+        raise Error('Upstream lock plugin changed after cloning')
     if clone_hashes(clone) != state['clone_files']:
-        raise Error('Managed native clone drift; refusing automatic changes')
+        raise Error('Managed native clone has changed')
     for path, expected in [(clone / 'Service.qml', state['clone_hash']), (hook, state['hook_hash'])]:
         actual = read(path)
         if actual is None or digest(actual) != expected:
             raise Error(f'User managed drift: {path}')
     if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error('PIN replacement service missing/drifted; explicit root repair required')
+        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
     for name, path in [('lock-pam', PAM), ('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         actual = read(path)
         info = manifest(name)
         if name == 'lock-pam':
             if actual is None or digest(actual) != info['after']:
-                raise Error('Dedicated lock PAM missing/drifted; review then run sudo omarchy-himmelblau repair explicitly')
+                raise Error('Dedicated lock PAM is missing or changed')
         elif actual is None or digest(actual) not in (info['before'], info['after']):
-            raise Error(f'Unsupported upstream source after update: {path}; explicit review needed')
+            raise Error(f'Unsupported upstream source: {path}')
     if not quiet:
-        print(f'{user}.lock source and read-only hook match. Log out/in after changes; runtime activation is not inferred.')
+        print(f'{user}.lock source and hook match.')
 
 
 def native_plugins():
@@ -1255,7 +1254,7 @@ def native_plugins():
     except ValueError:
         raise Error('Native plugin discovery returned invalid JSON') from None
     if not isinstance(plugins, list):
-        raise Error('Native plugin discovery did not return the supported array schema')
+        raise Error('Native plugin discovery did not return a list')
     if any(not isinstance(plugin, dict) or not isinstance(plugin.get('id'), str)
            or type(plugin.get('enabled')) is not bool for plugin in plugins):
         raise Error('Unsupported native plugin discovery entry')
@@ -1288,7 +1287,7 @@ def fixed_plugin_files():
         user_path_guard(home, target)
         data = read(target)
         if data is None or digest(data) != wanted:
-            raise Error('Fixed plugin source differs from companion release; review and update packages together')
+            raise Error('Fixed plugin source differs from companion release')
     for name, wanted in info['upstream'].items():
         target = LOCK.parent / name
         data = read(target)
@@ -1301,7 +1300,7 @@ def lock_prerequisites():
     # The lock uses only the dedicated service; stock PAM matters to setup/repair.
     data = read(PAM)
     if data is None or digest(data) != manifest('lock-pam')['after']:
-        raise Error('Dedicated lock PAM missing or drifted; explicit root setup/repair required')
+        raise Error('Dedicated lock PAM is missing or changed')
     metadata = PAM.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
         raise Error('Unsafe dedicated lock PAM metadata')
@@ -1321,7 +1320,7 @@ def plugin_status(quiet=False, plugins=None):
     if len(enabled) != 1 or enabled[0]['id'] != info['id']:
         raise Error('Fixed lock plugin must be the only enabled lock implementation')
     if not quiet:
-        print('Fixed lock plugin source and prerequisites match. Runtime activation still requires an unlocked shell restart.')
+        print('Fixed lock plugin source and prerequisites match.')
 
 
 def locker_preflight():
@@ -1346,7 +1345,7 @@ def user_status():
     plugins = native_plugins()
     enabled = lock_implementations(plugins)
     if len(enabled) > 1:
-        raise Error('Multiple enabled lock implementations; remain unlocked and resolve explicitly')
+        raise Error('More than one lock implementation is enabled')
     if enabled and enabled[0]['id'] == manifest('fixed-plugin')['id']:
         plugin_status(plugins=plugins)
     else:
@@ -1363,18 +1362,18 @@ def activate_plugin(migrate=False):
     fixed = [plugin for plugin in plugins if plugin['id'] == info['id']]
     if (len(fixed) != 1 or fixed[0].get('firstParty') is not False
             or fixed[0].get('clonedFrom') != 'omarchy.lock'):
-        raise Error('Install the reviewed repository using native plugin add without --enable first')
+        raise Error('Fixed lock plugin is not installed as a clone of omarchy.lock')
     account, home = canonical_user()
     old_id = account.pw_name + '.lock'
     enabled = lock_implementations(plugins)
     others = [plugin for plugin in enabled if plugin['id'] not in ('omarchy.lock', info['id'], old_id)]
     if others or len(enabled) > 1:
-        raise Error('Unknown/conflicting enabled lock clone; disable it explicitly while unlocked')
+        raise Error('Unknown/conflicting lock implementation is enabled')
     old_active = any(plugin['id'] == old_id and plugin.get('firstParty') is False
                      and plugin.get('clonedFrom') == 'omarchy.lock' for plugin in enabled)
     if old_active:
         if not migrate:
-            raise Error('Managed legacy lock is enabled; explicit --migrate is required')
+            raise Error('Legacy lock clone is enabled; pass --migrate to replace it')
         user, clone, statefile, hook = user_paths()
         legacy_user_status(quiet=True)
         service = manifest('lock-conversation')
@@ -1396,8 +1395,8 @@ def activate_plugin(migrate=False):
     except Exception:
         # Even a failed native command may have changed persisted selection.
         # The old keepLoaded service may still exist. Do not restart or delete it.
-        raise Error('Plugin activation incomplete; remain unlocked, inspect native plugin list, disable the fixed ID, and explicitly restore the previous lock before restarting.') from None
-    print('Fixed lock plugin selected; legacy files/state preserved. Do not lock until an explicit unlocked shell restart or logout/login.')
+        raise Error('Plugin activation incomplete; the enabled lock plugin may have changed') from None
+    print('Fixed lock plugin enabled; restart the shell or log in again before locking.')
 
 
 def verify_native_clone(user):
@@ -1417,11 +1416,11 @@ def exchange_directories(left, right):
     libc = ctypes.CDLL(None, use_errno=True)
     rename = getattr(libc, 'renameat2', None)
     if rename is None:
-        raise Error('Atomic directory exchange unavailable; refusing unsafe clone update')
+        raise Error('renameat2 is unavailable')
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
     if rename(AT_FDCWD, os.fsencode(left), AT_FDCWD, os.fsencode(right), RENAME_EXCHANGE):
-        raise Error('Atomic directory exchange failed; clone not replaced')
+        raise Error('Atomic directory exchange failed')
 
 
 def replace_clone(clone, statefile, state, files, hook, hook_data=None):
@@ -1468,7 +1467,7 @@ def replace_clone(clone, statefile, state, files, hook, hook_data=None):
                 fsync_directory(candidate.parent)
             except Exception:
                 cleanup = False
-                raise Error(f'Clone rollback exchange failed; old clone and state backups retained at {work}. Keep unlocked and recover manually.') from None
+                raise Error(f'Could not restore the old clone; backups are in {work}') from None
             if old_hook is None:
                 unlink_durable(hook, missing_ok=True)
             else:
@@ -1505,45 +1504,45 @@ def upgrade_user(user, clone, statefile, hook):
     if recorded != current:
         raise Error('Upstream lock plugin drift; upgrade refused')
     if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error('Run sudo omarchy-himmelblau repair before user upgrade')
+        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
     verify_native_clone(user)
     source = read(LOCK)
     patched = {'Service.qml': patch_source('lock-conversation', source),
                'LockView.qml': patch_source('lock-view', read(LOCK.parent / 'LockView.qml'))}
     state.update(version=VERSION, upstream_files=current, clone_hash=digest(patched['Service.qml']))
     replace_clone(clone, statefile, state, patched, hook)
-    print('Managed clone upgraded atomically. Restart the shell only while unlocked; existing applications need not end.')
+    print('Managed clone upgraded; restart the shell before locking.')
 
 
 def enable_user(upgrade=False):
     user, clone, statefile, hook = user_paths()
     fixed_id = manifest('fixed-plugin')['id']
     if any(plugin['id'] == fixed_id and plugin['enabled'] for plugin in native_plugins()):
-        raise Error('Fixed lock plugin is enabled; legacy clone creation/update is refused')
+        raise Error('Fixed lock plugin is enabled; legacy clones are not supported with it')
     unlocked()
     if read(statefile) is not None:
         if upgrade:
             upgrade_user(user, clone, statefile, hook)
             return
         user_status()
-        print('Existing managed clone unchanged; no reload performed')
+        print('Managed clone already exists; no changes')
         return
     safe(clone / 'Service.qml')
     if clone.exists() or clone.is_symlink():
-        raise Error('Native clone already exists without managed state; refusing to overwrite')
+        raise Error(f'{clone} exists but is not managed')
     if read(hook) is not None:
-        raise Error('Post-update hook already exists without managed state')
+        raise Error(f'{hook} exists but is not managed')
     stock_pam()
     pam = read(PAM)
     if pam is None or digest(pam) != manifest('lock-pam')['after']:
-        raise Error('Run root setup/repair before enable-user')
+        raise Error('Dedicated lock PAM is missing or changed')
     source = read(LOCK)
     if source is None:
         raise Error('Missing original lock source')
     expected = patch_source('lock-conversation', source)
     expected_view = patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error('Run explicit root repair to create the PIN replacement service')
+        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
     original_tree = upstream_hashes()
     # Omarchy performs the complete native clone, including internal import rewriting.
     # It auto-enables the clone; keepLoaded code requires logout/login to adopt the patch.
@@ -1554,7 +1553,7 @@ def enable_user(upgrade=False):
         verify_native_clone(user)
         actual = read(clone / 'Service.qml')
         if actual != source:
-            raise Error('Native clone source differs; inspect manually before using the locker')
+            raise Error('Native clone source differs from the installed lock source')
         if read(clone / 'LockView.qml') != read(LOCK.parent / 'LockView.qml'):
             raise Error('Native clone view differs from supported source')
         hook_data = ("#!/bin/sh\n# Read-only post-update check. Never repairs or reloads a locker.\n"
@@ -1565,11 +1564,9 @@ def enable_user(upgrade=False):
                      'hook_hash': digest(hook_data), 'upstream_files': original_tree}
         replace_clone(clone, statefile, new_state, {'Service.qml': expected, 'LockView.qml': expected_view}, hook, hook_data)
     except Exception as error:
-        detail = f' {error}.' if isinstance(error, Error) else ''
-        raise Error('Native clone preparation incomplete.' + detail + ' It may be enabled. Do not lock. Disable the native clone and inspect user state before retrying.') from None
-    print('Native clone prepared and auto-enabled by Omarchy. No shell restart was performed.')
-    print('Log out and back in while unlocked before lock testing; keepLoaded code may still be old until then.')
-    print('Menu integration is an optional documented JSONC snippet; existing menus were not modified.')
+        detail = f': {error}' if isinstance(error, Error) else ''
+        raise Error(f'Native clone preparation incomplete{detail}; the clone may be enabled') from None
+    print('Native clone prepared and enabled; log out and back in before locking.')
 
 
 def main(argv=None):

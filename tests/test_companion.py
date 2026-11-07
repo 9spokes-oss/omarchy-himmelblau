@@ -432,7 +432,7 @@ class CompanionTest(unittest.TestCase):
             service = directory / 'plugin/Service.qml'; service.write_bytes(service.read_bytes()+b'// drift\n')
             with self.assertRaisesRegex(m.Error, 'differs from companion release'): m.plugin_status()
         m.PAM.unlink()
-        with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM missing'): m.lock_prerequisites()
+        with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing'): m.lock_prerequisites()
 
     def test_locker_preflight_ignores_stock_pam_drift(self):
         directory, listing = self.fixed_plugin_fixture()
@@ -635,7 +635,7 @@ class CompanionTest(unittest.TestCase):
             if Path(path) == m.STATE: raise OSError('synthetic persistent state failure')
             return original(path, data, mode)
         with patch.object(m, 'atomic', failure):
-            with self.assertRaisesRegex(m.Error, 'recoverable originals retained'): m.policy(True)
+            with self.assertRaisesRegex(m.Error, 'originals are in'): m.policy(True)
         journal = m.STATE.parent / 'policy-backup.json'
         saved = json.loads(journal.read_text())
         self.assertEqual(m.base64.b64decode(saved['config']), old_config)
@@ -821,7 +821,7 @@ class CompanionTest(unittest.TestCase):
                         raise OSError('synthetic upgrade failure')
                     return atomic(path, data, mode)
                 with patch.object(m, 'atomic', injected):
-                    with self.assertRaisesRegex(m.Error, 'previous files and state restored'): m.repair()
+                    with self.assertRaisesRegex(m.Error, 'Repair failed and was undone'): m.repair()
                 self.assertEqual(main.read_bytes(), legacy)
                 self.assertEqual(m.STATE.read_bytes(), old)
                 self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
@@ -833,7 +833,7 @@ class CompanionTest(unittest.TestCase):
             if path == m.STATE: raise OSError('state write and restore failure')
             return atomic(path, data, mode)
         with patch.object(m, 'atomic', injected):
-            with self.assertRaisesRegex(m.Error, 'recoverable originals retained'): m.repair()
+            with self.assertRaisesRegex(m.Error, 'originals are in'): m.repair()
         journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
         self.assertEqual(m.base64.b64decode(journal['state']), old)
         self.assertEqual(m.base64.b64decode(journal['files'][0]['data']), legacy)
@@ -1131,7 +1131,7 @@ class CompanionTest(unittest.TestCase):
         m.CONFIG.parent.chmod(0o755)
         m.CONFIG.chmod(0o600)
         before = m.CONFIG.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'protected/foreign'):self.setup()
+        with self.assertRaisesRegex(m.Error, 'root-owned 0644'):self.setup()
         self.assertEqual(m.CONFIG.read_bytes(), before)
         self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o600)
         self.assertFalse(m.PAM.exists())
@@ -1238,7 +1238,7 @@ class CompanionTest(unittest.TestCase):
             if path==statefile:raise OSError('synthetic state failure')
             return atomic(path,data,mode)
         with patch.object(m,'unlocked'),patch.object(m,'verify_native_clone'),patch.object(m,'exchange_directories',fail_rollback),patch.object(m,'atomic',fail_state):
-            with self.assertRaisesRegex(m.Error,'backups retained'):m.upgrade_user('alice',clone,statefile,hook)
+            with self.assertRaisesRegex(m.Error,'backups are in'):m.upgrade_user('alice',clone,statefile,hook)
         retained=list(clone.parent.parent.glob('.himmelblau-stage-*'));self.assertEqual(len(retained),1)
         self.assertEqual((retained[0]/'clone/Service.qml').read_bytes(),old_service)
         self.assertEqual((retained[0]/'previous-state.json').read_bytes(),old)
