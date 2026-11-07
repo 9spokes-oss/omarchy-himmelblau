@@ -122,8 +122,13 @@ class CompanionTest(unittest.TestCase):
             namespace = runpy.run_path(str(ROOT / 'src/omarchy_himmelblau.py'))
         self.assertEqual(namespace['ASSETS'], Path('/usr/share/omarchy-himmelblau'))
         with patch.object(m.os, 'geteuid', return_value=0):
-            with self.assertRaisesRegex(m.Error, 'unprivileged source checkout'):
+            with self.assertRaisesRegex(m.Error, 'refuses to run as root'):
                 m.main(['--development', 'doctor'])
+        installed = '/usr/lib/omarchy-himmelblau/omarchy_himmelblau.py'
+        with patch.object(m, '__file__', installed), patch.object(m, 'user_status') as status:
+            with self.assertRaisesRegex(m.Error, 'only as python3 src/omarchy_himmelblau.py'):
+                m.main(['--development', 'status'])
+            status.assert_not_called()
 
     def test_privileged_patch_ignores_hostile_path_and_environment(self):
         evil = self.base / 'evil'; evil.mkdir()
@@ -647,7 +652,7 @@ class CompanionTest(unittest.TestCase):
             def root_status():
                 state = m.load_state()
                 with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'load_state', return_value=state):
-                    m.main(['status'])
+                    m.main(['doctor'])
             actions = (m.doctor, m.repair, m.rollback, lambda: m.policy(True),
                        lambda: m.setup('example.com', 'alice@example.com'), root_status)
             for action in actions:
@@ -672,6 +677,16 @@ class CompanionTest(unittest.TestCase):
         self.assertTrue(journal.exists())
         with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.doctor()
         with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.repair()
+
+    def test_doctor_is_root_only_and_status_is_user_only(self):
+        with patch.object(m.os, 'geteuid', return_value=1000), patch.object(m, 'doctor') as doctor:
+            with self.assertRaisesRegex(m.Error, 'as root'):
+                m.main(['doctor'])
+            doctor.assert_not_called()
+        with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'user_status') as status:
+            with self.assertRaisesRegex(m.Error, 'not root'):
+                m.main(['status'])
+            status.assert_not_called()
 
     def test_policy_cli_requires_explicit_choice_and_root(self):
         for args in (['policy'], ['policy', '--enable', '--disable']):

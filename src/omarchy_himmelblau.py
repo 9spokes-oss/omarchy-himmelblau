@@ -383,7 +383,12 @@ def check_admin_identity(state, allow_legacy=False):
 
 def root_required():
     if os.geteuid() != 0:
-        raise Error('This command requires root; use sudo explicitly')
+        raise Error('Run this command as root')
+
+
+def user_required():
+    if os.geteuid() == 0:
+        raise Error('Run this command as the desktop user, not root')
 
 
 def load_state():
@@ -1576,8 +1581,10 @@ def main(argv=None):
     user_parser.add_argument('--upgrade', action='store_true', help='Upgrade a supported unchanged legacy managed clone atomically')
     args = parser.parse_args(argv)
     if args.development:
-        if os.geteuid() == 0 or Path(__file__).resolve().parent.name != 'src':
-            raise Error('Development mode requires an unprivileged source checkout')
+        if os.geteuid() == 0:
+            raise Error('--development refuses to run as root')
+        if Path(__file__).resolve().parent.name != 'src':
+            raise Error('--development works only as python3 src/omarchy_himmelblau.py in a checkout')
         global ASSETS
         ASSETS = Path(__file__).resolve().parents[1] / 'assets'
     if args.command == 'activate-plugin':
@@ -1588,11 +1595,14 @@ def main(argv=None):
         locker_preflight()
     elif args.command == 'enable-user':
         enable_user(args.upgrade)
-    elif args.command in ('doctor', 'status'):
-        doctor() if os.geteuid() == 0 else user_status()
+    elif args.command == 'status':
+        user_required()
+        user_status()
     else:
         root_required()
-        if args.command == 'setup':
+        if args.command == 'doctor':
+            doctor()
+        elif args.command == 'setup':
             setup(args.domain, args.user, args.admin)
         elif args.command == 'policy':
             policy(args.policy_enabled)
