@@ -2,6 +2,7 @@
 #include <security/pam_appl.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <poll.h>
 #include <pwd.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -53,6 +54,8 @@ int pam_chauthtok(pam_handle_t *handle,int flags){
   const struct pam_message *msg=&messages[i];struct pam_response *answer=NULL;
   int result=handle->conv.conv(1,&msg,&answer,handle->conv.appdata_ptr);
   if(result!=PAM_SUCCESS)return result;
+  /* A module waiting on the network: an interrupted wait fails the change. */
+  if(i==0&&getenv("FIXTURE_SLOW")&&poll(NULL,0,5000)<0)return PAM_SYSTEM_ERR;
   if(i>0&&i<4){if(!answer[0].resp||strcmp(answer[0].resp,i==3?"test-otp":"p\xc3\xa4ss")){free(answer[0].resp);free(answer);return PAM_SYSTEM_ERR;}free(answer[0].resp);}
   free(answer);
  }
@@ -60,4 +63,8 @@ int pam_chauthtok(pam_handle_t *handle,int flags){
  puts("test-secret-not-a-protocol-message");fputs("test-secret-not-a-log\n",stderr);
  return PAM_SUCCESS;
 }
-int pam_end(pam_handle_t *handle,int result){(void)handle;(void)result;return PAM_SUCCESS;}
+int pam_end(pam_handle_t *handle,int result){
+ (void)handle;const char *mark=getenv("FIXTURE_END_FILE");
+ if(mark){FILE *file=fopen(mark,"w");if(file){fprintf(file,"%d\n",result);fclose(file);}}
+ return PAM_SUCCESS;
+}

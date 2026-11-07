@@ -6,6 +6,7 @@
 #include <pwd.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +19,10 @@
 #define MESSAGE_MAX 8192
 static FILE *protocol;
 static unsigned messages;
+/* SIGTERM asks the helper to stop: no further prompts and no PIN change are
+ * started, and PAM still ends normally so its buffers are released. */
+static volatile sig_atomic_t stopping;
+static void stop(int signal) { (void)signal; stopping = 1; }
 
 static void quoted(const char *text, size_t length) {
     fputc('"', protocol);
@@ -76,7 +81,7 @@ static int conversation(int count, const struct pam_message **input,
     struct pam_response *answers = calloc((size_t)count, sizeof(*answers));
     if (!answers) return PAM_BUF_ERR;
     for (int i = 0; i < count; i++) {
-        if (!input[i]) goto failed;
+        if (stopping || !input[i]) goto failed;
         int style = input[i]->msg_style;
         if (style == PAM_PROMPT_ECHO_OFF || style == PAM_PROMPT_ECHO_ON) {
             if (message("prompt", input[i]->msg, style == PAM_PROMPT_ECHO_ON)) goto failed;
@@ -98,6 +103,10 @@ int main(int argc, char **argv) {
     struct rlimit no_core = {0, 0};
     if (argc != 1 || getuid() == 0 || getuid() != geteuid() || getgid() != getegid()
         || setrlimit(RLIMIT_CORE, &no_core) || prctl(PR_SET_DUMPABLE, 0)) return 2;
+    /* No SA_RESTART: a blocked read, or a module's wait, returns EINTR. */
+    struct sigaction action = {0};
+    action.sa_handler = stop;
+    if (sigemptyset(&action.sa_mask) || sigaction(SIGTERM, &action, NULL)) return 2;
     /* Responses are secrets: keep them out of a stdio buffer that is never wiped. */
     if (setvbuf(stdin, NULL, _IONBF, 0)) return 2;
     int channel = dup(STDOUT_FILENO), sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
@@ -118,6 +127,7 @@ int main(int argc, char **argv) {
     struct oh_identity current;
     if (status == PAM_SUCCESS && (!oh_recovery_account(identity.upn, getuid(), 0, &current)
         || !oh_same_identity(&identity, &current))) status = PAM_SYSTEM_ERR;
+    if (status == PAM_SUCCESS && stopping) status = PAM_SYSTEM_ERR;
     if (status == PAM_SUCCESS) status = pam_chauthtok(handle, 0);
     if (handle) pam_end(handle, status);
     explicit_bzero(buffer, sizeof(buffer));

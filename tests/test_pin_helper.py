@@ -54,6 +54,36 @@ class PinHelperTest(unittest.TestCase):
         finally:
             os.close(read_end)
 
+    def stopped_helper(self, env, wait_for):
+        # Start the helper, wait for one protocol line, then send SIGTERM as the lock screen does.
+        mark = Path(self.work.name) / 'pam-end'
+        mark.unlink(missing_ok=True)
+        process = subprocess.Popen([str(self.binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, env={**os.environ, **env, 'FIXTURE_END_FILE': str(mark)})
+        try:
+            first = json.loads(process.stdout.readline())
+            self.assertEqual(first['type'], wait_for)
+            process.terminate()
+            rest, _ = process.communicate(timeout=2)
+        finally:
+            if process.poll() is None: process.kill(); process.wait()
+            process.stdin.close()
+        return process.returncode, [json.loads(line) for line in rest.splitlines()], mark
+
+    def test_sigterm_while_waiting_for_a_response_ends_pam(self):
+        code, messages, mark = self.stopped_helper({}, 'info')
+        # The prompt may or may not be written before the signal; no answer is ever taken.
+        self.assertEqual(code, 1)
+        self.assertEqual(messages[-1], {'type': 'result', 'success': False})
+        self.assertTrue(mark.exists(), 'pam_end was not called')
+
+    def test_sigterm_during_a_module_wait_fails_the_change_and_ends_pam(self):
+        code, messages, mark = self.stopped_helper({'FIXTURE_SLOW': '1'}, 'info')
+        self.assertEqual(code, 1)
+        self.assertEqual([message['type'] for message in messages], ['result'])
+        self.assertFalse(messages[-1]['success'])
+        self.assertTrue(mark.exists(), 'pam_end was not called')
+
     def test_eof_malformed_and_oversized_responses_fail_closed(self):
         for data in [b'',b'response %00\n',b'response %QX\n',b'response '+b'a'*(3*4096+1)+b'\n']:
             with self.subTest(data_length=len(data)):
