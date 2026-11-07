@@ -43,7 +43,7 @@ def native_package(path, pkginfo=b'pkgname = sddm-himmelblau\npkgver = ' + NATIV
             for prefix in ('usr/lib/qt/qml/SddmComponents/', 'usr/lib/qt6/qml/SddmComponents/'):
                 add(prefix + 'qmldir', b'fixture-component', 0o644)
                 add(prefix + 'Component.qml', b'Item {}', 0o644)
-    path.write_bytes(subprocess.check_output(['zstd', '-q', '-c'], input=payload.getvalue()))
+    path.write_bytes(subprocess.check_output(['/usr/bin/zstd', '-q', '-c'], input=payload.getvalue()))
     return path
 
 def finish(*arguments):
@@ -62,7 +62,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertIn(b'clean committed worktree', result.stderr)
             self.assertFalse((root / 'out').exists())
 
-    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required for package archive verification')
+    @unittest.skipUnless(Path('/usr/bin/zstd').exists(), '/usr/bin/zstd is required for package archive verification')
     def test_native_payload_requires_both_complete_component_trees(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -79,13 +79,31 @@ class ReleaseTest(unittest.TestCase):
                 else:
                     self.assertFalse((root / 'companion/native-payload.json').exists())
 
+    def test_finish_reports_missing_pkgrel(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            release_directory(root)
+            (root / 'native/PKGBUILD').write_text(re.sub(r'(?m)^pkgrel=.*\n', '', NATIVE_RECIPE))
+            result = finish(root, root / 'native.pkg.tar.zst')
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(b'no pkgver or pkgrel', result.stderr)
+            self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_documented_package_glob_skips_the_debug_package(self):
+        import fnmatch
+        text = (ROOT / 'docs/releasing.md').read_text()
+        pattern = re.search(r'release/native/(\S+\.pkg\.tar\.zst)', text)[1]
+        names = [f'sddm-himmelblau-{NATIVE_VERSION}-x86_64.pkg.tar.zst',
+                 f'sddm-himmelblau-debug-{NATIVE_VERSION}-x86_64.pkg.tar.zst']
+        self.assertEqual(fnmatch.filter(names, pattern), names[:1])
+
     def test_finish_requires_both_arguments(self):
         result = finish()
         self.assertEqual(result.returncode, 1)
         self.assertIn(b'Usage: finish-release.py', result.stderr)
         self.assertNotIn(b'Traceback', result.stderr)
 
-    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required for package archive verification')
+    @unittest.skipUnless(Path('/usr/bin/zstd').exists(), '/usr/bin/zstd is required for package archive verification')
     def test_finish_reports_missing_pkginfo(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -96,7 +114,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertIn(b'no .PKGINFO', result.stderr)
             self.assertNotIn(b'Traceback', result.stderr)
 
-    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required for package archive verification')
+    @unittest.skipUnless(Path('/usr/bin/zstd').exists(), '/usr/bin/zstd is required for package archive verification')
     def test_finish_matches_package_version_literally(self):
         # An unescaped '.' in the version would accept this look-alike.
         lookalike = NATIVE_VERSION.replace('.', 'x', 1)
@@ -109,7 +127,7 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn(b'Unexpected native package identity', result.stderr)
 
-    @unittest.skipUnless(shutil.which('zstd'), 'zstd is required for package archive verification')
+    @unittest.skipUnless(Path('/usr/bin/zstd').exists(), '/usr/bin/zstd is required for package archive verification')
     def test_finish_refuses_already_pinned_release(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

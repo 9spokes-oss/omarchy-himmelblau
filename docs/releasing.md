@@ -21,7 +21,7 @@ companion package:
 
 ```sh
 python3 /path/to/checkout/tools/finish-release.py /path/outside-checkout/release \
-  /path/outside-checkout/release/native/sddm-himmelblau-*.pkg.tar.zst
+  /path/outside-checkout/release/native/sddm-himmelblau-[0-9]*.pkg.tar.zst
 cd /path/outside-checkout/release/companion
 makepkg --noconfirm
 ```
@@ -37,7 +37,7 @@ only after you check every other dependency and confirm the exact native package
 built. It does not waive the runtime dependency. Installing a package starts no
 services and configures no PAM.
 
-Then, from the same clean checkout:
+Then, from a checkout at the release commit:
 
 ```sh
 python3 tools/corresponding-source.py /path/outside-checkout/release

@@ -25,7 +25,10 @@ recipe = directory / 'companion/PKGBUILD'
 if '@NATIVE_PAYLOAD_SHA256@' not in recipe.read_text():
     raise SystemExit('companion/PKGBUILD is already pinned; export a fresh release to pin another package')
 native_recipe = (directory / 'native/PKGBUILD').read_text()
-version = '-'.join(re.search(rf'^{key}=(\S+)$', native_recipe, re.M)[1] for key in ('pkgver', 'pkgrel'))
+fields = [re.search(rf'^{key}=(\S+)$', native_recipe, re.M) for key in ('pkgver', 'pkgrel')]
+if not all(fields):
+    raise SystemExit('native/PKGBUILD has no pkgver or pkgrel')
+version = '-'.join(field[1] for field in fields)
 data = subprocess.check_output(['/usr/bin/zstd', '-d', '-q', '-c', str(package)], timeout=120)
 required = {'/usr/bin/sddm', '/usr/bin/sddm-greeter', '/usr/bin/sddm-greeter-qt6',
             '/usr/lib/sddm/sddm-helper', '/usr/lib/sddm/sddm-helper-start-wayland',
