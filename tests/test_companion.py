@@ -699,6 +699,12 @@ class CompanionTest(unittest.TestCase):
         m.save_state(state)
         return main, legacy, m.STATE.read_bytes()
 
+    def test_native_packaged_pin_pam_matches_companion_contract(self):
+        # Read the real package payload, not the test's synthesized guest fixture.
+        packaged = ROOT / 'packaging/sddm-himmelblau/sddm-himmelblau-pin-change.pam'
+        self.assertEqual(packaged.read_bytes(), m.SDDM_PIN_PAM_CONTENT,
+                         'Native package PAM bytes must match companion preflight exactly')
+
     def test_native_prerequisite_is_checked_and_never_managed(self):
         native = m.SDDM_PIN_PAM.read_bytes()
         with patch.object(m.subprocess, 'run', return_value=SimpleNamespace(stdout='sddm 0.21.0-1')):
