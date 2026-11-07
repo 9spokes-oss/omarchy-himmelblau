@@ -239,8 +239,8 @@ Item {
   // Runs after locking: a setup problem is shown on the lock, never a reason to stay unlocked.
   function checkLockSetup() {
     if (!pinHelperCheck.running) pinHelperCheck.running = true
-    if (lockPreflight.running) return
     lockWarning = ""
+    if (lockPreflight.running) return
     lockPreflightTimeout.restart()
     lockPreflight.running = true
   }
@@ -276,6 +276,7 @@ Item {
     recoveryBackoffMs = 0
     recoveryRetryAtMs = 0
     lockRequested = false
+    lockWarning = ""
     pendingSessionLock = false
     sessionLockStabilizeTimer.stop()
     pendingSessionLockTimer.stop()

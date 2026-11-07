@@ -352,8 +352,10 @@ recovery.exit(0);
 assert.equal(s.recoveryBackoffMs, 0);
 s.beginPinRecovery();
 s.pinRecovery.exit(1);
+s.lockWarning = 'Lock setup check failed.';
 s.finishUnlock();
 assert.equal(s.recoveryRetryAtMs, 0);
+assert.equal(s.lockWarning, '');
 s.lockRequested = true;
 s.beginPinRecovery();
 assert.notEqual(s.pinRecovery, null);
@@ -441,6 +443,12 @@ assert.equal(lock.lockPreflightTimeout.running, true);
 assert.equal(lock.pinHelperCheck.running, true);
 assert.equal(lock.lockWarning, '');
 assert.equal(lock.lockRefusedNotice.running, false);
+// A check still running from the last lock does not keep its old warning.
+lock = lockHarness(true);
+lock.lockPreflight.running = true;
+lock.checkLockSetup();
+assert.equal(lock.lockWarning, '');
+assert.equal(lock.lockPreflightTimeout.running, false);
 
 // Contracts with the companion and with the PAM text rendering.
 assert.match(service, /path: "\/etc\/pam.d\/omarchy-himmelblau-lock-password"/);

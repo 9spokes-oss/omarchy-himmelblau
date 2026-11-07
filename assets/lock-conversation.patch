@@ -59,8 +59,8 @@
 +  // Runs after locking: a setup problem is shown on the lock, never a reason to stay unlocked.
 +  function checkLockSetup() {
 +    if (!pinHelperCheck.running) pinHelperCheck.running = true
-+    if (lockPreflight.running) return
 +    lockWarning = ""
++    if (lockPreflight.running) return
 +    lockPreflightTimeout.restart()
 +    lockPreflight.running = true
 +  }
@@ -84,16 +84,18 @@
  
      Qt.callLater(function() {
        root.refreshBackground()
-@@ -237,6 +273,8 @@
+@@ -237,7 +273,10 @@
    function finishUnlock() {
      if (!root.currentlyLocked()) return
  
 +    recoveryBackoffMs = 0
 +    recoveryRetryAtMs = 0
      lockRequested = false
++    lockWarning = ""
      pendingSessionLock = false
      sessionLockStabilizeTimer.stop()
-@@ -257,6 +295,7 @@
+     pendingSessionLockTimer.stop()
+@@ -257,6 +296,7 @@
    function runWake() {
      if (!wakeProcess.running) wakeProcess.running = true
      if (lockRequested) armBlankTimer()
@@ -101,7 +103,7 @@
      resumeFingerprint()
      nudgeFingerprint()
    }
-@@ -353,36 +392,226 @@
+@@ -353,36 +393,226 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -345,7 +347,7 @@
      runWake()
    }
  
-@@ -514,6 +743,14 @@
+@@ -514,6 +744,14 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -360,7 +362,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +801,40 @@
+@@ -564,25 +802,40 @@
      }
    }
  
@@ -418,7 +420,7 @@
      }
    }
  
-@@ -710,7 +962,7 @@
+@@ -710,7 +963,7 @@
    Process {
      id: posterProc
      property string sourcePath: ""
@@ -427,7 +429,7 @@
      stdout: StdioCollector { id: posterOutput; waitForEnd: true }
      onExited: function(exitCode) {
        if (sourcePath !== root.backgroundPath) {
-@@ -782,10 +1034,11 @@
+@@ -782,10 +1035,11 @@
          root.armBlankTimer(resumeMs)
          return
        }
@@ -441,7 +443,7 @@
      }
    }
  
-@@ -839,14 +1092,23 @@
+@@ -839,14 +1093,23 @@
      }
    }
  
@@ -466,7 +468,7 @@
      watchChanges: true
      printErrors: false
      onLoaded: root.passwordPamConfigured = true
-@@ -854,6 +1116,37 @@
+@@ -854,6 +1117,37 @@
      onFileChanged: reload()
    }
  
@@ -504,7 +506,7 @@
    // No lock before PAM is known good. An answer from before then may be stale --
    // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
    onPasswordPamConfiguredChanged: {
-@@ -876,7 +1169,10 @@
+@@ -876,7 +1170,10 @@
      target: "lock"
  
      function lock(): string {
@@ -516,7 +518,7 @@
        // omarchy-system-sleep-lock asks for the lock before every suspend.
        if (root.currentlyLocked()) root.noteSleepRequested()
        if (!root.currentlyLocked() && !root.beginLock()) return "failed"
-@@ -896,9 +1192,13 @@
+@@ -896,9 +1193,13 @@
          secure: sessionLock.secure,
          realScreens: root.realScreenCount(),
          passwordPam: root.passwordPamConfigured,
