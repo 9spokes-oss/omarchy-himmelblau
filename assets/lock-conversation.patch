@@ -10,7 +10,7 @@
    property var shell: null
    property string omarchyPath: ""
  
-@@ -47,7 +50,17 @@
+@@ -47,7 +50,18 @@
    property int knownScreenCount: 0
    property bool previewVisible: false
    property string enteredPassword: ""
@@ -26,10 +26,11 @@
 +  property bool recoveringPIN: false
 +  property int recoveryAttempt: 0
 +  property string lastRecoveryResult: "none"
++  property int pinRecoverySignal: 15
    property string failureMessage: ""
    property int failedAttempts: 0
    property string backgroundPath: ""
-@@ -192,7 +205,7 @@
+@@ -192,7 +206,7 @@
  
    function resetAuthenticationState() {
      enteredPassword = ""
@@ -38,7 +39,7 @@
      failureMessage = ""
      failedAttempts = 0
      authenticatingPassword = false
-@@ -210,13 +223,30 @@
+@@ -210,13 +224,30 @@
      fingerprintRetryTimer.stop()
      fingerprintReachTimer.stop()
      fingerprintResumeTimer.stop()
@@ -71,7 +72,7 @@
        return false
      }
  
-@@ -225,6 +255,7 @@
+@@ -225,6 +256,7 @@
      armBlankTimer()
      logEvent("lock-requested")
      queueSessionLock()
@@ -79,7 +80,7 @@
  
      Qt.callLater(function() {
        root.refreshBackground()
-@@ -353,36 +384,197 @@
+@@ -353,36 +385,212 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -200,7 +201,7 @@
 +  function completePasswordAttempt(context, attempt, result) {
 +    settlePasswordAttempt(context, attempt, result === PamResult.Success, false)
 +  }
-+
+ 
 +  function beginPinRecovery() {
 +    if (!lockRequested || authenticatingPassword || passwordPam || pinRecovery) return
 +    if (!pinRecoveryAvailable) {
@@ -259,23 +260,38 @@
 +    }
 +    runWake()
 +  }
- 
++
 +  function stopPinRecovery(result) {
 +    var context = pinRecovery
-+    if (!context) return
-+    // Invalidate before killing, and retain the process until it has exited.
++    // A second stop (Esc again) must not restart the escalation.
++    if (!context || !recoveringPIN) return
++    // Invalidate before stopping, and retain the process until it has exited.
 +    recoveringPIN = false
 +    recoveryAttempt += 1
 +    lastRecoveryResult = result
 +    clearPasswordPrompt()
 +    passwordNotices = ["PIN change stopped; it may already have completed. Sign in to check."]
 +    passwordMessageIsError = result === "failed"
-+    if (context.running) context.signal(9)
-+    else finishPinRecovery(context, context.attemptId, 1)
++    if (!context.running) {
++      finishPinRecovery(context, context.attemptId, 1)
++      return
++    }
++    // End of input makes the helper's PAM conversation fail and clean up; signals only if it hangs.
++    context.stdinEnabled = false
++    pinRecoverySignal = 15
++    pinRecoveryStopTimer.restart()
++  }
++
++  function escalatePinRecoveryStop() {
++    if (!pinRecovery || !pinRecovery.running) return
++    pinRecovery.signal(pinRecoverySignal)
++    pinRecoverySignal = 9
++    pinRecoveryStopTimer.restart()
 +  }
 +
 +  function finishPinRecovery(context, attempt, exitCode) {
 +    if (context !== pinRecovery) return
++    pinRecoveryStopTimer.stop()
 +    if (currentPinRecovery(context, attempt)) {
 +      lastRecoveryResult = exitCode === 0 && context.reportedSuccess ? "success" : "failed"
 +      passwordNotices = [lastRecoveryResult === "success" ? "PIN updated; sign in with the new PIN." : "PIN change failed; sign in to check or retry recovery."]
@@ -294,7 +310,7 @@
      runWake()
    }
  
-@@ -514,6 +706,14 @@
+@@ -514,6 +722,14 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -309,7 +325,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +764,34 @@
+@@ -564,25 +780,40 @@
      }
    }
  
@@ -343,6 +359,12 @@
  
 -    onError: function(error) {
 -      root.handlePasswordFailure()
++  Timer {
++    id: pinRecoveryStopTimer
++    interval: 2000
++    onTriggered: root.escalatePinRecoveryStop()
++  }
++
 +  Component {
 +    id: pinRecoveryFactory
 +    Process {
@@ -361,7 +383,7 @@
      }
    }
  
-@@ -710,7 +919,7 @@
+@@ -710,7 +941,7 @@
    Process {
      id: posterProc
      property string sourcePath: ""
@@ -370,7 +392,7 @@
      stdout: StdioCollector { id: posterOutput; waitForEnd: true }
      onExited: function(exitCode) {
        if (sourcePath !== root.backgroundPath) {
-@@ -846,7 +1055,7 @@
+@@ -846,7 +1077,7 @@
    }
  
    FileView {
@@ -379,7 +401,7 @@
      watchChanges: true
      printErrors: false
      onLoaded: root.passwordPamConfigured = true
-@@ -854,6 +1063,37 @@
+@@ -854,6 +1085,37 @@
      onFileChanged: reload()
    }
  
@@ -417,7 +439,7 @@
    // No lock before PAM is known good. An answer from before then may be stale --
    // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
    onPasswordPamConfiguredChanged: {
-@@ -876,7 +1116,10 @@
+@@ -876,7 +1138,10 @@
      target: "lock"
  
      function lock(): string {
@@ -429,7 +451,7 @@
        // omarchy-system-sleep-lock asks for the lock before every suspend.
        if (root.currentlyLocked()) root.noteSleepRequested()
        if (!root.currentlyLocked() && !root.beginLock()) return "failed"
-@@ -896,9 +1139,13 @@
+@@ -896,9 +1161,13 @@
          secure: sessionLock.secure,
          realScreens: root.realScreenCount(),
          passwordPam: root.passwordPamConfigured,

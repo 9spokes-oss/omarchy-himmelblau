@@ -10,11 +10,11 @@
     "lock-manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
   },
   "patches": {
-    "lock-conversation.patch": "50ce1ffbc9695f9a56ed3ee732f17d504558389c6176c0672fa3d32424c32251",
+    "lock-conversation.patch": "0f0e8af0627a46a9eccb010ec84e1d4a723e2a51df8e983254b6f312d4a5128c",
     "lock-view.patch": "02844d14d9fe57104944b108f3156f235501bbffa3bd53cbeceed36391e564ab"
   },
   "generated_sha256": {
-    "plugin/Service.qml": "d421520eb1b0f2e694d1460580caaf9eaf7e3c435744057e1fdb7a8b61689ecd",
+    "plugin/Service.qml": "7429f679f5d82c5bfb03119d8eb80ded71626c6a5c17f145e94badaa269d504b",
     "plugin/LockView.qml": "e204ac85c3f35683cfd83f2449a7515adf9218c3f0b780104d4e128207e00ada",
     "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
     "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",

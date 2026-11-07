@@ -25,13 +25,14 @@ function fn(source, name) {
 function harness() {
  const state={pinRecoveryAvailable:true,lockRequested:true, authenticatingPassword:false,passwordPam:null,passwordAttempt:0,
   awaitingPasswordResponse:false,passwordResponseVisible:false,passwordPrompt:'',passwordNotices:[],
-  passwordMessageIsError:false,pinRecovery:null,recoveringPIN:false,recoveryAttempt:0,lastRecoveryResult:'none',enteredPassword:'',failureMessage:'',failedAttempts:0,unlocks:0,contexts:[],
+  passwordMessageIsError:false,pinRecovery:null,recoveringPIN:false,recoveryAttempt:0,lastRecoveryResult:'none',pinRecoverySignal:15,enteredPassword:'',failureMessage:'',failedAttempts:0,unlocks:0,contexts:[],
   runWake(){},logEvent(event){if(event==='unlocked')state.unlocks++;},PamResult:{Success:0},
   I18n:{t(){return{arg(n){return `failed ${n}`;}}},formatNumber(n){return n;}}};
  state.sessionLock={locked:true,secure:true};state.fingerprintPam={active:false};
  for(const name of ['sessionLockStabilizeTimer','pendingSessionLockTimer','idleBlankTimer','fingerprintRecheckTimer','fingerprintRetryTimer','fingerprintReachTimer','fingerprintResumeTimer'])state[name]={stop(){}};
- state.pinRecoveryFactory={createObject(parent,properties){return {...properties,running:false,reportedSuccess:false,messageCount:0,writes:[],
-  write(text){this.writes.push(text);},signal(number){this.killed=number;},destroy(){this.destroyed=true;},
+ state.pinRecoveryStopTimer={running:false,restart(){this.running=true;},stop(){this.running=false;}};
+ state.pinRecoveryFactory={createObject(parent,properties){return {...properties,running:false,stdinEnabled:true,reportedSuccess:false,messageCount:0,writes:[],signals:[],
+  write(text){this.writes.push(text);},signal(number){this.signals.push(number);},destroy(){this.destroyed=true;},
   line(message){state.handlePinRecoveryLine(this,this.attemptId,JSON.stringify(message));},
   exit(code){this.running=false;state.finishPinRecovery(this,this.attemptId,code);}};}};
  state.root=state;
@@ -46,7 +47,7 @@ function harness() {
   state.contexts.push(context);return context;
  }};
  const scope=vm.createContext(state);
- for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
+ for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','escalatePinRecoveryStop','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
  return state;
 }
 let s=harness();s.submitPassword('must-not-silently-discard');assert.equal(s.contexts.length,0);
@@ -90,12 +91,16 @@ assert.equal(s.lastRecoveryResult,'success');assert.equal(s.lockRequested,true);
 s.submitPassword('');c=s.passwordPam;c.prompt('PIN:');s.submitPassword('dummy-new');c.complete(0);assert.equal(s.unlocks,1);
 // Cancellation keeps process ownership until actual exit, blocking overlapping auth/reset.
 s=harness();s.beginPinRecovery();recovery=s.pinRecovery;recovery.line({type:'prompt',visible:false,text:'New PIN:'});s.enteredPassword='erase';s.cancelPasswordAttempt();
-assert.equal(s.enteredPassword,'');assert.equal(s.lastRecoveryResult,'cancelled');assert.equal(recovery.killed,9);
+assert.equal(s.enteredPassword,'');assert.equal(s.lastRecoveryResult,'cancelled');
+// Stop closes stdin first; SIGTERM then SIGKILL only while the helper keeps running.
+assert.equal(recovery.stdinEnabled,false);assert.deepEqual(recovery.signals,[]);assert.equal(s.pinRecoveryStopTimer.running,true);
+s.escalatePinRecoveryStop();s.cancelPasswordAttempt();s.escalatePinRecoveryStop();assert.deepEqual(recovery.signals,[15,9]);
 s.submitPassword('');s.beginPinRecovery();assert.equal(s.passwordPam,null);assert.equal(s.pinRecovery,recovery);
-recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.lastRecoveryResult,'cancelled');assert.equal(s.unlocks,0);
+recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.lastRecoveryResult,'cancelled');assert.equal(s.unlocks,0);assert.equal(s.pinRecoveryStopTimer.running,false);
+s.escalatePinRecoveryStop();assert.deepEqual(recovery.signals,[15,9]);
 s.submitPassword('');c=s.passwordPam;recovery.exit(0);assert.equal(s.passwordPam,c);assert.equal(s.unlocks,0);
 // Invalid helper protocol fails closed; old callbacks cannot modify a new operation.
-s=harness();s.beginPinRecovery();recovery=s.pinRecovery;s.handlePinRecoveryLine(recovery,recovery.attemptId,'bad-json');assert.equal(recovery.killed,9);assert.equal(s.lastRecoveryResult,'failed');recovery.exit(1);assert.equal(s.unlocks,0);
+s=harness();s.beginPinRecovery();recovery=s.pinRecovery;s.handlePinRecoveryLine(recovery,recovery.attemptId,'bad-json');assert.equal(recovery.stdinEnabled,false);assert.equal(s.lastRecoveryResult,'failed');recovery.exit(1);assert.equal(s.unlocks,0);
 
 assert.ok(view.includes('textFormat: Text.PlainText'));
 assert.ok(view.includes('root.responseVisible ? TextInput.Normal : TextInput.Password'));

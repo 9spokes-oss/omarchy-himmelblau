@@ -61,6 +61,7 @@ Item {
   property bool recoveringPIN: false
   property int recoveryAttempt: 0
   property string lastRecoveryResult: "none"
+  property int pinRecoverySignal: 15
   property string failureMessage: ""
   property int failedAttempts: 0
   property string backgroundPath: ""
@@ -550,20 +551,35 @@ Item {
 
   function stopPinRecovery(result) {
     var context = pinRecovery
-    if (!context) return
-    // Invalidate before killing, and retain the process until it has exited.
+    // A second stop (Esc again) must not restart the escalation.
+    if (!context || !recoveringPIN) return
+    // Invalidate before stopping, and retain the process until it has exited.
     recoveringPIN = false
     recoveryAttempt += 1
     lastRecoveryResult = result
     clearPasswordPrompt()
     passwordNotices = ["PIN change stopped; it may already have completed. Sign in to check."]
     passwordMessageIsError = result === "failed"
-    if (context.running) context.signal(9)
-    else finishPinRecovery(context, context.attemptId, 1)
+    if (!context.running) {
+      finishPinRecovery(context, context.attemptId, 1)
+      return
+    }
+    // End of input makes the helper's PAM conversation fail and clean up; signals only if it hangs.
+    context.stdinEnabled = false
+    pinRecoverySignal = 15
+    pinRecoveryStopTimer.restart()
+  }
+
+  function escalatePinRecoveryStop() {
+    if (!pinRecovery || !pinRecovery.running) return
+    pinRecovery.signal(pinRecoverySignal)
+    pinRecoverySignal = 9
+    pinRecoveryStopTimer.restart()
   }
 
   function finishPinRecovery(context, attempt, exitCode) {
     if (context !== pinRecovery) return
+    pinRecoveryStopTimer.stop()
     if (currentPinRecovery(context, attempt)) {
       lastRecoveryResult = exitCode === 0 && context.reportedSuccess ? "success" : "failed"
       passwordNotices = [lastRecoveryResult === "success" ? "PIN updated; sign in with the new PIN." : "PIN change failed; sign in to check or retry recovery."]
@@ -775,6 +791,12 @@ Item {
       onCompleted: function(result) { root.completePasswordAttempt(conversation, attemptId, result) }
       onError: function(error) { root.handlePasswordFailure(conversation, attemptId) }
     }
+  }
+
+  Timer {
+    id: pinRecoveryStopTimer
+    interval: 2000
+    onTriggered: root.escalatePinRecoveryStop()
   }
 
   Component {
