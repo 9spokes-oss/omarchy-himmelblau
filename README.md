@@ -8,6 +8,8 @@ A manual proof of concept on a QEMU/KVM guest tested Omarchy `4.5.0-3`, Himmelbl
 
 The `0.1.0-3` package has been built and installed in that guest. System setup and checks passed; the packaged greeter accepted a local recovery login, and the stock locker accepted the local password. A work user signed in and the native lock clone was created and verified as the enabled third-party clone. After a fresh login, the user confirmed that authenticated sudo and PIN unlock both worked. An independent check observed the work Wayland session, an unlocked Quickshell state, the clone's enabled provenance, and passing user and root status checks. The source checks and CI passed 23 Python tests and the JavaScript regression.
 
+Version `0.2.0-1` adds interactive lock-screen PAM conversations and an unprivileged PIN-change helper. It was built and installed in the same guest without ending the graphical session or its existing terminal. Thirty Python tests and the conversation regression passed independently. Real on-screen authentication and PIN-change cancellation both left the desktop securely locked; a real-libpam abort at the first PIN prompt also passed. The user completed the prompted PIN-recovery flow, confirmed that it stayed locked after reporting success, and then unlocked the same desktop with the new PIN. Independent metadata checks observed recovery success while securely locked, followed by successful unlock, with the original session, compositor and terminal process IDs and start times unchanged. Normal idle locking was restored. This validates the exercised account/tenant flow, not every possible MFA method or policy.
+
 The integration package itself does not join a device or configure authentication on installation. Installing its Himmelblau dependency can change local authentication configuration, as described below. Setup, login and optional user-level activation are separate actions. The first successful Himmelblau authentication can create an Entra device object. Review tenant device-registration permissions and Conditional Access before testing, and record the object for later lifecycle management.
 
 ## Prerequisites
@@ -25,7 +27,7 @@ Himmelblau's main configuration is read by its daemon and PAM module; do not sto
 Build the package as an unprivileged user from a checkout with the required Arch packaging tools installed:
 
 ```sh
-OMARCHY_HIMMELBLAU_SRC="$PWD" makepkg -p packaging/PKGBUILD
+(cd packaging && makepkg)
 ```
 
 Review the resulting package and dependency transaction before installing it with `pacman`. Installing or upgrading the separate Himmelblau dependency can run its own hooks.
@@ -50,7 +52,7 @@ sudo systemctl enable --now himmelblaud himmelblaud-tasks
 
 If the services were already active when their configuration changed, apply it with `sudo systemctl restart himmelblaud himmelblaud-tasks`. Starting or restarting services does not itself authenticate a user. Confirm their status and effective configuration before an interactive login.
 
-`--admin` is an explicit opt-in for authenticated administrative access and requires the target identity to resolve through NSS at setup time. Review the proposed sudo policy and its scope before using it. Run `sudo omarchy-himmelblau doctor` or `sudo omarchy-himmelblau status` to inspect root-managed state and effective configuration. The unprivileged forms check the current user's clone, hook and readable source files; they cannot inspect root-only configuration. Use `omarchy-himmelblau enable-user` as the target desktop user to activate the user-scoped lock clone. Run it while the session is unlocked; log out and back in before testing the clone. `repair` and `rollback` are privileged operations. Consult the command help and review the effective configuration before applying changes.
+`--admin` is an explicit opt-in for authenticated administrative access and requires the target identity to resolve through NSS at setup time. Review the proposed sudo policy and its scope before using it. Run `sudo omarchy-himmelblau doctor` or `sudo omarchy-himmelblau status` to inspect root-managed state and effective configuration. The unprivileged forms check the current user's clone, hook and readable source files; they cannot inspect root-only configuration. Use `omarchy-himmelblau enable-user` as the target desktop user to activate the user-scoped lock clone. Run it while the session is unlocked, then use `omarchy-restart-shell` while still unlocked to load the new code. This restarts the shell without intentionally ending Hyprland or its applications. `repair` and `rollback` are privileged operations. Consult the command help and review the effective configuration before applying changes.
 
 Setup and checks refuse unreviewed Himmelblau configuration drop-ins and conflicting managed settings; inspect them manually before proceeding. If user activation stops partway through, the native clone may already be enabled. Keep the session unlocked and inspect and disable the clone before retrying.
 
@@ -58,13 +60,33 @@ Native clone IDs under `omarchy.*` are reserved for built-in plugins. Usernames 
 
 Package removal alone does not undo setup. Before root rollback and package uninstall, disable the clone through Omarchy **and exit every session using it**: `keepLoaded` code survives disabling, and removing its dedicated PAM service while it is running can strand the next lock. Run root rollback from an independent recovery console or SSH session before starting another clone session. Root rollback covers root-managed integration changes; the user-scoped clone and hook are separate. Review those user-owned files before removing them. Rollback does not remove Himmelblau, reverse its package hooks, delete an Entra or Intune device, or restore an entire system snapshot. Confirm any external device cleanup separately.
 
+## Lock-screen authentication and PIN recovery
+
+Press Enter to start sign-in, then answer the displayed PAM prompt. Each prompt gets a fresh response; secret prompts are masked, and informational messages such as Authenticator instructions remain visible. Escape cancels the current attempt and leaves the desktop locked. Only successful authentication unlocks it.
+
+PIN recovery uses Himmelblau's password-change operation through a small native helper. It runs as the current user, with a fixed PAM service and no alternate-user argument. It is not setuid and does not need sudo. The dedicated service contains only `password required pam_himmelblau.so`.
+
+Choose **Reset work PIN** to follow the prompts. Himmelblau 4.0.8 requests the replacement PIN and confirmation before its cloud authentication/MFA flow. A successful operation replaces that user's Hello credential and clears associated cached credentials; it does not unlock the screen. Sign in separately using the new PIN. Cancelling cannot undo a change the daemon has already committed; if cancellation occurs near completion, the new PIN may already be in effect.
+
+This provides a PAM conversation interface, not an embedded browser or support guarantee for every tenant policy and authentication method. Complete any external browser/phone steps on the appropriate device. Do not intentionally exhaust incorrect-PIN retries or clear global credentials to test recovery.
+
+To upgrade an unchanged managed `0.1.0` clone, install the new package, keep the desktop unlocked with an independent recovery console, and run:
+
+```sh
+sudo omarchy-himmelblau repair
+omarchy-himmelblau enable-user --upgrade
+omarchy-restart-shell
+```
+
+The upgrade checks the entire clone and upstream snapshot, stages the replacement outside the watched plugin directory, and exchanges complete directories atomically. Unknown changes are refused. Avoid idle locking or suspend throughout activation; verify the shell is ready before locking. See [maintenance and validation](docs/maintenance.md).
+
 ## Security and maintenance
 
-Quickshell's lock PAM interface performs authentication without the PAM account phase. Himmelblau's account-phase allowlist therefore cannot be assumed to run at screen unlock. A lock session belongs to the already logged-in user; test both local recovery and work PIN unlock after changes. Initial enrollment and multi-step MFA belong in a suitable interactive login flow, not an assumed single-secret lock prompt.
+Quickshell's lock PAM interface performs authentication without the PAM account phase. Himmelblau's account-phase allowlist therefore cannot be assumed to run at screen unlock. A lock session belongs to the already logged-in user; test both local recovery and work PIN unlock after changes. Lock-screen recovery does not add multi-step conversation support to the separate SDDM login theme.
 
 The integration derives its dedicated `/etc/pam.d/omarchy-himmelblau-lock-password` service from a supported stock lock PAM configuration. It leaves `/etc/pam.d/omarchy-lock-password` untouched; the guarded user clone uses the dedicated service. An existing modified stock service is refused for manual review. Checks verify both the stock source and the integration's managed files; repair refuses unrecognized drift.
 
-The Omarchy lock clone is user-owned and does not automatically inherit upstream lock-screen fixes. Review it after updates, including changes to the stock PAM source. During activation, keep the session unlocked, retain an independent recovery route, and log out and back in before relying on the clone: `keepLoaded` means the running locker may still use the previous code. Avoid idle locking or suspend during that transition. Status checks do not prove which code is running. See [maintenance and validation](docs/maintenance.md).
+The Omarchy lock clone is user-owned and does not automatically inherit upstream lock-screen fixes. Review it after updates, including changes to the stock PAM source. During activation, keep the session unlocked and retain an independent recovery route. `keepLoaded` means a plugin rescan alone does not load the replacement; use the supported shell restart while unlocked, or log out and back in. Status checks do not prove which code is running. See [maintenance and validation](docs/maintenance.md).
 
 An optional menu example is installed at `/usr/share/doc/omarchy-himmelblau/menu-extension.jsonc`. Add its entries to the existing user-owned menu JSONC object only after reviewing it; the installer does not modify that file.
 

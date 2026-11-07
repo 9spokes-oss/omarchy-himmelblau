@@ -25,6 +25,7 @@ class CompanionTest(unittest.TestCase):
         for name, path in {
             'STATE': 'state/state.json', 'STOCK_PAM': 'etc/pam.d/omarchy-lock-password',
             'PAM': 'etc/pam.d/omarchy-himmelblau-lock-password',
+            'PIN_PAM': 'etc/pam.d/omarchy-himmelblau-pin-change',
             'LOCK': 'usr/share/omarchy/shell/plugins/lock/Service.qml',
             'CONFIG': 'etc/himmelblau/himmelblau.conf', 'THEME': 'themes/omarchy',
             'COPY_THEME': 'themes/omarchy-himmelblau', 'OVERRIDE': 'etc/sddm.conf.d/99-z-himmelblau.conf',
@@ -43,7 +44,7 @@ class CompanionTest(unittest.TestCase):
         self.output = patch('sys.stdout', new_callable=io.StringIO)
         self.output.start(); self.addCleanup(self.output.stop)
         m.THEME.mkdir(parents=True)
-        for path, fixture in [(m.STOCK_PAM, 'omarchy-lock-password'), (m.LOCK, 'Service.qml'),
+        for path, fixture in [(m.STOCK_PAM, 'omarchy-lock-password'), (m.LOCK, 'Service.qml'), (m.LOCK.parent / 'LockView.qml', 'LockView.qml'),
                               (m.THEME / 'Main.qml', 'Main.qml')]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((ROOT / 'tests/fixtures' / fixture).read_bytes())
@@ -65,7 +66,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.LOCK.read_bytes(), self.before[m.LOCK])  # packaged QML untouched
         self.assertEqual(m.STOCK_PAM.read_bytes(), self.before[m.STOCK_PAM])
         self.assertIn(b'pam_himmelblau.so', m.PAM.read_bytes())
-        self.assertIn(b'config: \"omarchy-himmelblau-lock-password\"', m.patch_source('lock-single-response', self.before[m.LOCK]))
+        self.assertIn(b'config: \"omarchy-himmelblau-lock-password\"', m.patch_source('lock-conversation', self.before[m.LOCK]))
         self.assertIn(b'Username / UPN', (m.COPY_THEME / 'Main.qml').read_bytes())
         self.assertNotIn(b'local recovery:', (m.COPY_THEME / 'Main.qml').read_bytes())
         self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
@@ -194,6 +195,7 @@ class CompanionTest(unittest.TestCase):
                     'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
             if argv[:3] == ['omarchy', 'plugin', 'clone']:
                 clone.mkdir(parents=True)
+                shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
                 shutil.copy2(m.LOCK, clone / 'Service.qml')  # manifest.json directory branch copies exactly
                 return SimpleNamespace(returncode=0)
             return run(argv, **kw)
@@ -201,7 +203,7 @@ class CompanionTest(unittest.TestCase):
             m.enable_user(); m.user_status(); m.enable_user()
         self.assertEqual(sum(cmd[:3] == ['omarchy', 'plugin', 'clone'] for cmd in commands), 1)
         self.assertIn(['omarchy', 'plugin', 'list', '--json'], commands)
-        self.assertEqual((clone / 'Service.qml').read_bytes(), m.patch_source('lock-single-response', self.before[m.LOCK]))
+        self.assertEqual((clone / 'Service.qml').read_bytes(), m.patch_source('lock-conversation', self.before[m.LOCK]))
         self.assertIn('omarchy-himmelblau status', hook.read_text())
         self.assertNotIn('sudo ', hook.read_text().split('printf')[0])
         self.assertNotIn('systemctl', hook.read_text())
@@ -421,6 +423,73 @@ class CompanionTest(unittest.TestCase):
                 self.assertEqual(json.loads(statefile.read_text())['phase'], 'preparing')
                 self.assertEqual((clone / 'Service.qml').read_bytes(), m.LOCK.read_bytes())
                 self.assertFalse(hook.exists())
+
+    def legacy_clone(self):
+        clone = self.base / 'home/plugins/alice.lock'; clone.mkdir(parents=True)
+        shutil.copy2(m.LOCK, clone / 'Service.qml');shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
+        subprocess.run(['patch','--batch','--fuzz=0','-p1','-d',str(clone)],
+            input=(ROOT/'tests/fixtures/lock-0.1.0.patch').read_bytes(),check=True,capture_output=True)
+        hook = self.base / 'home/hooks/check';m.atomic(hook,b'#!/bin/sh\ntrue\n',0o755)
+        statefile = self.base / 'home/state/state.json'
+        upstream=m.clone_hashes(m.LOCK.parent);upstream['Service.qml']=m.digest((clone/'Service.qml').read_bytes())
+        state={'phase':'ready','version':'0.1.0','clone_hash':upstream['Service.qml'],
+            'clone_files':m.clone_hashes(clone),'upstream_files':upstream,'hook_hash':m.digest(hook.read_bytes())}
+        m.atomic(statefile,json.dumps(state).encode(),0o600)
+        return clone,statefile,hook
+
+    def test_atomic_legacy_clone_upgrade_and_state_failure_restore(self):
+        self.setup();clone,statefile,hook=self.legacy_clone()
+        old_service=(clone/'Service.qml').read_bytes();old_view=(clone/'LockView.qml').read_bytes();old_state=statefile.read_bytes()
+        atomic=m.atomic;failed=False
+        def fail_once(path,data,mode):
+            nonlocal failed
+            if path==statefile and not failed:
+                failed=True;raise OSError('synthetic state failure')
+            return atomic(path,data,mode)
+        with patch.object(m,'unlocked'),patch.object(m,'verify_native_clone'),patch.object(m,'atomic',fail_once):
+            with self.assertRaises(OSError):m.upgrade_user('alice',clone,statefile,hook)
+        self.assertEqual((clone/'Service.qml').read_bytes(),old_service)
+        self.assertEqual((clone/'LockView.qml').read_bytes(),old_view)
+        self.assertEqual(statefile.read_bytes(),old_state)
+        with patch.object(m,'unlocked') as unlocked,patch.object(m,'verify_native_clone'):
+            m.upgrade_user('alice',clone,statefile,hook)
+            unlocked.assert_called_once()
+        self.assertEqual(json.loads(statefile.read_text())['version'],'0.2.0')
+        self.assertEqual((clone/'Service.qml').read_bytes(),m.patch_source('lock-conversation',m.LOCK.read_bytes()))
+        self.assertEqual((clone/'LockView.qml').read_bytes(),m.patch_source('lock-view',(m.LOCK.parent/'LockView.qml').read_bytes()))
+        self.assertEqual(clone.stat().st_uid,os.getuid())
+
+    def test_failed_exchange_rollback_retains_old_tree_and_state_backup(self):
+        self.setup();clone,statefile,hook=self.legacy_clone();old=statefile.read_bytes();old_service=(clone/'Service.qml').read_bytes()
+        exchange=m.exchange_directories;calls=0;atomic=m.atomic
+        def fail_rollback(left,right):
+            nonlocal calls
+            calls+=1
+            if calls==2:raise OSError('synthetic rollback failure')
+            return exchange(left,right)
+        def fail_state(path,data,mode):
+            if path==statefile:raise OSError('synthetic state failure')
+            return atomic(path,data,mode)
+        with patch.object(m,'unlocked'),patch.object(m,'verify_native_clone'),patch.object(m,'exchange_directories',fail_rollback),patch.object(m,'atomic',fail_state):
+            with self.assertRaisesRegex(m.Error,'backups retained'):m.upgrade_user('alice',clone,statefile,hook)
+        retained=list(clone.parent.parent.glob('.himmelblau-stage-*'));self.assertEqual(len(retained),1)
+        self.assertEqual((retained[0]/'clone/Service.qml').read_bytes(),old_service)
+        self.assertEqual((retained[0]/'previous-state.json').read_bytes(),old)
+
+    def test_unknown_legacy_clone_and_root_pam_drift_refuse_upgrade(self):
+        self.setup();clone,statefile,hook=self.legacy_clone();old=statefile.read_bytes()
+        (clone/'Service.qml').write_bytes((clone/'Service.qml').read_bytes()+b'// operator edit\n')
+        with self.assertRaises(m.Error):m.upgrade_user('alice',clone,statefile,hook)
+        self.assertEqual(statefile.read_bytes(),old)
+        m.PAM.write_bytes(b'unknown')
+        with self.assertRaisesRegex(m.Error,'authentication PAM'):m.upgrade_user('alice',clone,statefile,hook)
+
+    def test_repair_view_preflight_precedes_new_pin_service_and_state_write(self):
+        self.setup();state=json.loads(m.STATE.read_text());state['files']=[entry for entry in state['files'] if Path(entry['path'])!=m.PIN_PAM]
+        m.save_state(state);m.PIN_PAM.unlink();before=m.STATE.read_bytes()
+        view=m.LOCK.parent/'LockView.qml';view.write_bytes(view.read_bytes()+b'// unknown\n')
+        with self.assertRaises(m.Error):m.repair()
+        self.assertEqual(m.STATE.read_bytes(),before);self.assertFalse(m.PIN_PAM.exists())
 
     def test_identity_validation(self):
         self.assertEqual(m.identity('EXAMPLE.COM', 'Alice@EXAMPLE.COM'), ('example.com', 'alice@example.com'))

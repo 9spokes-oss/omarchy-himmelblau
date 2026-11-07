@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 DEVELOPMENT_ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 ASSETS = DEVELOPMENT_ASSETS if DEVELOPMENT_ASSETS.is_dir() else Path('/usr/share/omarchy-himmelblau')
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -27,6 +27,8 @@ THEME = Path('/usr/share/sddm/themes/omarchy')
 COPY_THEME = Path('/usr/share/sddm/themes/omarchy-himmelblau')
 OVERRIDE = Path('/etc/sddm.conf.d/99-z-himmelblau.conf')
 SUDOERS = Path('/etc/sudoers.d/90-himmelblau-user')
+PIN_PAM = Path('/etc/pam.d/omarchy-himmelblau-pin-change')
+PIN_PAM_CONTENT = b'# Dedicated current-user PIN replacement; no session unlock.\npassword required pam_himmelblau.so\n'
 LOCAL_PASSWD = Path('/etc/passwd')
 CONFIG_LAYERS = (Path('/usr/lib/himmelblau/himmelblau.conf'), Path('/run/himmelblau/himmelblau.conf'))
 SERVER_CONFIG = Path('/var/cache/himmelblaud/himmelblau.conf')
@@ -312,11 +314,15 @@ def setup(domain, user, admin=False):
     if read(PAM) is not None:
         raise Error('Dedicated PAM service exists without managed state; review manually')
     add(PAM, patch_source('lock-pam', original_pam))
+    if read(PIN_PAM) is not None:
+        raise Error('PIN replacement PAM service exists without managed state')
+    add(PIN_PAM, PIN_PAM_CONTENT)
     # Validate source, but never write Omarchy's packaged lock QML.
     lock = read(LOCK)
     if lock is None:
         raise Error('Missing Omarchy lock source')
-    patch_source('lock-single-response', lock)
+    patch_source('lock-conversation', lock)
+    patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     add(CONFIG, managed_config(read(CONFIG), domain, user), 0o644)
     if COPY_THEME.exists() or COPY_THEME.is_symlink():
         raise Error('Companion SDDM theme already exists without managed state')
@@ -402,11 +408,13 @@ def root_issues(state):
                 issues.append(f'Companion theme directory must be 0755: {directory}')
     except Error as error:
         issues.append(str(error))
+    if read(PIN_PAM) != PIN_PAM_CONTENT:
+        issues.append('PIN replacement PAM service missing/drifted; explicit repair required')
     pam = read(PAM)
     expected_pam = json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']['after']
     if pam is None or digest(pam) != expected_pam:
         issues.append(f'Lock PAM drift: {PAM}')
-    for name, path in [('lock-single-response', LOCK)]:
+    for name, path in [('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         try:
             data = read(path)
             if data is None:
@@ -430,6 +438,12 @@ def repair():
     configuration_scope(state['domain'], state['user'])
     require_complete_configuration(state['domain'], state['user'])
     desired_pam = patch_source('lock-pam', stock_pam())
+    pin_entry = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
+    if pin_entry is None:
+        if read(PIN_PAM) is not None:
+            raise Error('Unmanaged PIN replacement service conflicts with upgrade')
+        entry = planned(PIN_PAM, PIN_PAM_CONTENT, 0o644)
+        state['files'].append({k: v for k, v in entry.items() if k != 'data'})
     repairs = []
     # Preflight every managed file before reapplying any regenerated PAM file.
     for entry in state['files']:
@@ -439,6 +453,9 @@ def repair():
             if stat.S_IMODE(path.stat().st_mode) != entry['mode'] or path.stat().st_uid != os.geteuid():
                 raise Error(f'Repair refuses permission drift: {path}')
             continue
+        if path == PIN_PAM and data is None:
+            repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
+            continue
         if path == PAM and (data is None or digest(data) == json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']['before']):
             if digest(desired_pam) == entry['after']:
                 repairs.append((path, desired_pam, entry['mode']))
@@ -447,8 +464,12 @@ def repair():
     source = read(LOCK)
     if source is None:
         raise Error('Missing lock source')
-    patch_source('lock-single-response', source)
+    patch_source('lock-conversation', source)
+    patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
+    # Save backup metadata before creating the new dedicated PIN service.
+    if pin_entry is None:
+        save_state(state)
     for directory in directories:
         if stat.S_IMODE(directory.stat().st_mode) != 0o755:
             directory.chmod(0o755)
@@ -548,7 +569,8 @@ def upstream_hashes():
     if source is None:
         raise Error('Missing upstream lock service')
     # Known before/after QML have identical intended behavior once patched.
-    files['Service.qml'] = digest(patch_source('lock-single-response', source))
+    files['Service.qml'] = digest(patch_source('lock-conversation', source))
+    files['LockView.qml'] = digest(patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b''))
     return files
 
 
@@ -569,7 +591,9 @@ def user_status():
         if actual is None or digest(actual) != expected:
             raise Error(f'User managed drift: {path}')
     stock_pam()
-    for name, path in [('lock-pam', PAM), ('lock-single-response', LOCK)]:
+    if read(PIN_PAM) != PIN_PAM_CONTENT:
+        raise Error('PIN replacement service missing/drifted; explicit root repair required')
+    for name, path in [('lock-pam', PAM), ('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         actual = read(path)
         info = json.loads((ASSETS / 'manifest.json').read_text())[name]
         if name == 'lock-pam':
@@ -596,10 +620,103 @@ def verify_native_clone(user):
         raise Error('Native discovery did not confirm the enabled third-party clone and its provenance')
 
 
-def enable_user():
+def exchange_directories(left, right):
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(libc, 'renameat2', None)
+    if rename is None:
+        raise Error('Atomic directory exchange unavailable; refusing unsafe clone update')
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(left), -100, os.fsencode(right), 2):
+        raise Error('Atomic directory exchange failed; clone not replaced')
+
+
+def replace_clone(clone, statefile, state, files, hook, hook_data=None):
+    # Stage outside the watched plugins tree, on the same filesystem.
+    old_state = read(statefile)
+    old_hook = read(hook)
+    old_hashes = clone_hashes(clone)
+    safe(clone.parent.parent / '.guard')
+    work = Path(tempfile.mkdtemp(prefix='.himmelblau-stage-', dir=clone.parent.parent))
+    cleanup = True
+    try:
+        candidate = work / 'clone'
+        shutil.copytree(clone, candidate)
+        if old_state is not None:
+            atomic(work / 'previous-state.json', old_state, 0o600)
+        if old_hook is not None:
+            atomic(work / 'previous-hook', old_hook, 0o600)
+        for name, data in files.items():
+            atomic(candidate / name, data, 0o644)
+        state['clone_files'] = clone_hashes(candidate)
+        if clone_hashes(clone) != old_hashes:
+            raise Error('Clone changed during staging; refusing update')
+        unlocked()
+        exchange_directories(clone, candidate)
+        try:
+            if hook_data is not None:
+                atomic(hook, hook_data, 0o755)
+            atomic(statefile, (json.dumps(state, indent=2) + '\n').encode(), 0o600)
+        except Exception:
+            try:
+                exchange_directories(clone, candidate)
+            except Exception:
+                cleanup = False
+                raise Error(f'Clone rollback exchange failed; old clone and state backups retained at {work}. Keep unlocked and recover manually.') from None
+            if old_hook is None:
+                safe(hook).unlink(missing_ok=True)
+            else:
+                atomic(hook, old_hook, 0o755)
+            if old_state is not None:
+                atomic(statefile, old_state, 0o600)
+            raise
+    finally:
+        if cleanup:
+            shutil.rmtree(work)
+
+
+def upgrade_user(user, clone, statefile, hook):
+    stock_pam()
+    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    if digest(read(PAM) or b'') != manifest['lock-pam']['after']:
+        raise Error('Dedicated authentication PAM service drift; upgrade refused')
+    state = json.loads(read(statefile))
+    if state.get('phase') != 'ready' or state.get('version') != '0.1.0':
+        raise Error('Only an unchanged managed 0.1.0 clone can use this upgrade path')
+    if clone_hashes(clone) != state['clone_files'] or digest(read(hook) or b'') != state['hook_hash']:
+        raise Error('Managed clone/hook drift; upgrade refused')
+    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    service = read(clone / 'Service.qml')
+    view = read(clone / 'LockView.qml')
+    if digest(service or b'') != manifest['lock-conversation']['legacy_after'] or digest(view or b'') != manifest['lock-view']['before']:
+        raise Error('Unsupported legacy clone sources')
+    current = upstream_hashes()
+    recorded = dict(state['upstream_files'])
+    if recorded.get('Service.qml') != manifest['lock-conversation']['legacy_after'] or recorded.get('LockView.qml') != manifest['lock-view']['before']:
+        raise Error('Unsupported legacy upstream snapshot')
+    recorded['Service.qml'] = current['Service.qml']
+    recorded['LockView.qml'] = current['LockView.qml']
+    if recorded != current:
+        raise Error('Upstream lock plugin drift; upgrade refused')
+    if read(PIN_PAM) != PIN_PAM_CONTENT:
+        raise Error('Run sudo omarchy-himmelblau repair before user upgrade')
+    verify_native_clone(user)
+    source = read(LOCK)
+    patched = {'Service.qml': patch_source('lock-conversation', source),
+               'LockView.qml': patch_source('lock-view', read(LOCK.parent / 'LockView.qml'))}
+    state.update(version=VERSION, upstream_files=current, clone_hash=digest(patched['Service.qml']))
+    replace_clone(clone, statefile, state, patched, hook)
+    print('Managed clone upgraded atomically. Restart the shell only while unlocked; existing applications need not end.')
+
+
+def enable_user(upgrade=False):
     user, clone, statefile, hook = user_paths()
     unlocked()
     if read(statefile) is not None:
+        if upgrade:
+            upgrade_user(user, clone, statefile, hook)
+            return
         user_status()
         print('Existing managed clone unchanged; no reload performed')
         return
@@ -616,7 +733,10 @@ def enable_user():
     source = read(LOCK)
     if source is None:
         raise Error('Missing original lock source')
-    expected = patch_source('lock-single-response', source)
+    expected = patch_source('lock-conversation', source)
+    expected_view = patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
+    if read(PIN_PAM) != PIN_PAM_CONTENT:
+        raise Error('Run explicit root repair to create the PIN replacement service')
     original_tree = upstream_hashes()
     # Omarchy performs the complete native clone, including internal import rewriting.
     # It auto-enables the clone; keepLoaded code requires logout/login to adopt the patch.
@@ -627,14 +747,15 @@ def enable_user():
         actual = read(clone / 'Service.qml')
         if actual != source:
             raise Error('Native clone source differs; inspect manually before using the locker')
-        atomic(clone / 'Service.qml', expected, 0o644)
+        if read(clone / 'LockView.qml') != read(LOCK.parent / 'LockView.qml'):
+            raise Error('Native clone view differs from supported source')
         hook_data = ("#!/bin/sh\n# Read-only post-update check. Never repairs or reloads a locker.\n"
                      "if ! omarchy-himmelblau status; then\n"
                      "  printf '%s\\n' 'Review drift; root repair requires explicit sudo omarchy-himmelblau repair.' >&2\n"
                      "fi\n").encode()
-        atomic(hook, hook_data, 0o755)
-        atomic(statefile, (json.dumps({'phase': 'ready', 'version': VERSION, 'clone_hash': digest(expected),
-                                     'hook_hash': digest(hook_data), 'clone_files': clone_hashes(clone), 'upstream_files': original_tree}, indent=2) + '\n').encode(), 0o600)
+        new_state = {'phase': 'ready', 'version': VERSION, 'clone_hash': digest(expected),
+                     'hook_hash': digest(hook_data), 'upstream_files': original_tree}
+        replace_clone(clone, statefile, new_state, {'Service.qml': expected, 'LockView.qml': expected_view}, hook, hook_data)
     except Exception as error:
         detail = f' {error}.' if isinstance(error, Error) else ''
         raise Error('Native clone preparation incomplete.' + detail + ' It may be enabled. Do not lock. Disable the native clone and inspect user state before retrying.') from None
@@ -651,11 +772,13 @@ def main(argv=None):
     setup_parser.add_argument('--domain', required=True)
     setup_parser.add_argument('--user', required=True)
     setup_parser.add_argument('--admin', action='store_true', help='Opt in the resolved NSS UID to authenticated sudo')
-    for command in ('doctor', 'status', 'repair', 'rollback', 'enable-user'):
+    for command in ('doctor', 'status', 'repair', 'rollback'):
         sub.add_parser(command)
+    user_parser = sub.add_parser('enable-user')
+    user_parser.add_argument('--upgrade', action='store_true', help='Upgrade an unchanged managed 0.1.0 clone atomically')
     args = parser.parse_args(argv)
     if args.command == 'enable-user':
-        enable_user()
+        enable_user(args.upgrade)
     elif args.command in ('doctor', 'status'):
         doctor() if os.geteuid() == 0 else user_status()
     else:

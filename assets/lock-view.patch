@@ -1,0 +1,193 @@
+--- a/LockView.qml
++++ b/LockView.qml
+@@ -13,6 +13,11 @@
+   property bool fingerprintConfigured: false
+   property bool fingerprintUnavailable: false
+   property bool authenticatingPassword: false
++  property bool awaitingResponse: false
++  property bool responseVisible: false
++  property string conversationMessage: ""
++  property string promptMessage: ""
++  property bool conversationError: false
+   property string failureMessage: ""
+   property int failedAttempts: 0
+   property bool inputEnabled: true
+@@ -20,7 +25,7 @@
+   property string passwordText: ""
+   property bool syncingPasswordText: false
+ 
+-  readonly property string placeholderText: Commons.I18n.t("lock.enterPassword")
++  readonly property string placeholderText: authenticatingPassword ? (awaitingResponse ? "Enter response" : "Waiting…") : "Press Enter to sign in"
+   readonly property int fieldWidth: 381
+   readonly property int fieldHeight: 67
+   readonly property int outlineThickness: 3
+@@ -35,7 +40,7 @@
+   readonly property real passwordDotScale: dotMetrics.advanceWidth > 0
+     ? Math.min(1, (passwordInput.width - 4) / dotMetrics.advanceWidth)
+     : 1
+-  readonly property bool showPasswordCursor: inputEnabled && !authenticatingPassword && failureMessage.length === 0
++  readonly property bool showPasswordCursor: inputEnabled && awaitingResponse && failureMessage.length === 0
+   readonly property bool errorState: failureMessage.length > 0
+   readonly property var inputBorderSpec: errorState
+     ? Border.surfaceSpec("lock", "border-error", Commons.Color.lock.borderError, root.outlineThickness, "border-alpha")
+@@ -47,6 +52,8 @@
+   signal submitPassword(string password)
+   signal passwordTextEdited(string password)
+   signal clearFailureRequested()
++  signal cancelRequested()
++  signal recoveryRequested()
+   signal wakeRequested()
+ 
+   function forcePasswordFocus() {
+@@ -79,6 +86,7 @@
+   }
+ 
+   onPasswordTextChanged: syncPasswordText()
++  onAwaitingResponseChanged: Qt.callLater(forcePasswordFocus)
+   onInputEnabledChanged: {
+     if (inputEnabled) Qt.callLater(forcePasswordFocus)
+   }
+@@ -162,17 +170,17 @@
+         horizontalAlignment: TextInput.AlignHCenter
+         activeFocusOnPress: true
+         clip: true
+-        enabled: root.inputEnabled && !root.authenticatingPassword
+-        readOnly: root.authenticatingPassword
+-        echoMode: TextInput.Password
++        enabled: root.inputEnabled
++        readOnly: !root.awaitingResponse
++        echoMode: root.responseVisible ? TextInput.Normal : TextInput.Password
+         passwordCharacter: "\u25CF"
+         passwordMaskDelay: 0
+         color: Commons.Color.lock.text
+         selectionColor: Commons.Color.lock.selection
+         selectedTextColor: Commons.Color.lock.text
+         font.family: Style.font.family
+-        font.pixelSize: text.length > 0 ? Math.max(1, Math.floor(root.passwordDotFontSize * root.passwordDotScale)) : root.fieldFontSize
+-        font.letterSpacing: text.length > 0 ? root.passwordDotLetterSpacing * root.passwordDotScale : 0
++        font.pixelSize: text.length > 0 && !root.responseVisible ? Math.max(1, Math.floor(root.passwordDotFontSize * root.passwordDotScale)) : root.fieldFontSize
++        font.letterSpacing: text.length > 0 && !root.responseVisible ? root.passwordDotLetterSpacing * root.passwordDotScale : 0
+         cursorVisible: activeFocus && root.showPasswordCursor && text.length > 0
+         cursorDelegate: Rectangle {
+           width: 2
+@@ -191,7 +199,7 @@
+         onAccepted: {
+           var submitted = root.passwordText
+           root.passwordTextEdited("")
+-          if (submitted.length > 0) root.submitPassword(submitted)
++          root.submitPassword(submitted)
+         }
+ 
+         Keys.onPressed: function(event) {
+@@ -200,7 +208,15 @@
+             event.accepted = true
+             return
+           }
+-          if (event.key === Qt.Key_Escape || (event.modifiers & Qt.ControlModifier && event.key === Qt.Key_U)) {
++          if (event.modifiers & Qt.ControlModifier && event.key === Qt.Key_R) {
++            root.passwordTextEdited("")
++            root.recoveryRequested()
++            event.accepted = true
++          } else if (event.key === Qt.Key_Escape) {
++            root.passwordTextEdited("")
++            root.cancelRequested()
++            event.accepted = true
++          } else if (event.modifiers & Qt.ControlModifier && event.key === Qt.Key_U) {
+             root.passwordTextEdited("")
+             event.accepted = true
+           }
+@@ -210,7 +226,7 @@
+       Text {
+         textFormat: Text.PlainText
+         anchors.fill: passwordInput
+-        text: root.authenticatingPassword ? Commons.I18n.t("lock.checking") : (root.failureMessage.length > 0 ? root.failureMessage : root.placeholderText)
++        text: root.failureMessage.length > 0 ? root.failureMessage : root.placeholderText
+         visible: passwordInput.text.length === 0
+         color: root.authenticatingPassword ? Commons.Color.lock.text : (root.failureMessage.length > 0 ? Commons.Color.lock.textError : Commons.Color.lock.placeholder)
+         font.family: Style.font.family
+@@ -243,6 +259,76 @@
+       }
+     }
+ 
++    Flickable {
++      id: promptPanel
++      anchors.bottom: inputField.top
++      anchors.bottomMargin: 20
++      anchors.horizontalCenter: inputField.horizontalCenter
++      width: Math.min(root.width - 48, 720)
++      height: Math.min(promptText.implicitHeight, root.height * 0.25)
++      contentHeight: promptText.height
++      clip: true
++      Text {
++        id: promptText
++        width: parent.width
++        text: root.promptMessage
++        textFormat: Text.PlainText
++        wrapMode: Text.Wrap
++        color: Commons.Color.lock.text
++        font.family: Style.font.family
++        font.pixelSize: root.fieldFontSize
++        horizontalAlignment: Text.AlignHCenter
++      }
++    }
++
++    Flickable {
++      anchors.bottom: promptPanel.top
++      anchors.bottomMargin: 16
++      anchors.horizontalCenter: inputField.horizontalCenter
++      width: Math.min(root.width - 48, 720)
++      height: Math.min(conversationText.implicitHeight, root.height * 0.35, Math.max(0, promptPanel.y - 32))
++      contentHeight: conversationText.height
++      clip: true
++      visible: root.conversationMessage.length > 0
++      Text {
++        id: conversationText
++        width: parent.width
++        text: root.conversationMessage
++        textFormat: Text.PlainText
++        wrapMode: Text.Wrap
++        color: root.conversationError ? Commons.Color.lock.textError : Commons.Color.lock.text
++        font.family: Style.font.family
++        font.pixelSize: root.fieldFontSize
++        horizontalAlignment: Text.AlignHCenter
++      }
++    }
++
++    Text {
++      anchors.top: inputField.bottom
++      anchors.topMargin: 20
++      anchors.horizontalCenter: inputField.horizontalCenter
++      text: "Cancel (Esc)"
++      textFormat: Text.PlainText
++      visible: root.authenticatingPassword
++      color: Commons.Color.lock.text
++      font.family: Style.font.family
++      font.pixelSize: root.fieldFontSize
++      MouseArea { anchors.fill: parent; onClicked: root.cancelRequested() }
++    }
++
++    Text {
++      anchors.top: inputField.bottom
++      anchors.topMargin: root.fingerprintConfigured && root.fingerprintUnavailable ? 64 : 20
++      anchors.horizontalCenter: inputField.horizontalCenter
++      text: "Reset work PIN (Ctrl+R)"
++      textFormat: Text.PlainText
++      visible: !root.authenticatingPassword && root.inputEnabled
++      color: Commons.Color.lock.text
++      font.family: Style.font.family
++      font.pixelSize: root.fieldFontSize
++      MouseArea { anchors.fill: parent; onClicked: root.recoveryRequested() }
++    }
++
+     // The crossed-out icon has no meaning to a user who has never seen it — it
+     // is not intuitive that it signals a broken reader — so the words carry the
+     // explanation and the icon only reinforces it.
+@@ -252,7 +338,7 @@
+       anchors.top: inputField.bottom
+       anchors.topMargin: 18
+       anchors.horizontalCenter: inputField.horizontalCenter
+-      visible: root.fingerprintConfigured && root.fingerprintUnavailable
++      visible: root.fingerprintConfigured && root.fingerprintUnavailable && !root.authenticatingPassword
+       text: Commons.I18n.t("lock.fingerprintUnavailable")
+       color: Commons.Color.lock.textError
+       font.family: Style.font.family
