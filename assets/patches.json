@@ -12,7 +12,7 @@
   "lock-conversation": {
     "filename": "Service.qml",
     "before": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
-    "after": "69291195ea832bd6db5e40955fd4a61362f89a9f494bd65deadbc784d3d055a8",
+    "after": "555bc319d1e808c8bf194988949e772be8e711560f887073fe097d601bf7c3af",
     "legacy_after": "ac245258d55ec4027783b2b653779dc627aa68b2a1f1559994e908d9b94b957c",
     "previous_after": "a2cc2f80a47f09f0e8d06da418739e441d3654c6c14f8677b244ab79475a9e26"
   },
@@ -41,12 +41,12 @@
       "manifest.json": "e3fcd54a832dbdc532bedebf5af515324f89d026857e9f5501f45a70a538717a",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
       "plugin/generate.py": "6dd5d9475205a7dce42140d21edef1473a5ef1eab96b723ecb5975022053506b",
-      "plugin/Service.qml": "69291195ea832bd6db5e40955fd4a61362f89a9f494bd65deadbc784d3d055a8",
+      "plugin/Service.qml": "555bc319d1e808c8bf194988949e772be8e711560f887073fe097d601bf7c3af",
       "plugin/LockView.qml": "e204ac85c3f35683cfd83f2449a7515adf9218c3f0b780104d4e128207e00ada",
       "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
       "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
       "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
-      "plugin/provenance.json": "527dc55cd423bc47fd8c6e08b13c3d2ee05cb2c9c612f15afff7bf629bc816f9"
+      "plugin/provenance.json": "93cebb4bdc09bfd5c0936f3ef609f850349c89ca50c0a3984e6c7274e604324f"
     }
   }
 }

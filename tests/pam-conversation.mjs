@@ -53,6 +53,7 @@ function harness() {
 let s=harness();s.submitPassword('must-not-silently-discard');assert.equal(s.contexts.length,0);
 s.submitPassword('');let c=s.passwordPam;assert.equal(c.replies.length,0);
 c.prompt('PIN:');assert.equal(s.awaitingPasswordResponse,true);assert.equal(s.passwordResponseVisible,false);
+s.submitPassword('');assert.equal(c.replies.length,0);assert.equal(s.awaitingPasswordResponse,true); // stray Enter is not a PAM failure
 s.enteredPassword='dummy-pin';s.submitPassword(s.enteredPassword);assert.deepEqual(c.replies,['dummy-pin']);assert.equal(s.enteredPassword,'');
 s.submitPassword('must-not-replay');assert.equal(c.replies.length,1); // responseRequired remains true in Quickshell.
 c.complete(0);assert.equal(s.unlocks,1);
@@ -61,8 +62,9 @@ s=harness();s.submitPassword('');c=s.passwordPam;
 c.prompt('Password:');s.submitPassword('dummy-password');
 c.info('Enter number 42 in Microsoft Authenticator');assert.ok(s.passwordNotices.includes('Enter number 42 in Microsoft Authenticator'));
 for(let i=0;i<20;i++)c.info('Waiting for approval');assert.equal(c.replies.length,1);assert.equal(s.awaitingPasswordResponse,false);
+c.prompt('Continue?',true);s.submitPassword('');
 c.prompt('One-time code:',true);assert.equal(s.passwordResponseVisible,true);s.submitPassword('dummy-otp');
-assert.deepEqual(c.replies,['dummy-password','dummy-otp']);assert.equal(s.unlocks,0);c.complete(0);assert.equal(s.unlocks,1);
+assert.deepEqual(c.replies,['dummy-password','','dummy-otp']);assert.equal(s.unlocks,0);c.complete(0);assert.equal(s.unlocks,1);
 
 s=harness();s.submitPassword('');c=s.passwordPam;
 for(const prompt of ['New PIN:','Confirm PIN:']){c.prompt(prompt);assert.equal(s.enteredPassword,'');assert.equal(s.passwordResponseVisible,false);s.submitPassword('dummy-new-pin');}
@@ -83,11 +85,12 @@ s=harness();const create=s.passwordPamFactory.createObject;s.passwordPamFactory.
 // Password-only PIN replacement: confirmation/MFA fresh responses, result alone never unlocks.
 s=harness();s.beginPinRecovery();let recovery=s.pinRecovery;
 recovery.line({type:'prompt',visible:false,text:'New PIN:'});s.submitPassword('dummy-new');s.submitPassword('no replay');assert.equal(recovery.writes.length,1);
-recovery.line({type:'prompt',visible:false,text:'Confirm PIN:'});s.submitPassword('dummy-new');
+recovery.line({type:'prompt',visible:false,text:'Confirm PIN:'});s.submitPassword('');assert.equal(recovery.writes.length,1);s.submitPassword('dummy-new');
 recovery.line({type:'info',text:'Authenticator number 42'});assert.ok(s.passwordNotices.includes('Authenticator number 42'));
 recovery.line({type:'prompt',visible:true,text:'One-time code:'});assert.equal(s.passwordResponseVisible,true);s.submitPassword('dummy-otp');
 recovery.line({type:'result',success:true});assert.equal(s.unlocks,0);recovery.exit(0);
 assert.equal(s.lastRecoveryResult,'success');assert.equal(s.lockRequested,true);assert.equal(s.unlocks,0);assert.ok(s.passwordNotices[0].includes('PIN updated'));
+s.resetAuthenticationState();assert.equal(s.passwordNotices.length,0);assert.equal(s.passwordMessageIsError,false);
 s.submitPassword('');c=s.passwordPam;c.prompt('PIN:');s.submitPassword('dummy-new');c.complete(0);assert.equal(s.unlocks,1);
 // Cancellation keeps process ownership until actual exit, blocking overlapping auth/reset.
 s=harness();s.beginPinRecovery();recovery=s.pinRecovery;recovery.line({type:'prompt',visible:false,text:'New PIN:'});s.enteredPassword='erase';s.cancelPasswordAttempt();

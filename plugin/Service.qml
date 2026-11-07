@@ -207,6 +207,8 @@ Item {
   function resetAuthenticationState() {
     enteredPassword = ""
     cancelPasswordAttempt()
+    passwordNotices = []
+    passwordMessageIsError = false
     failureMessage = ""
     failedAttempts = 0
     authenticatingPassword = false
@@ -399,9 +401,11 @@ Item {
 
   function submitPassword(value) {
     if (!lockRequested) return
+    var response = String(value || "")
+    // Enter on an empty hidden prompt is a stray key, and PAM would count it as a failure.
+    var strayEnter = response.length === 0 && !passwordResponseVisible
     if (pinRecovery) {
-      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running) return
-      var response = String(value || "")
+      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running || strayEnter) return
       clearPasswordPrompt()
       try {
         var encoded = encodeURIComponent(response)
@@ -412,14 +416,13 @@ Item {
     }
     if (authenticatingPassword) {
       var context = passwordPam
-      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired) return
-      var response = String(value || "")
+      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired || strayEnter) return
       clearPasswordPrompt()
       context.respond(response)
       return
     }
     // The idle field is read-only: begin first, then type into the actual PAM prompt.
-    if (passwordPam || String(value || "").length > 0) return
+    if (passwordPam || response.length > 0) return
     runWake()
     clearPasswordPrompt()
     passwordNotices = []

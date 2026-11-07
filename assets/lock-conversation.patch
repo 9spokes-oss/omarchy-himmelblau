@@ -30,16 +30,18 @@
    property string failureMessage: ""
    property int failedAttempts: 0
    property string backgroundPath: ""
-@@ -192,7 +206,7 @@
+@@ -192,7 +206,9 @@
  
    function resetAuthenticationState() {
      enteredPassword = ""
 -    pendingPassword = ""
 +    cancelPasswordAttempt()
++    passwordNotices = []
++    passwordMessageIsError = false
      failureMessage = ""
      failedAttempts = 0
      authenticatingPassword = false
-@@ -210,13 +224,30 @@
+@@ -210,13 +226,30 @@
      fingerprintRetryTimer.stop()
      fingerprintReachTimer.stop()
      fingerprintResumeTimer.stop()
@@ -72,7 +74,7 @@
        return false
      }
  
-@@ -225,6 +256,7 @@
+@@ -225,6 +258,7 @@
      armBlankTimer()
      logEvent("lock-requested")
      queueSessionLock()
@@ -80,7 +82,7 @@
  
      Qt.callLater(function() {
        root.refreshBackground()
-@@ -257,6 +289,7 @@
+@@ -257,6 +291,7 @@
    function runWake() {
      if (!wakeProcess.running) wakeProcess.running = true
      if (lockRequested) armBlankTimer()
@@ -88,7 +90,7 @@
      resumeFingerprint()
      nudgeFingerprint()
    }
-@@ -353,36 +386,212 @@
+@@ -353,36 +388,213 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -108,9 +110,11 @@
  
 +  function submitPassword(value) {
 +    if (!lockRequested) return
++    var response = String(value || "")
++    // Enter on an empty hidden prompt is a stray key, and PAM would count it as a failure.
++    var strayEnter = response.length === 0 && !passwordResponseVisible
 +    if (pinRecovery) {
-+      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running) return
-+      var response = String(value || "")
++      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running || strayEnter) return
 +      clearPasswordPrompt()
 +      try {
 +        var encoded = encodeURIComponent(response)
@@ -121,14 +125,13 @@
 +    }
 +    if (authenticatingPassword) {
 +      var context = passwordPam
-+      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired) return
-+      var response = String(value || "")
++      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired || strayEnter) return
 +      clearPasswordPrompt()
 +      context.respond(response)
 +      return
 +    }
 +    // The idle field is read-only: begin first, then type into the actual PAM prompt.
-+    if (passwordPam || String(value || "").length > 0) return
++    if (passwordPam || response.length > 0) return
      runWake()
 -    pendingPassword = password
 +    clearPasswordPrompt()
@@ -318,7 +321,7 @@
      runWake()
    }
  
-@@ -514,6 +723,14 @@
+@@ -514,6 +726,14 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -333,7 +336,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +781,40 @@
+@@ -564,25 +784,40 @@
      }
    }
  
@@ -391,7 +394,7 @@
      }
    }
  
-@@ -710,7 +942,7 @@
+@@ -710,7 +945,7 @@
    Process {
      id: posterProc
      property string sourcePath: ""
@@ -400,7 +403,7 @@
      stdout: StdioCollector { id: posterOutput; waitForEnd: true }
      onExited: function(exitCode) {
        if (sourcePath !== root.backgroundPath) {
-@@ -782,10 +1014,11 @@
+@@ -782,10 +1017,11 @@
          root.armBlankTimer(resumeMs)
          return
        }
@@ -414,7 +417,7 @@
      }
    }
  
-@@ -839,14 +1072,23 @@
+@@ -839,14 +1075,23 @@
      }
    }
  
@@ -439,7 +442,7 @@
      watchChanges: true
      printErrors: false
      onLoaded: root.passwordPamConfigured = true
-@@ -854,6 +1096,37 @@
+@@ -854,6 +1099,37 @@
      onFileChanged: reload()
    }
  
@@ -477,7 +480,7 @@
    // No lock before PAM is known good. An answer from before then may be stale --
    // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
    onPasswordPamConfiguredChanged: {
-@@ -876,7 +1149,10 @@
+@@ -876,7 +1152,10 @@
      target: "lock"
  
      function lock(): string {
@@ -489,7 +492,7 @@
        // omarchy-system-sleep-lock asks for the lock before every suspend.
        if (root.currentlyLocked()) root.noteSleepRequested()
        if (!root.currentlyLocked() && !root.beginLock()) return "failed"
-@@ -896,9 +1172,13 @@
+@@ -896,9 +1175,13 @@
          secure: sessionLock.secure,
          realScreens: root.realScreenCount(),
          passwordPam: root.passwordPamConfigured,
