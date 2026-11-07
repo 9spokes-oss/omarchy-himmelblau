@@ -15,6 +15,8 @@ import sys
 import tempfile
 
 VERSION = '0.5.2'
+# The one sddm-himmelblau release this companion supports (tests/test_versions.py).
+NATIVE_VERSION = '0.21.0-3'
 ASSETS = Path('/usr/share/omarchy-himmelblau')
 COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -671,7 +673,7 @@ def native_payload_contract():
     payload = json.loads(read(NATIVE_PAYLOAD))
     if not isinstance(payload, dict):
         raise Error('Invalid native payload payload')
-    if (payload.get('package') != 'sddm-himmelblau' or payload.get('version') != '0.21.0-3'
+    if (payload.get('package') != 'sddm-himmelblau' or payload.get('version') != NATIVE_VERSION
             or not isinstance(payload.get('artifact_sha256'), str)
             or not re.fullmatch(r'[0-9a-f]{64}', payload['artifact_sha256'])
             or not isinstance(payload.get('source_commit'), str)
@@ -729,8 +731,8 @@ def native_sddm_contract():
     try:
         result = run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], text=True)
     except (OSError, subprocess.SubprocessError):
-        raise Error('sddm-himmelblau 0.21.0-3 is not installed') from None
-    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-3':
+        raise Error(f'sddm-himmelblau {NATIVE_VERSION} is not installed') from None
+    if result.stdout.strip() != f'sddm-himmelblau {NATIVE_VERSION}':
         raise Error('Unsupported native SDDM package version')
     if read(SDDM_PIN_PAM) != SDDM_PIN_PAM_CONTENT:
         raise Error(f'Native SDDM PIN service is missing or changed: {SDDM_PIN_PAM}')

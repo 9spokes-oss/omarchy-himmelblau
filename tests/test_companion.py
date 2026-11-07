@@ -61,7 +61,7 @@ class CompanionTest(unittest.TestCase):
             if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
                 return SimpleNamespace(stdout='[]')
             if argv == ['/usr/bin/pacman', '-Q', 'sddm-himmelblau']:
-                return SimpleNamespace(stdout='sddm-himmelblau 0.21.0-3\n')
+                return SimpleNamespace(stdout=f'sddm-himmelblau {m.NATIVE_VERSION}\n')
             return native_run(argv, **kw)
         commands = patch.object(m.subprocess, 'run', native_command)
         commands.start(); self.addCleanup(commands.stop)
@@ -90,7 +90,7 @@ class CompanionTest(unittest.TestCase):
             path.parent.mkdir(exist_ok=True)
             path.write_bytes(b'synthetic native payload'); path.chmod(0o755)
             native_files[str(path)] = m.digest(path.read_bytes())
-        m.NATIVE_PAYLOAD.write_text(json.dumps({'package':'sddm-himmelblau', 'version':'0.21.0-3',
+        m.NATIVE_PAYLOAD.write_text(json.dumps({'package':'sddm-himmelblau', 'version':m.NATIVE_VERSION,
             'artifact_sha256':'a'*64, 'source_commit':'b'*40, 'files':native_files}))
         m.NATIVE_PAYLOAD.chmod(0o644)
         m.SDDM_PIN_PAM.parent.mkdir(parents=True)

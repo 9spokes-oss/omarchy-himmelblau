@@ -66,7 +66,8 @@ def main():
     fixed_files = ['manifest.json', 'plugin/UPSTREAM-LICENSE', 'plugin/generate.py', *output]
     manifest_path = ROOT / 'assets/patches.json'
     manifest = json.loads(manifest_path.read_text())
-    fixed = {'id':'9spokes.himmelblau-lock', 'version':'0.5.2',
+    plugin = json.loads((ROOT / 'manifest.json').read_text())
+    fixed = {'id':plugin['id'], 'version':plugin['version'],
              'upstream':{('manifest.json' if name == 'lock-manifest.json' else name): value for name,value in ORIGINAL.items()},
              'files':{name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in fixed_files}}
     if args.check:

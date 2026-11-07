@@ -32,7 +32,7 @@
     "files": {
       "manifest.json": "e3fcd54a832dbdc532bedebf5af515324f89d026857e9f5501f45a70a538717a",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
-      "plugin/generate.py": "6dd5d9475205a7dce42140d21edef1473a5ef1eab96b723ecb5975022053506b",
+      "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
       "plugin/Service.qml": "ace2f869c6e7b52a28c2e51dbd7946055788fbf0aa828d9b45f597b5477c1a1f",
       "plugin/LockView.qml": "8369f3e5ada978ac16966c178dccb820c267e69e38c42351aea5b0e5e4bf5397",
       "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
