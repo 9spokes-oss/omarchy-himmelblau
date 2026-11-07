@@ -4,17 +4,10 @@
     "before": "1740b095412602a0db96fb810e0782ce9f3f155d489da4cb98db36d5b592baac",
     "after": "f5a466b42b617af8191d2d944505917e904e3db5cf0b025085ca3ce9527b2f77"
   },
-  "sddm-username": {
-    "filename": "Main.qml",
-    "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
-    "after": "c6b6228525e51a29eac4ed944d79342a952f4bafeecde40c644313b4697ceb80"
-  },
   "lock-conversation": {
     "filename": "Service.qml",
     "before": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
-    "after": "ace2f869c6e7b52a28c2e51dbd7946055788fbf0aa828d9b45f597b5477c1a1f",
-    "legacy_after": "ac245258d55ec4027783b2b653779dc627aa68b2a1f1559994e908d9b94b957c",
-    "previous_after": "a2cc2f80a47f09f0e8d06da418739e441d3654c6c14f8677b244ab79475a9e26"
+    "after": "ace2f869c6e7b52a28c2e51dbd7946055788fbf0aa828d9b45f597b5477c1a1f"
   },
   "lock-view": {
     "filename": "LockView.qml",
@@ -24,8 +17,7 @@
   "sddm-conversation": {
     "filename": "Main.qml",
     "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
-    "after": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e",
-    "legacy_after": "c6b6228525e51a29eac4ed944d79342a952f4bafeecde40c644313b4697ceb80"
+    "after": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e"
   },
   "fixed-plugin": {
     "id": "9spokes.himmelblau-lock",
