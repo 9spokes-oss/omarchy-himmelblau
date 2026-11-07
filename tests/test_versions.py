@@ -1,9 +1,9 @@
 """Every version pin agrees with its one source.
 
-Sources: `manifest.json` for the plugin (generate.py copies it into patches.json),
-`VERSION` for the companion, and the native PKGBUILD's pkgver-pkgrel for sddm-himmelblau
-(finish-release.py reads it from there). The installed companion cannot read a PKGBUILD,
-so the copies it needs are checked here instead.
+Sources: `manifest.json` for the plugin (generate.py copies it into patches.json), the
+`VERSION` constant in src/omarchy_himmelblau.py for the companion, and the native
+PKGBUILD's pkgver-pkgrel for sddm-himmelblau (finish-release.py reads it from there).
+The installed companion cannot read a PKGBUILD, so the copies it needs are checked here.
 """
 import importlib.util
 import json
