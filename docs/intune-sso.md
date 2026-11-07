@@ -45,15 +45,27 @@ The extension uses the local broker and the desktop's Entra sign-in to obtain br
 
 The extension's **Online** indicator establishes native-host connectivity, not successful web sign-in. In version `1.13.0`, its compliance indicator does not gate the SSO header path; a Microsoft Conditional Access policy can separately require compliance. Do not attribute an authentication prompt to the badge alone. Account selection is compatible with SSO; a subsequent password, PIN or MFA challenge is a separate outcome.
 
+Chromium's machine policy applies across profiles, but optional host-permission
+approval and the extension's selected account belong to each profile. Before
+checking permissions or comparing sign-in and restart results, open
+`chrome://version` and verify **Profile Path**. Record the path and confirm that
+all steps use that same profile; a policy or permission check in one profile does
+not establish the state of another.
+
 For a fresh-profile test, first verify that `$HOME/.local/share/omarchy-himmelblau/sso-proof` does not exist. If it already exists, choose a different unused profile path for a new proof; do not treat reused cookies as fresh SSO evidence. Run in the work user's VM terminal:
 
 ```sh
-chromium --user-data-dir="$HOME/.local/share/omarchy-himmelblau/sso-proof" --no-first-run chrome://extensions
+chromium --user-data-dir="$HOME/.local/share/omarchy-himmelblau/sso-proof" --no-first-run about:blank
 ```
+
+In that dedicated-profile window, enter `chrome://extensions` in the address bar
+or use the browser menu to manage extensions. Normal desktop Chromium command-line
+launches can reject internal `chrome://` URLs; opening `about:blank` does not
+guarantee that an internal page opens automatically.
 
 Wait for the extension to install and enable before opening the intended Microsoft work application. Record whether account selection or further credentials were needed, then test reopening the browser. Existing cookies in an older profile cannot establish broker SSO. Never inspect or capture tokens, cookies, PRTs or authentication traffic as proof.
 
-An optional dedicated-profile launcher is installed at `/usr/share/doc/omarchy-himmelblau/examples/sso-test`. Copy it to `~/sso-test` as the desktop user, using mode `0700`. Run `~/sso-test` for the extension page and `~/sso-test apps` for My Apps. Both commands intentionally reuse the same profile, including on reopening; the launcher does not itself establish that the profile is fresh. This convenience file is user-owned; the companion does not overwrite home-directory launchers during package upgrades.
+An optional dedicated-profile launcher is installed at `/usr/share/doc/omarchy-himmelblau/examples/sso-test`. Copy it to `~/sso-test` as the desktop user, using mode `0700`. Run `~/sso-test` to open a blank page with instructions to enter `chrome://extensions` manually, and `~/sso-test apps` for My Apps. Both commands intentionally reuse the same profile, including on reopening; the launcher does not itself establish that the profile is fresh. A normal desktop Chromium launch can open a different profile from this dedicated launcher. Verify **Profile Path** rather than assuming the windows share permissions or account selection. This convenience file is user-owned; the companion does not overwrite home-directory launchers during package upgrades.
 
 ## Background SSO permissions
 
@@ -108,7 +120,8 @@ browser permission allowlist. Existing exact-site grants omitted from this map c
 remain enabled. Review browser permissions separately when narrowing prior access;
 this script does not audit or remove them.
 
-In the intended profile, open `chrome://policy`, reload policies, and verify the
+After confirming the intended **Profile Path** in `chrome://version`, open
+`chrome://policy`, reload policies, and verify the
 extension's `wellKnownApps` value and **OK** status. Open or reopen the extension
 popup; its badge can signal a pending managed policy update. If the popup shows
 **A managed policy update is pending**, click **Apply** and approve the displayed
@@ -131,5 +144,11 @@ unmodified extension `1.13.0`: an existing My Apps permission produced 18 additi
 and no removals; simulating all 19 grants left no pending changes. In the VM, the
 generated policy installed as root-owned `0644`, an identical second installation
 succeeded, and the other policy files and desktop processes remained unchanged.
-Browser approval and live app acceptance for the full M365 preset remain pending;
-the earlier successful My Apps restart test covered its individual site grant.
+After user consent, metadata verified all 19 requested exact-origin grants in both
+the active default profile and the inactive clean-test profile, without an
+all-HTTPS grant. My Apps opened in the verified default profile, but normal
+Exit/reopen still presented an authentication challenge. Diagnosis is ongoing;
+the grants do not establish successful restart SSO. Acceptance for the other M365
+apps remains unverified. The earlier successful My Apps restart test covered its
+individual site grant in the tested profile. Pass/fail observations are scoped
+to the recorded profile, not all Chromium profiles.

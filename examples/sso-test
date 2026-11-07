@@ -2,7 +2,10 @@
 # Dedicated-profile SSO launcher for an Omarchy desktop user; reuses existing data.
 set -eu
 case "${1:-extensions}" in
-  extensions) url='chrome://extensions' ;;
+  extensions)
+    url='about:blank'
+    printf '%s\n' 'In this dedicated-profile window, enter chrome://extensions in the address bar (or open Extensions from the browser menu).' >&2
+    ;;
   apps) url='https://myapps.microsoft.com' ;;
   *) printf '%s\n' 'Usage: sso-test [extensions|apps]' >&2; exit 2 ;;
 esac
