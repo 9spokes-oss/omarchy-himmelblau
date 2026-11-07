@@ -4,7 +4,9 @@ Experimental integration for signing in to Omarchy with Microsoft Entra ID throu
 
 ## Status
 
-A manual proof of concept on a QEMU/KVM guest tested Omarchy `4.5.0-3`, Himmelblau `4.0.8-1` and Quickshell `0.3.2.r7.g2b4501a-1`. Entra login, Hello PIN unlock, authenticated sudo, Omarchy updates, and local recovery were exercised. That test used `apply_policy = false` and a software HSM. It did not establish Intune enrollment or compliance, offline authentication, hardware-backed key protection, or compatibility with other versions and tenant policies. The revised Arch package built and installed its files in the guest. Live preflight refused a modified stock lock PAM source without changing authentication files, and the user activation guard refused a locked session. Migration and the native clone path still require end-to-end validation. Do not treat the manual result or package installation as proof those workflows work.
+A manual proof of concept on a QEMU/KVM guest tested Omarchy `4.5.0-3`, Himmelblau `4.0.8-1` and Quickshell `0.3.2.r7.g2b4501a-1`. Entra login, Hello PIN unlock, authenticated sudo, Omarchy updates, and local recovery were exercised. That test used `apply_policy = false` and a software HSM. It did not establish Intune enrollment or compliance, offline authentication, hardware-backed key protection, or compatibility with other versions and tenant policies.
+
+The `0.1.0-3` package has been built and installed in that guest. System setup and checks passed; the packaged greeter accepted a local recovery login, and the stock locker accepted the local password. A work user signed in with a PIN and the native lock clone was created and verified as the selected third-party clone. That session was ended to load the new clone code. A fresh-session work PIN unlock and authenticated sudo test remain pending, so native end-to-end acceptance is not yet complete. The source checks and CI passed 23 Python tests and the JavaScript regression.
 
 The integration package itself does not join a device or configure authentication on installation. Installing its Himmelblau dependency can change local authentication configuration, as described below. Setup, login and optional user-level activation are separate actions. The first successful Himmelblau authentication can create an Entra device object. Review tenant device-registration permissions and Conditional Access before testing, and record the object for later lifecycle management.
 
@@ -15,6 +17,8 @@ The integration package itself does not join a device or configure authenticatio
 - An Entra account and tenant policy that permit the intended authentication and device enrollment flow. Do not change tenant policy just to make a test pass.
 
 Review the Himmelblau package before installing it: its Arch install hook configures PAM and NSS, and the package includes browser managed policies, an SSH configuration drop-in, and a display-manager dependency. Its removal does not automatically remove all PAM/NSS entries. Back up and review the effective system configuration and preserve recovery access.
+
+Himmelblau's main configuration is read by its daemon and PAM module; do not store secrets in it. An existing configuration must be root-owned mode `0644` in a root-owned mode `0755` directory. Setup refuses more restrictive or otherwise unsupported permissions for manual review rather than widening them. Its private rollback state remains restricted.
 
 ## Operations
 
@@ -49,6 +53,8 @@ If the services were already active when their configuration changed, apply it w
 `--admin` is an explicit opt-in for authenticated administrative access and requires the target identity to resolve through NSS at setup time. Review the proposed sudo policy and its scope before using it. Run `sudo omarchy-himmelblau doctor` or `sudo omarchy-himmelblau status` to inspect root-managed state and effective configuration. The unprivileged forms check the current user's clone, hook and readable source files; they cannot inspect root-only configuration. Use `omarchy-himmelblau enable-user` as the target desktop user to activate the user-scoped lock clone. Run it while the session is unlocked; log out and back in before testing the clone. `repair` and `rollback` are privileged operations. Consult the command help and review the effective configuration before applying changes.
 
 Setup and checks refuse unreviewed Himmelblau configuration drop-ins and conflicting managed settings; inspect them manually before proceeding. If user activation stops partway through, the native clone may already be enabled. Keep the session unlocked and inspect and disable the clone before retrying.
+
+Native clone IDs under `omarchy.*` are reserved for built-in plugins. Usernames that would produce such an ID, including `omarchy`, are not supported by `enable-user`; it refuses them before making changes. Use the actual target user's session and do not override its identity to work around this restriction.
 
 Package removal alone does not undo setup. Before root rollback and package uninstall, disable the clone through Omarchy **and exit every session using it**: `keepLoaded` code survives disabling, and removing its dedicated PAM service while it is running can strand the next lock. Run root rollback from an independent recovery console or SSH session before starting another clone session. Root rollback covers root-managed integration changes; the user-scoped clone and hook are separate. Review those user-owned files before removing them. Rollback does not remove Himmelblau, reverse its package hooks, delete an Entra or Intune device, or restore an entire system snapshot. Confirm any external device cleanup separately.
 
