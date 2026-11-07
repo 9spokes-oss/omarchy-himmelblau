@@ -4,7 +4,7 @@
   "baseline_archive_sha256": "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf",
   "arch_packaging_commit": "d31bfcbb0a8d2a8ca7ee4fd01d5d8dacdb1de729",
   "arch_cmake_commit": "228778c2b4b7e26db1e1d69fe484ed75c5791c3a",
-  "arch_patch_sha256": "d99afbd7584394df6997a1d55ecae24443d0adb7bc3488bbbde71ee9ac9ad4aa",
+  "arch_patch_sha256": "7f6ae3250f72a7de65e4b622d4396895005c73ee1e91c5901272c37e2c83bd05",
   "native_patch_sha256": "ce97cb8217d9b59803492b3c428c78d26f1f93f812e5e5856ad1b4c61621af65",
   "result_files": {
     "src/auth/Auth.cpp": "3283df2d59eed874445bc699492c72e9c805c015f1ecde6e6acc76041ab2440b",
