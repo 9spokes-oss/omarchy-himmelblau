@@ -45,6 +45,7 @@ class CompanionTest(unittest.TestCase):
         self.mock_paths.start(); self.addCleanup(self.mock_paths.stop)
         # The host sandbox maps / and /tmp ownership to nobody; production guards
         # remain enabled in the CLI and are separate from isolated temporary roots.
+        self.real_ancestor_guard = m.check_state_ancestors
         ancestor_guard = patch.object(m, 'check_state_ancestors')
         ancestor_guard.start(); self.addCleanup(ancestor_guard.stop)
         self.real_user_path_guard = m.user_path_guard
@@ -122,8 +123,13 @@ class CompanionTest(unittest.TestCase):
             namespace = runpy.run_path(str(ROOT / 'src/omarchy_himmelblau.py'))
         self.assertEqual(namespace['ASSETS'], Path('/usr/share/omarchy-himmelblau'))
         with patch.object(m.os, 'geteuid', return_value=0):
-            with self.assertRaisesRegex(m.Error, 'unprivileged source checkout'):
+            with self.assertRaisesRegex(m.Error, 'refuses to run as root'):
                 m.main(['--development', 'doctor'])
+        installed = '/usr/lib/omarchy-himmelblau/omarchy_himmelblau.py'
+        with patch.object(m, '__file__', installed), patch.object(m, 'plugin_status') as status:
+            with self.assertRaisesRegex(m.Error, 'only as python3 src/omarchy_himmelblau.py'):
+                m.main(['--development', 'status'])
+            status.assert_not_called()
 
     def test_privileged_patch_ignores_hostile_path_and_environment(self):
         evil = self.base / 'evil'; evil.mkdir()
@@ -176,28 +182,6 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaises(m.Error): action()
         self.assertEqual(m.SUDOERS.read_bytes(), before); self.assertEqual(m.STATE.read_bytes(), state)
         self.assertEqual(m.load_state()['identity'], {'requested_upn':'alice@example.com','canonical_name':'alice','uid':123456})
-
-    def test_legacy_identity_and_numeric_admin_migrate_only_with_explicit_repair(self):
-        original_config = m.CONFIG.read_bytes()
-        with patch.object(m, 'validate_sudo_rule'): self.setup(admin=True)
-        state = m.load_state(); state.pop('identity')
-        state['files'] = [entry for entry in state['files'] if Path(entry['path']) != m.RECOVERY_ACCOUNT]
-        m.RECOVERY_ACCOUNT.unlink()
-        legacy = b'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n#123456 ALL=(ALL:ALL) ALL\n'
-        m.SUDOERS.chmod(0o640); m.SUDOERS.write_bytes(legacy); m.SUDOERS.chmod(0o440)
-        for entry in state['files']:
-            if Path(entry['path']) == m.SUDOERS: entry['after'] = m.digest(legacy)
-            if Path(entry['path']) == m.PIN_PAM: entry['after'] = m.digest(m.LEGACY_PIN_PAM_CONTENT)
-        m.PIN_PAM.write_bytes(m.LEGACY_PIN_PAM_CONTENT); m.save_state(state)
-        with self.assertRaises(m.Error): m.doctor()
-        self.assertEqual(m.SUDOERS.read_bytes(), legacy)
-        with patch.object(m, 'validate_sudo_rule'): m.repair()
-        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), b'alice@example.com\nalice\n123456\n')
-        self.assertIn(b'"alice" ALL=', m.SUDOERS.read_bytes())
-        self.assertIn(b'account [success=ok default=die] pam_himmelblau.so', m.PIN_PAM.read_bytes())
-        m.doctor(); m.rollback()
-        self.assertFalse(m.RECOVERY_ACCOUNT.exists()); self.assertFalse(m.SUDOERS.exists())
-        self.assertEqual(m.CONFIG.read_bytes(), original_config)
 
     def test_admin_canonical_name_grammar_and_roundtrip(self):
         for name in ('#1234', '%wheel', '+netgroup', 'ALL', 'a,b', 'a:b', 'a\nb', 'a"b', '-option'):
@@ -375,6 +359,36 @@ class CompanionTest(unittest.TestCase):
         m.recover()
         self.assertFalse(m.STATE.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
 
+    def test_state_access_refuses_writable_or_foreign_ancestors(self):
+        self.setup()
+        state = m.load_state()
+        stat = Path.stat
+        foreign = set()
+        def mapped(path, *args, **kwargs):
+            # Ancestors outside the sandbox are root-owned 0755 on a real system.
+            if not path.is_relative_to(self.base):
+                return SimpleNamespace(st_uid=0, st_mode=0o40755)
+            result = stat(path, *args, **kwargs)
+            if path in foreign:
+                return SimpleNamespace(st_uid=os.geteuid() + 1, st_mode=result.st_mode)
+            return result
+        actions = (m.load_state, lambda: m.save_state(state))
+        with patch.object(m, 'check_state_ancestors', self.real_ancestor_guard), \
+                patch.object(Path, 'stat', mapped):
+            for action in actions:
+                action()
+            self.base.chmod(0o777)
+            try:
+                for action in actions:
+                    with self.assertRaisesRegex(m.Error, 'Unsafe state ancestor'):
+                        action()
+            finally:
+                self.base.chmod(0o700)
+            foreign.add(self.base)
+            for action in actions:
+                with self.assertRaisesRegex(m.Error, 'Unsafe state ancestor'):
+                    action()
+
     def test_atomic_replace_and_delete_fsync_parent_directory(self):
         target = self.base / 'durable'; calls=[]
         original = m.fsync_directory
@@ -383,7 +397,7 @@ class CompanionTest(unittest.TestCase):
             m.unlink_durable(target)
         self.assertEqual(calls, [self.base, self.base])
 
-    def fixed_plugin_fixture(self, legacy=False):
+    def fixed_plugin_fixture(self):
         self.setup()
         home = self.base / 'desktop'; home.mkdir(mode=0o700)
         directory = home / '.config/omarchy/plugins/9spokes.himmelblau-lock'
@@ -398,36 +412,42 @@ class CompanionTest(unittest.TestCase):
         account = SimpleNamespace(pw_name='alice', pw_dir=str(home))
         canonical = patch.object(m, 'canonical_user', return_value=(account,home))
         canonical.start(); self.addCleanup(canonical.stop)
-        listing = [{'id':'omarchy.lock','firstParty':True,'enabled':not legacy,'clonedFrom':''},
+        listing = [{'id':'omarchy.lock','firstParty':True,'enabled':True,'clonedFrom':''},
                    {'id':'9spokes.himmelblau-lock','firstParty':False,'enabled':False,'clonedFrom':'omarchy.lock'}]
-        if legacy:
-            user, clone, statefile, hook = m.user_paths()
-            shutil.copytree(m.LOCK.parent, clone)
-            for name, asset in [('Service.qml','tests/fixtures/lock-0.5.0.patch'), ('LockView.qml','assets/lock-view.patch')]:
-                subprocess.run(['/usr/bin/patch','--batch','--fuzz=0','-p1','-d',str(clone)],
-                               input=(ROOT / asset).read_bytes(),check=True,capture_output=True)
-            hook_data = b'#!/bin/sh\n/usr/bin/omarchy-himmelblau status\n'
-            m.atomic(hook, hook_data, 0o755)
-            upstream = m.upstream_hashes(); upstream['Service.qml'] = m.digest(read_bytes := (clone / 'Service.qml').read_bytes())
-            state = {'phase':'ready','version':'0.4.0','clone_hash':m.digest(read_bytes), 'clone_files':m.clone_hashes(clone),
-                     'upstream_files':upstream,'hook_hash':m.digest(hook_data)}
-            m.atomic(statefile, (json.dumps(state)+'\n').encode(), 0o600)
-            listing.append({'id':'alice.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
         return directory, listing
 
     def test_fixed_plugin_status_and_prerequisites_are_fail_closed(self):
         directory, listing = self.fixed_plugin_fixture()
         listing[0]['enabled'] = False; listing[1]['enabled'] = True
         with patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing):
-            m.plugin_status(); m.locker_preflight(); m.user_status()
+            status = lambda: m.main(['status'])
+            m.plugin_status(); m.locker_preflight(); status()
             listing.append({'id':'other.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
-            for action in (m.plugin_status, m.locker_preflight, m.user_status):
+            for action in (m.plugin_status, m.locker_preflight, status):
                 with self.assertRaises(m.Error): action()
             listing.pop()
             service = directory / 'plugin/Service.qml'; service.write_bytes(service.read_bytes()+b'// drift\n')
             with self.assertRaisesRegex(m.Error, 'differs from companion release'): m.plugin_status()
         m.PAM.unlink()
-        with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM missing'): m.lock_prerequisites()
+        with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing'): m.lock_prerequisites()
+
+    def test_locker_preflight_ignores_stock_pam_drift(self):
+        directory, listing = self.fixed_plugin_fixture()
+        listing[0]['enabled'] = False
+        listing[1]['enabled'] = True
+        m.STOCK_PAM.write_bytes(b'# updated by Omarchy\n')
+        stat = Path.stat
+        def root_owned_pam(path, *args, **kwargs):
+            result = stat(path, *args, **kwargs)
+            if path == m.PAM:
+                return SimpleNamespace(st_uid=0, st_mode=result.st_mode)
+            return result
+        with patch.object(Path, 'stat', root_owned_pam), \
+                patch.object(m, 'native_plugins', return_value=listing):
+            m.locker_preflight()
+            m.PAM.write_bytes(m.PAM.read_bytes() + b'# drift\n')
+            with self.assertRaises(m.Error):
+                m.locker_preflight()
 
     def test_fixed_plugin_rejects_unlisted_and_symlink_runtime_files(self):
         directory, listing = self.fixed_plugin_fixture()
@@ -451,7 +471,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(calls, [['/usr/bin/omarchy','plugin','enable','9spokes.himmelblau-lock']])
         self.assertTrue(listing[1]['enabled']); self.assertFalse(listing[0]['enabled'])
 
-    def test_fixed_plugin_fresh_activation_does_not_require_legacy_username(self):
+    def test_fixed_plugin_activation_works_for_any_username(self):
         directory, listing = self.fixed_plugin_fixture()
         account, home = m.canonical_user.return_value
         for name in ('omarchy', 'alice@example.com'):
@@ -462,34 +482,19 @@ class CompanionTest(unittest.TestCase):
                 for plugin in listing: plugin['enabled'] = plugin['id'] == argv[3]
                 return SimpleNamespace(returncode=0)
             with self.subTest(name=name), patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-                 patch.object(m, 'user_paths', side_effect=AssertionError('legacy ID must not be required')), \
                  patch.object(m, 'native_plugins', side_effect=lambda: json.loads(json.dumps(listing))), \
                  patch.object(m.subprocess, 'run', side_effect=command):
                 m.activate_plugin()
 
-    def test_fixed_plugin_migration_keeps_legacy_files_and_requires_opt_in(self):
-        directory, listing = self.fixed_plugin_fixture(legacy=True)
-        user, clone, statefile, hook = m.user_paths()
-        previous = (m.clone_hashes(clone), statefile.read_bytes(), hook.read_bytes())
-        calls = []
-        def command(argv, **kwargs):
-            self.assertEqual(argv[:2], ['/usr/bin/omarchy','plugin'])
-            action, name = argv[2:]
-            self.assertIn(action, ('disable','enable')); calls.append((action,name))
-            for plugin in listing:
-                if action == 'disable' and plugin['id'] == name: plugin['enabled'] = False
-                elif action == 'enable': plugin['enabled'] = plugin['id'] == name
-            return SimpleNamespace(returncode=0)
+    def test_fixed_plugin_activation_refuses_old_user_clone(self):
+        directory, listing = self.fixed_plugin_fixture()
+        listing[0]['enabled'] = False
+        listing.append({'id':'alice.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
         with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-             patch.object(m, 'native_plugins', side_effect=lambda: json.loads(json.dumps(listing))), \
-             patch.object(m.subprocess, 'run', side_effect=command):
-            with self.assertRaisesRegex(m.Error, '--migrate'): m.activate_plugin()
-            self.assertEqual(calls, [])
-            m.activate_plugin(migrate=True)
-            m.plugin_status()
-            with self.assertRaisesRegex(m.Error, 'Fixed lock plugin is enabled'): m.enable_user()
-        self.assertEqual(calls, [('disable','alice.lock'), ('enable','9spokes.himmelblau-lock')])
-        self.assertEqual((m.clone_hashes(clone),statefile.read_bytes(),hook.read_bytes()), previous)
+             patch.object(m, 'native_plugins', return_value=listing), patch.object(m.subprocess, 'run') as run:
+            with self.assertRaisesRegex(m.Error, 'Another lock implementation'): m.activate_plugin()
+            with self.assertRaisesRegex(m.Error, 'only enabled lock'): m.locker_preflight()
+            run.assert_not_called()
 
     def test_fixed_plugin_refuses_locked_unknown_or_failed_switch(self):
         directory, listing = self.fixed_plugin_fixture()
@@ -500,7 +505,7 @@ class CompanionTest(unittest.TestCase):
         listing.append({'id':'unknown.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
         with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
              patch.object(m, 'native_plugins', return_value=listing), patch.object(m.subprocess, 'run') as run:
-            with self.assertRaisesRegex(m.Error, 'Unknown/conflicting'): m.activate_plugin(migrate=True)
+            with self.assertRaisesRegex(m.Error, 'Another lock implementation'): m.activate_plugin()
             run.assert_not_called()
         listing.pop(); listing[0]['enabled'] = True
         with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
@@ -508,10 +513,10 @@ class CompanionTest(unittest.TestCase):
              patch.object(m.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
             with self.assertRaisesRegex(m.Error, 'activation incomplete'): m.activate_plugin()
 
-    def test_policy_legacy_default_and_explicit_toggle_preserve_original(self):
+    def test_policy_toggle_and_repair_preserve_original(self):
         before = m.CONFIG.read_bytes()
         m.setup('example.com', 'alice@example.com')
-        state = m.load_state(); state.pop('apply_policy'); state['version'] = '0.3.0'; m.save_state(state)
+        state = m.load_state()
         m.doctor()
         original = next(item.copy() for item in state['files'] if Path(item['path']) == m.CONFIG)
         original_run = m.subprocess.run
@@ -612,7 +617,7 @@ class CompanionTest(unittest.TestCase):
             if Path(path) == m.STATE: raise OSError('synthetic persistent state failure')
             return original(path, data, mode)
         with patch.object(m, 'atomic', failure):
-            with self.assertRaisesRegex(m.Error, 'recoverable originals retained'): m.policy(True)
+            with self.assertRaisesRegex(m.Error, 'originals are in'): m.policy(True)
         journal = m.STATE.parent / 'policy-backup.json'
         saved = json.loads(journal.read_text())
         self.assertEqual(m.base64.b64decode(saved['config']), old_config)
@@ -629,7 +634,7 @@ class CompanionTest(unittest.TestCase):
             def root_status():
                 state = m.load_state()
                 with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'load_state', return_value=state):
-                    m.main(['status'])
+                    m.main(['doctor'])
             actions = (m.doctor, m.repair, m.rollback, lambda: m.policy(True),
                        lambda: m.setup('example.com', 'alice@example.com'), root_status)
             for action in actions:
@@ -654,6 +659,16 @@ class CompanionTest(unittest.TestCase):
         self.assertTrue(journal.exists())
         with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.doctor()
         with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.repair()
+
+    def test_doctor_is_root_only_and_status_is_user_only(self):
+        with patch.object(m.os, 'geteuid', return_value=1000), patch.object(m, 'doctor') as doctor:
+            with self.assertRaisesRegex(m.Error, 'as root'):
+                m.main(['doctor'])
+            doctor.assert_not_called()
+        with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'lock_prerequisites') as status:
+            with self.assertRaisesRegex(m.Error, 'not root'):
+                m.main(['status'])
+            status.assert_not_called()
 
     def test_policy_cli_requires_explicit_choice_and_root(self):
         for args in (['policy'], ['policy', '--enable', '--disable']):
@@ -686,18 +701,80 @@ class CompanionTest(unittest.TestCase):
         self.assertFalse(m.OVERRIDE.exists())
         self.assertFalse(m.COPY_THEME.exists())
 
-    def legacy_root(self):
+    def missing_pam_root(self):
         self.setup()
-        state = m.load_state()
-        state['version'] = '0.2.0'
-        legacy = m.patch_source('sddm-username', (m.THEME / 'Main.qml').read_bytes())
+        m.PAM.unlink()
+        return m.STATE.read_bytes()
+
+    def test_repair_refuses_content_and_permission_drift_before_writes(self):
+        old = self.missing_pam_root()
         main = m.COPY_THEME / 'Main.qml'
-        main.write_bytes(legacy)
-        for entry in state['files']:
-            if entry['path'] == str(main):
-                entry['after'] = m.digest(legacy)
-        m.save_state(state)
-        return main, legacy, m.STATE.read_bytes()
+        original = main.read_bytes()
+        for data, mode in [(original + b'// drift', 0o644), (original, 0o600)]:
+            with self.subTest(mode=mode):
+                main.write_bytes(data)
+                main.chmod(mode)
+                with self.assertRaises(m.Error):
+                    m.repair()
+                self.assertEqual(m.STATE.read_bytes(), old)
+                self.assertFalse(m.PAM.exists())
+                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+
+    def test_repair_refuses_extra_theme_files_before_writes(self):
+        old = self.missing_pam_root()
+        (m.COPY_THEME / 'unexpected.qml').write_bytes(b'operator asset')
+        with self.assertRaisesRegex(m.Error, 'Unexpected companion theme entry'):
+            m.repair()
+        self.assertFalse(m.PAM.exists())
+        self.assertEqual(m.STATE.read_bytes(), old)
+
+    def test_repair_rolls_back_files_and_state_on_write_failure(self):
+        old = self.missing_pam_root()
+        atomic = m.atomic
+        for failed_path in (m.PAM, m.STATE):
+            with self.subTest(path=failed_path):
+                failed = False
+                def injected(path, data, mode):
+                    nonlocal failed
+                    if path == failed_path and not failed:
+                        failed = True
+                        raise OSError('synthetic repair failure')
+                    return atomic(path, data, mode)
+                with patch.object(m, 'atomic', injected):
+                    with self.assertRaisesRegex(m.Error, 'Repair failed and was undone'):
+                        m.repair()
+                self.assertFalse(m.PAM.exists())
+                self.assertEqual(m.STATE.read_bytes(), old)
+                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+
+    def test_repair_failed_rollback_retains_recoverable_journal(self):
+        old = self.missing_pam_root()
+        atomic = m.atomic
+        def injected(path, data, mode):
+            if path == m.STATE:
+                raise OSError('state write and restore failure')
+            return atomic(path, data, mode)
+        with patch.object(m, 'atomic', injected):
+            with self.assertRaisesRegex(m.Error, 'originals are in'):
+                m.repair()
+        journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
+        self.assertEqual(m.base64.b64decode(journal['state']), old)
+        self.assertEqual(journal['files'], [{'path': str(m.PAM), 'data': None, 'mode': 0o644,
+                                             'after': m.digest(m.patch_source('lock-pam', self.before[m.STOCK_PAM]))}])
+        with self.assertRaisesRegex(m.Error, 'Pending repair recovery'):
+            m.repair()
+
+    def test_repair_restores_deleted_recovery_account_and_pin_service(self):
+        self.setup()
+        recovery = m.RECOVERY_ACCOUNT.read_bytes()
+        m.RECOVERY_ACCOUNT.unlink()
+        m.PIN_PAM.unlink()
+        with self.assertRaises(m.Error):
+            m.doctor()
+        m.repair()
+        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), recovery)
+        self.assertEqual(m.PIN_PAM.read_bytes(), m.PIN_PAM_CONTENT)
+        m.doctor()
 
     def test_native_packaged_pin_pam_matches_companion_contract(self):
         # Read the real package payload, not the test's synthesized guest fixture.
@@ -716,95 +793,6 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaisesRegex(m.Error, 'Native SDDM PIN'): m.repair()
         m.rollback()
         self.assertEqual(m.SDDM_PIN_PAM.read_bytes(), native + b'# drift\n')
-
-    def test_known_02_theme_upgrade_preserves_originals_and_locker(self):
-        main, legacy, old = self.legacy_root()
-        old_state = json.loads(old)
-        unchanged = {Path(e['path']): Path(e['path']).read_bytes() for e in old_state['files'] if e['path'] != str(main)}
-        with self.assertRaisesRegex(m.Error, 'explicit root repair'): m.doctor()
-        with self.assertRaises(m.Error): self.setup()
-        self.assertEqual(main.read_bytes(), legacy)
-        m.repair()
-        upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], '0.5.2')
-        self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
-        for previous, current in zip(old_state['files'], upgraded['files']):
-            self.assertEqual({k:v for k,v in previous.items() if k != 'after'}, {k:v for k,v in current.items() if k != 'after'})
-        for path, data in unchanged.items(): self.assertEqual(path.read_bytes(), data)
-        m.rollback()
-        self.assertFalse(main.exists())
-
-    def test_01_root_label_with_completed_02_pin_repair_upgrades(self):
-        main, legacy, old = self.legacy_root()
-        state = json.loads(old); state['version'] = '0.1.0'; m.save_state(state)
-        m.repair()
-        self.assertEqual(m.load_state()['version'], '0.5.2')
-        self.assertNotEqual(main.read_bytes(), legacy)
-
-    def test_01_root_label_without_02_pin_state_refuses_upgrade(self):
-        main, legacy, old = self.legacy_root()
-        state = json.loads(old); state['version'] = '0.1.0'
-        m.save_state(state); m.PIN_PAM.unlink(); before = m.STATE.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'matching managed 0.2 history'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), before)
-        self.assertFalse(m.PIN_PAM.exists())
-        m.PIN_PAM.write_bytes(m.PIN_PAM_CONTENT)
-        state['files'] = [e for e in state['files'] if e['path'] != str(m.PIN_PAM)]
-        m.save_state(state); m.PIN_PAM.unlink(); before = m.STATE.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'matching managed 0.2 history'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), before)
-        self.assertEqual(main.read_bytes(), legacy)
-
-    def test_02_upgrade_refuses_drift_state_and_permission_changes(self):
-        main, legacy, old = self.legacy_root()
-        for data, mode, version in [(legacy + b'// drift', 0o644, '0.2.0'),
-                                    (legacy, 0o600, '0.2.0'), (legacy, 0o644, 'unknown')]:
-            with self.subTest(mode=mode, version=version):
-                main.write_bytes(data); main.chmod(mode)
-                state = json.loads(old); state['version'] = version; m.save_state(state)
-                before = m.STATE.read_bytes()
-                with self.assertRaises(m.Error): m.repair()
-                self.assertEqual(m.STATE.read_bytes(), before)
-                self.assertEqual(main.read_bytes(), data)
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
-
-    def test_02_upgrade_refuses_extra_theme_files_before_writes(self):
-        main, legacy, old = self.legacy_root()
-        (m.COPY_THEME / 'unexpected.qml').write_bytes(b'operator asset')
-        with self.assertRaisesRegex(m.Error, 'Unexpected companion theme entry'): m.repair()
-        self.assertEqual(main.read_bytes(), legacy)
-        self.assertEqual(m.STATE.read_bytes(), old)
-
-    def test_02_upgrade_rolls_back_theme_and_state_on_write_failure(self):
-        main, legacy, old = self.legacy_root()
-        atomic = m.atomic
-        for failed_path in (main, m.STATE):
-            with self.subTest(path=failed_path):
-                failed = False
-                def injected(path, data, mode):
-                    nonlocal failed
-                    if path == failed_path and not failed:
-                        failed = True
-                        raise OSError('synthetic upgrade failure')
-                    return atomic(path, data, mode)
-                with patch.object(m, 'atomic', injected):
-                    with self.assertRaisesRegex(m.Error, 'previous files and state restored'): m.repair()
-                self.assertEqual(main.read_bytes(), legacy)
-                self.assertEqual(m.STATE.read_bytes(), old)
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
-
-    def test_02_failed_rollback_retains_recoverable_journal(self):
-        main, legacy, old = self.legacy_root()
-        atomic = m.atomic
-        def injected(path, data, mode):
-            if path == m.STATE: raise OSError('state write and restore failure')
-            return atomic(path, data, mode)
-        with patch.object(m, 'atomic', injected):
-            with self.assertRaisesRegex(m.Error, 'recoverable originals retained'): m.repair()
-        journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
-        self.assertEqual(m.base64.b64decode(journal['state']), old)
-        self.assertEqual(m.base64.b64decode(journal['files'][0]['data']), legacy)
-        with self.assertRaisesRegex(m.Error, 'Pending repair recovery'): m.repair()
 
     def test_conflicting_config_prevents_all_changes(self):
         for setting in ['domain = other.example', 'pam_allow_groups = other@example.com',
@@ -856,13 +844,13 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.PAM.read_bytes(), pam)
         self.assertTrue(m.STATE.exists())
 
-    def test_legacy_shared_pam_rejected_before_changes(self):
-        legacy = m.patch_source('lock-pam', self.before[m.STOCK_PAM])
-        m.STOCK_PAM.write_bytes(legacy)
+    def test_patched_stock_pam_rejected_before_changes(self):
+        patched = m.patch_source('lock-pam', self.before[m.STOCK_PAM])
+        m.STOCK_PAM.write_bytes(patched)
         with self.assertRaisesRegex(m.Error, 'pristine'):self.setup()
         self.assertFalse(m.STATE.exists())
         self.assertFalse(m.PAM.exists())
-        self.assertEqual(m.STOCK_PAM.read_bytes(), legacy)
+        self.assertEqual(m.STOCK_PAM.read_bytes(), patched)
 
     def test_repair_known_regenerated_pam_only(self):
         self.setup()
@@ -900,72 +888,6 @@ class CompanionTest(unittest.TestCase):
         self.assertNotIn(b'NOPASSWD', m.SUDOERS.read_bytes())
         self.assertEqual(m.SUDOERS.stat().st_mode & 0o777, 0o440)
 
-    def test_enable_user_native_directory_clone_and_read_only_hook(self):
-        self.setup()
-        clone = self.base / 'home/plugins/alice.lock'
-        statefile = self.base / 'home/state/state.json'
-        hook = self.base / 'home/hooks/post-update.d/check'
-        paths = ('alice', clone, statefile, hook)
-        run = subprocess.run
-        commands = []
-        def command(argv, **kw):
-            commands.append(argv)
-            if argv[:3] == ['/usr/bin/omarchy-shell', 'lock', 'status']:
-                self.assertEqual(kw['env']['OMARCHY_PATH'], '/usr/share/omarchy')
-                return SimpleNamespace(stdout=json.dumps({key: False for key in
-                    ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-            if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
-                return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
-                    'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
-            if argv[:3] == ['/usr/bin/omarchy', 'plugin', 'clone']:
-                clone.mkdir(parents=True)
-                shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
-                shutil.copy2(m.LOCK, clone / 'Service.qml')  # manifest.json directory branch copies exactly
-                return SimpleNamespace(returncode=0)
-            return run(argv, **kw)
-        with patch.object(m, 'user_paths', return_value=paths), patch.object(m.subprocess, 'run', command):
-            m.enable_user()
-            # A working 0.2 locker clone remains valid and is never upgraded by 0.3.
-            legacy_state = json.loads(statefile.read_text()); legacy_state['version'] = '0.2.0'
-            statefile.write_text(json.dumps(legacy_state))
-            before_clone = m.clone_hashes(clone); before_user_state = statefile.read_bytes()
-            m.user_status(); m.enable_user()
-            self.assertEqual(m.clone_hashes(clone), before_clone)
-            self.assertEqual(statefile.read_bytes(), before_user_state)
-        self.assertEqual(sum(cmd[:3] == ['/usr/bin/omarchy', 'plugin', 'clone'] for cmd in commands), 1)
-        self.assertIn(['/usr/bin/omarchy', 'plugin', 'list', '--json'], commands)
-        self.assertEqual((clone / 'Service.qml').read_bytes(), m.patch_source('lock-conversation', self.before[m.LOCK]))
-        self.assertIn('omarchy-himmelblau status', hook.read_text())
-        self.assertNotIn('sudo ', hook.read_text().split('printf')[0])
-        self.assertNotIn('systemctl', hook.read_text())
-        with patch.object(m, 'user_paths', return_value=paths):
-            (m.LOCK.parent / 'FingerprintModel.js').write_text('// upstream helper update\n')
-            with self.assertRaisesRegex(m.Error, 'Upstream lock plugin changed'):m.user_status()
-
-    def test_native_clone_unexpected_rewrite_is_partial_failure(self):
-        self.setup()
-        clone = self.base / 'home/plugins/alice.lock'
-        statefile = self.base / 'home/state/state.json'
-        hook = self.base / 'home/hooks/post-update.d/check'
-        run = subprocess.run
-        def command(argv, **kw):
-            if argv[0] == '/usr/bin/omarchy-shell':
-                return SimpleNamespace(stdout=json.dumps({key: False for key in
-                    ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-            if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
-                return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
-                    'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
-            if argv[0] == '/usr/bin/omarchy':
-                clone.mkdir(parents=True)
-                (clone / 'Service.qml').write_bytes(m.LOCK.read_bytes().replace(b'import qs.Commons\n', b'import "unexpected"\n'))
-                return SimpleNamespace(returncode=0)
-            return run(argv, **kw)
-        with patch.object(m, 'user_paths', return_value=('alice', clone, statefile, hook)), patch.object(m.subprocess, 'run', command):
-            with self.assertRaisesRegex(m.Error, 'may be enabled'):m.enable_user()
-            self.assertEqual(json.loads(statefile.read_text())['phase'], 'preparing')
-            with self.assertRaisesRegex(m.Error, 'Partial native clone'):m.user_status()
-        self.assertFalse(hook.exists())
-
     def test_locked_user_clone_refused(self):
         with patch.object(m.subprocess, 'run', return_value=SimpleNamespace(stdout='{"locked":true}')):
             with self.assertRaises(m.Error): m.unlocked()
@@ -974,9 +896,9 @@ class CompanionTest(unittest.TestCase):
         home = self.base / 'actual-home'; home.mkdir()
         alias = self.base / 'upn-home'; alias.symlink_to(home, target_is_directory=True)
         account = SimpleNamespace(pw_name='alice', pw_dir=str(alias))
-        with patch.object(m.pwd, 'getpwuid', return_value=account), patch.object(m.os, 'geteuid', return_value=1000):
-            user, clone, statefile, hook = m.user_paths()
-            self.assertEqual(clone, home / '.config/omarchy/plugins/alice.lock')
+        with patch.object(m.pwd, 'getpwuid', return_value=account):
+            self.assertEqual(m.canonical_user(), (account, home))
+            clone = home / '.config/omarchy/plugins/9spokes.himmelblau-lock'
             self.assertEqual(m.user_environment()['HOME'], str(home))
             self.assertEqual(m.user_environment()['USER'], 'alice')
             elsewhere = self.base / 'elsewhere'; elsewhere.mkdir()
@@ -1098,7 +1020,7 @@ class CompanionTest(unittest.TestCase):
         m.CONFIG.parent.chmod(0o755)
         m.CONFIG.chmod(0o600)
         before = m.CONFIG.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'protected/foreign'):self.setup()
+        with self.assertRaisesRegex(m.Error, 'root-owned 0644'):self.setup()
         self.assertEqual(m.CONFIG.read_bytes(), before)
         self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o600)
         self.assertFalse(m.PAM.exists())
@@ -1115,115 +1037,39 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
         m.doctor()
 
-    def test_reserved_user_clone_namespace_refused_before_any_mutation(self):
-        for name in ('omarchy', 'omarchy.alice'):
-            with self.subTest(name=name), patch.object(m.os, 'geteuid', return_value=1000), \
-                    patch.object(m, 'canonical_user', return_value=(SimpleNamespace(pw_name=name), self.base)), \
-                    patch.object(m, 'atomic') as write, patch.object(m.subprocess, 'run') as command:
-                with self.assertRaisesRegex(m.Error, 'reserved omarchy. namespace'):m.enable_user()
-                write.assert_not_called()
-                command.assert_not_called()
-
-    def test_native_discovery_bad_postcondition_keeps_partial_state(self):
-        self.setup()
-        valid = {'id': 'alice.lock', 'enabled': True, 'firstParty': False, 'clonedFrom': 'omarchy.lock'}
-        cases = [
-            [{'id': 'omarchy.lock', 'enabled': True, 'firstParty': True, 'clonedFrom': ''}],
-            [dict(valid, firstParty=True)], [dict(valid, enabled=False)],
-            [dict(valid, clonedFrom='other.lock')], {'plugins': [valid]},
-        ]
-        run = subprocess.run
-        for index, listing in enumerate(cases):
-            with self.subTest(listing=listing):
-                home = self.base / f'user-{index}'
-                clone = home / 'plugins/alice.lock'; statefile = home / 'state/state.json'; hook = home / 'hooks/check'
-                discoveries = 0
-                def command(argv, **kw):
-                    nonlocal discoveries
-                    if argv[0] == '/usr/bin/omarchy-shell':
-                        return SimpleNamespace(stdout=json.dumps({key: False for key in
-                            ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-                    if argv[:3] == ['/usr/bin/omarchy','plugin','clone']:
-                        clone.mkdir(parents=True)
-                        shutil.copy2(m.LOCK, clone / 'Service.qml')
-                        return SimpleNamespace(returncode=0)
-                    if argv == ['/usr/bin/omarchy','plugin','list','--json']:
-                        discoveries += 1
-                        return SimpleNamespace(stdout=json.dumps([] if discoveries == 1 else listing))
-                    return run(argv, **kw)
-                with patch.object(m, 'user_paths', return_value=('alice', clone, statefile, hook)), \
-                        patch.object(m.subprocess, 'run', command):
-                    with self.assertRaisesRegex(m.Error, 'preparation incomplete'):m.enable_user()
-                self.assertEqual(json.loads(statefile.read_text())['phase'], 'preparing')
-                self.assertEqual((clone / 'Service.qml').read_bytes(), m.LOCK.read_bytes())
-                self.assertFalse(hook.exists())
-
-    def legacy_clone(self):
-        clone = self.base / 'home/plugins/alice.lock'; clone.mkdir(parents=True)
-        shutil.copy2(m.LOCK, clone / 'Service.qml');shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
-        subprocess.run(['/usr/bin/patch','--batch','--fuzz=0','-p1','-d',str(clone)],
-            input=(ROOT/'tests/fixtures/lock-0.1.0.patch').read_bytes(),check=True,capture_output=True)
-        hook = self.base / 'home/hooks/check';m.atomic(hook,b'#!/bin/sh\ntrue\n',0o755)
-        statefile = self.base / 'home/state/state.json'
-        upstream=m.clone_hashes(m.LOCK.parent);upstream['Service.qml']=m.digest((clone/'Service.qml').read_bytes())
-        state={'phase':'ready','version':'0.1.0','clone_hash':upstream['Service.qml'],
-            'clone_files':m.clone_hashes(clone),'upstream_files':upstream,'hook_hash':m.digest(hook.read_bytes())}
-        m.atomic(statefile,json.dumps(state).encode(),0o600)
-        return clone,statefile,hook
-
-    def test_atomic_legacy_clone_upgrade_and_state_failure_restore(self):
-        self.setup();clone,statefile,hook=self.legacy_clone()
-        old_service=(clone/'Service.qml').read_bytes();old_view=(clone/'LockView.qml').read_bytes();old_state=statefile.read_bytes()
-        atomic=m.atomic;failed=False
-        def fail_once(path,data,mode):
-            nonlocal failed
-            if path==statefile and not failed:
-                failed=True;raise OSError('synthetic state failure')
-            return atomic(path,data,mode)
-        with patch.object(m,'unlocked'),patch.object(m,'verify_native_clone'),patch.object(m,'atomic',fail_once):
-            with self.assertRaises(OSError):m.upgrade_user('alice',clone,statefile,hook)
-        self.assertEqual((clone/'Service.qml').read_bytes(),old_service)
-        self.assertEqual((clone/'LockView.qml').read_bytes(),old_view)
-        self.assertEqual(statefile.read_bytes(),old_state)
-        with patch.object(m,'unlocked') as unlocked,patch.object(m,'verify_native_clone'):
-            m.upgrade_user('alice',clone,statefile,hook)
-            unlocked.assert_called_once()
-        self.assertEqual(json.loads(statefile.read_text())['version'],'0.5.2')
-        self.assertEqual((clone/'Service.qml').read_bytes(),m.patch_source('lock-conversation',m.LOCK.read_bytes()))
-        self.assertEqual((clone/'LockView.qml').read_bytes(),m.patch_source('lock-view',(m.LOCK.parent/'LockView.qml').read_bytes()))
-        self.assertEqual(clone.stat().st_uid,os.getuid())
-
-    def test_failed_exchange_rollback_retains_old_tree_and_state_backup(self):
-        self.setup();clone,statefile,hook=self.legacy_clone();old=statefile.read_bytes();old_service=(clone/'Service.qml').read_bytes()
-        exchange=m.exchange_directories;calls=0;atomic=m.atomic
-        def fail_rollback(left,right):
-            nonlocal calls
-            calls+=1
-            if calls==2:raise OSError('synthetic rollback failure')
-            return exchange(left,right)
-        def fail_state(path,data,mode):
-            if path==statefile:raise OSError('synthetic state failure')
-            return atomic(path,data,mode)
-        with patch.object(m,'unlocked'),patch.object(m,'verify_native_clone'),patch.object(m,'exchange_directories',fail_rollback),patch.object(m,'atomic',fail_state):
-            with self.assertRaisesRegex(m.Error,'backups retained'):m.upgrade_user('alice',clone,statefile,hook)
-        retained=list(clone.parent.parent.glob('.himmelblau-stage-*'));self.assertEqual(len(retained),1)
-        self.assertEqual((retained[0]/'clone/Service.qml').read_bytes(),old_service)
-        self.assertEqual((retained[0]/'previous-state.json').read_bytes(),old)
-
-    def test_unknown_legacy_clone_and_root_pam_drift_refuse_upgrade(self):
-        self.setup();clone,statefile,hook=self.legacy_clone();old=statefile.read_bytes()
-        (clone/'Service.qml').write_bytes((clone/'Service.qml').read_bytes()+b'// operator edit\n')
-        with self.assertRaises(m.Error):m.upgrade_user('alice',clone,statefile,hook)
-        self.assertEqual(statefile.read_bytes(),old)
-        m.PAM.write_bytes(b'unknown')
-        with self.assertRaisesRegex(m.Error,'authentication PAM'):m.upgrade_user('alice',clone,statefile,hook)
-
     def test_repair_view_preflight_precedes_new_pin_service_and_state_write(self):
-        self.setup();state=json.loads(m.STATE.read_text());state['files']=[entry for entry in state['files'] if Path(entry['path'])!=m.PIN_PAM]
-        m.save_state(state);m.PIN_PAM.unlink();before=m.STATE.read_bytes()
+        self.setup()
+        m.PIN_PAM.unlink()
+        before = m.STATE.read_bytes()
         view=m.LOCK.parent/'LockView.qml';view.write_bytes(view.read_bytes()+b'// unknown\n')
         with self.assertRaises(m.Error):m.repair()
         self.assertEqual(m.STATE.read_bytes(),before);self.assertFalse(m.PIN_PAM.exists())
+
+    def test_malformed_state_exits_with_one_line_error(self):
+        self.setup()
+        state = m.load_state()
+        cases = [b'not json', b'[]', json.dumps({**state, 'files': [{}]}).encode(),
+                 json.dumps({**state, 'admin': 'no'}).encode(),
+                 json.dumps({**state, 'transaction': {'kind': 'setup'}}).encode()]
+        for data in cases:
+            with self.subTest(data=data[:30]), patch.object(m, 'root_required'):
+                m.STATE.write_bytes(data)
+                with self.assertRaises(SystemExit) as exit:
+                    m.cli(['repair'])
+                self.assertRegex(exit.exception.code, f'^Invalid (JSON|state file): {m.STATE}$')
+
+    def test_malformed_patch_manifest_exits_with_one_line_error(self):
+        assets = self.base / 'assets'
+        assets.mkdir()
+        m.PAM.write_bytes(b'synthetic')
+        for data in ('not json', '[]', '{"lock-pam": {"before": 1}}'):
+            with self.subTest(data=data), patch.object(m, 'ASSETS', assets):
+                (assets / 'patches.json').write_text(data)
+                m._MANIFESTS.clear()
+                with self.assertRaises(SystemExit) as exit:
+                    m.cli(['plugin-status'])
+                self.assertTrue(exit.exception.code.startswith(f'Invalid {assets}/patches.json'))
+        m._MANIFESTS.clear()
 
     def test_identity_validation(self):
         self.assertEqual(m.identity('EXAMPLE.COM', 'Alice@EXAMPLE.COM'), ('example.com', 'alice@example.com'))
