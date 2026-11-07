@@ -449,6 +449,38 @@ class CompanionTest(unittest.TestCase):
             with self.assertRaises(m.Error):
                 m.locker_preflight()
 
+    def test_previous_plugin_release_still_locks_but_must_be_updated(self):
+        directory, listing = self.fixed_plugin_fixture()
+        listing[0]['enabled'] = False; listing[1]['enabled'] = True
+        service = directory / 'plugin/Service.qml'
+        service.write_bytes(service.read_bytes() + b'// previous release\n')
+        current = m.manifest('fixed-plugin')
+        previous = dict(m.manifest('previous-release'))
+        previous['plugin-files'] = dict(current['files'], **{'plugin/Service.qml': m.digest(service.read_bytes())})
+        manifest = m.manifest
+        with patch.object(m, 'manifest', lambda name: previous if name == 'previous-release' else manifest(name)), \
+                patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing), \
+                patch.object(m, 'unlocked'), patch.object(m.subprocess, 'run') as run:
+            m.locker_preflight()
+            m.main(['locker-preflight'])
+            needs = f'{previous["version"]} needs updating to {current["version"]}'
+            for action in (m.plugin_status, lambda: m.main(['status']), m.activate_plugin):
+                with self.assertRaisesRegex(m.Error, needs): action()
+            run.assert_not_called()
+            # Neither release: refused everywhere, the preflight included.
+            service.write_bytes(service.read_bytes() + b'// drift\n')
+            for action in (m.locker_preflight, m.plugin_status):
+                with self.assertRaisesRegex(m.Error, 'differs from companion release'): action()
+
+    def test_previous_plugin_release_record_matches_current_layout(self):
+        current = m.manifest('fixed-plugin')['files']
+        previous = m.manifest('previous-release')['plugin-files']
+        self.assertEqual(set(previous), set(current))
+        # Files that never change between releases must agree; the rest must differ.
+        for name in ('plugin/UPSTREAM-LICENSE', 'plugin/FingerprintModel.js', 'plugin/poster.sh', 'plugin/LICENSE'):
+            self.assertEqual(previous[name], current[name], name)
+        self.assertNotEqual(previous['manifest.json'], current['manifest.json'])
+
     def test_fixed_plugin_rejects_unlisted_and_symlink_runtime_files(self):
         directory, listing = self.fixed_plugin_fixture()
         extra = directory / 'plugin/Extra.qml'; extra.write_text('unlisted')

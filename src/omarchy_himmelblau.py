@@ -146,8 +146,8 @@ def manifest(name):
     if name == 'fixed-plugin':
         required = {'id': str, 'files': dict, 'upstream': dict}
     elif name == 'previous-release':
-        # The one release that repair upgrades from.
-        required = {'version': str, 'sddm-conversation': str}
+        # The one release that repair and locker-preflight upgrade from.
+        required = {'version': str, 'sddm-conversation': str, 'plugin-files': dict}
     else:
         required = {'filename': str, 'before': str, 'after': str}
     if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
@@ -1155,26 +1155,38 @@ def lock_implementations(plugins):
             (plugin['id'] == 'omarchy.lock' or plugin.get('clonedFrom') == 'omarchy.lock')]
 
 
-def fixed_plugin_files():
+def fixed_plugin_files(allow_previous=False):
+    """Check the installed fixed plugin. allow_previous also accepts the previous release."""
     account, home = canonical_user()
     info = manifest('fixed-plugin')
     directory = home / '.config/omarchy/plugins' / info['id']
     user_path_guard(home, directory)
-    expected = info['files']
     runtime_files = set()
     for path in (directory / 'plugin').rglob('*'):
         user_path_guard(home, path)
         if path.is_symlink() or path.is_dir():
             raise Error('Unexpected directory/symlink in fixed plugin runtime tree')
         runtime_files.add(str(path.relative_to(directory)))
-    if runtime_files != {name for name in expected if name.startswith('plugin/')}:
-        raise Error('Fixed plugin runtime tree differs from companion release')
-    for name, wanted in expected.items():
-        target = directory / name
-        user_path_guard(home, target)
-        data = read(target)
-        if data is None or digest(data) != wanted:
-            raise Error('Fixed plugin source differs from companion release')
+
+    def release(files):
+        if runtime_files != {name for name in files if name.startswith('plugin/')}:
+            return 'tree'
+        for name, wanted in files.items():
+            target = directory / name
+            user_path_guard(home, target)
+            data = read(target)
+            if data is None or digest(data) != wanted:
+                return 'source'
+        return None
+
+    mismatch = release(info['files'])
+    if mismatch:
+        previous = manifest('previous-release')
+        if release(previous['plugin-files']):
+            raise Error(f'Fixed plugin {"runtime tree" if mismatch == "tree" else "source"}'
+                        ' differs from companion release')
+        if not allow_previous:
+            raise Error(f'Fixed lock plugin {previous["version"]} needs updating to {info["version"]}')
     for name, wanted in info['upstream'].items():
         target = LOCK.parent / name
         data = read(target)
@@ -1193,10 +1205,10 @@ def lock_prerequisites():
         raise Error('Unsafe dedicated lock PAM metadata')
 
 
-def plugin_status(quiet=False):
+def plugin_status(quiet=False, allow_previous=False):
     user_required()
     lock_prerequisites()
-    info = fixed_plugin_files()
+    info = fixed_plugin_files(allow_previous)
     plugins = native_plugins()
     candidates = [plugin for plugin in plugins if plugin['id'] == info['id']]
     if (len(candidates) != 1 or candidates[0].get('firstParty') is not False
@@ -1210,8 +1222,12 @@ def plugin_status(quiet=False):
 
 
 def locker_preflight():
-    """Run by the lock plugin's guard: exit 0 when the fixed plugin can authenticate."""
-    plugin_status(quiet=True)
+    """Run by the lock plugin: exit 0 when the fixed plugin can authenticate.
+
+    The previous plugin release passes too: it refuses to lock without this check,
+    so an upgrade that updates the companion first must not stop it locking.
+    """
+    plugin_status(quiet=True, allow_previous=True)
 
 
 def activate_plugin():
