@@ -11,11 +11,12 @@ makedepends=('make')
 # Build from a reviewed checkout; no install hooks or network/source substitution.
 source=('source.tar.gz' 'native-payload.json')
 sha256sums=('@SOURCE_SHA256@' '@NATIVE_PAYLOAD_SHA256@')
-_repo="$srcdir/omarchy-himmelblau"
 build() {
+  local _repo="$srcdir/omarchy-himmelblau"
   make -B -C "$_repo" build/pin-change
 }
 package() {
+  local _repo="$srcdir/omarchy-himmelblau"
   install -Dm644 "$srcdir/native-payload.json" "$pkgdir/usr/share/omarchy-himmelblau/native-payload.json"
   make -C "$_repo" DESTDIR="$pkgdir" install
   install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

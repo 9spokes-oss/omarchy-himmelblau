@@ -29,7 +29,6 @@ sha256sums=('f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'
              'bc80c69a88224a7f44bc7d75c0340959743d274ed1f88937ba907f090530a2e4'
              'dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551'
              '@SOURCE_SHA256@')
-_repo="$srcdir/omarchy-himmelblau"
 
 prepare() {
   cd "sddm-$pkgver"
@@ -50,6 +49,7 @@ build() {
 }
 
 check() {
+  local _repo="$srcdir/omarchy-himmelblau"
   # Test source lives beside this recipe in the reviewed companion checkout.
   test -f "$_repo/tests/native-sddm/run.py" || { error 'Build from the full companion checkout to run native proofs'; return 1; }
   python3 "$_repo/tests/native-sddm/run.py" --source "$srcdir/sddm-$pkgver" \
