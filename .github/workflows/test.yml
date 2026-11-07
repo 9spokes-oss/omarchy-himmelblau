@@ -27,7 +27,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends cmake extra-cmake-modules libpam0g-dev libxau-dev libxcb1-dev libxkbcommon-dev libsystemd-dev qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools qtbase5-dev qtdeclarative5-dev qttools5-dev qttools5-dev-tools
+          sudo apt-get install -y --no-install-recommends cmake extra-cmake-modules libpam0g-dev libxau-dev libxcb1-dev libxcb-xkb-dev libxkbcommon-dev libsystemd-dev qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools qtbase5-dev qtdeclarative5-dev qttools5-dev qttools5-dev-tools
       - name: Verify pinned source, patches and resulting files
         run: python3 tools/prepare-native.py build/native-source
       - name: Build actual Qt6 daemon, helper and greeter
