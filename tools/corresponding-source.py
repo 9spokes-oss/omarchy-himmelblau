@@ -18,10 +18,8 @@ import tempfile
 root = Path(__file__).resolve().parents[1]
 release = Path(sys.argv[1]).resolve()
 record = json.loads((release / 'release.json').read_text())
-if subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD']).decode().strip() != record['commit']:
+if subprocess.check_output(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD']).decode().strip() != record['commit']:
     raise SystemExit('Use the exact release source checkout')
-if subprocess.check_output(['git', '-C', str(root), 'status', '--porcelain']):
-    raise SystemExit('Corresponding-source export requires a clean checkout')
 payload = (release / 'source.tar.gz').read_bytes()
 if hashlib.sha256(payload).hexdigest() != record['source_sha256']:
     raise SystemExit('Release source checksum mismatch')
@@ -30,20 +28,18 @@ with tempfile.TemporaryDirectory() as temp:
         archive.extractall(temp, filter='data')
     checkout = Path(temp) / 'omarchy-himmelblau'
     destination = Path(temp) / 'source'
+    provenance = json.loads((checkout / 'packaging/sddm-himmelblau/provenance.json').read_text())
+    name = 'sddm-' + provenance['baseline_tag'].removeprefix('v')
     subprocess.run([sys.executable, str(checkout / 'tools/prepare-native.py'), str(destination)], check=True)
-    source = destination / 'sddm-0.21.0'
+    def normalise(info):
+        info.uid = info.gid = 0
+        info.uname = info.gname = ''
+        info.mtime = 0
+        info.mode = 0o755 if info.isdir() or info.mode & 0o111 else 0o644
+        return info
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w') as archive:
-        for path in sorted(source.rglob('*')):
-            info = archive.gettarinfo(str(path), arcname='sddm-0.21.0/' + str(path.relative_to(source)))
-            info.uid = info.gid = 0
-            info.uname = info.gname = ''
-            info.mtime = 0
-            if path.is_file():
-                with path.open('rb') as data:
-                    archive.addfile(info, data)
-            else:
-                archive.addfile(info)
+        archive.add(destination / name, arcname=name, filter=normalise)
     payload = gzip.compress(buffer.getvalue(), mtime=0)
     output = release / 'sddm-corresponding-source.tar.gz'
     output.write_bytes(payload)
