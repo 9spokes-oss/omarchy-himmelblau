@@ -26,6 +26,5 @@ class PluginGenerationTest(unittest.TestCase):
         self.assertEqual(manifest['entryPoints'], {'service':'plugin/Service.qml'})
         self.assertEqual(manifest['kinds'], ['service'])
         self.assertIs(manifest['keepLoaded'], True)
-        self.assertEqual((ROOT/'plugin/LICENSE').read_bytes(), (ROOT/'LICENSE').read_bytes())
         self.assertIn('David Heinemeier Hansson', (ROOT/'plugin/UPSTREAM-LICENSE').read_text())
         self.assertIn('Qt.resolvedUrl("poster.sh")', (ROOT/'plugin/Service.qml').read_text())

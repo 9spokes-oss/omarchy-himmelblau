@@ -10,9 +10,8 @@ import "FingerprintModel.js" as FingerprintModel
 Item {
   id: root
 
-  property bool strandedRecoveryInProgress: false
-  property bool companionReady: false
   property bool pinRecoveryAvailable: false
+  property string lockWarning: ""
 
   property var shell: null
   property string omarchyPath: ""
@@ -62,6 +61,9 @@ Item {
   property bool recoveringPIN: false
   property int recoveryAttempt: 0
   property string lastRecoveryResult: "none"
+  property int pinRecoverySignal: 15
+  property int recoveryBackoffMs: 0
+  property double recoveryRetryAtMs: 0
   property string failureMessage: ""
   property int failedAttempts: 0
   property string backgroundPath: ""
@@ -146,14 +148,11 @@ Item {
   }
 
   function recoverStrandedLock() {
-    if (!strandedLock || currentlyLocked() || !passwordPamConfigured || !companionReady || strandedRecoveryInProgress) return
-    strandedRecoveryInProgress = true
-    var recovered = false
-    try { recovered = beginLock() } finally { strandedRecoveryInProgress = false }
-    if (!recovered) return
+    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
+
     strandedLock = false
-    strandedLockResolved = true
     logEvent("lock-stranded: recovering")
+    beginLock()
   }
 
   function refreshBackground() {
@@ -210,6 +209,8 @@ Item {
   function resetAuthenticationState() {
     enteredPassword = ""
     cancelPasswordAttempt()
+    passwordNotices = []
+    passwordMessageIsError = false
     failureMessage = ""
     failedAttempts = 0
     authenticatingPassword = false
@@ -230,29 +231,27 @@ Item {
     if (fingerprintPam.active) fingerprintPam.abort()
   }
 
-  function refreshPasswordPam() {
-    // Never trust a previous watch event when entering a new lock.
-    passwordPamConfigured = false
-    passwordPamFile.path = ""
-    passwordPamFile.path = "/etc/pam.d/omarchy-himmelblau-lock-password"
-    passwordPamFile.text()
+  function refuseLock() {
+    logEvent("lock-denied: missing-pam")
+    if (!lockRefusedNotice.running) lockRefusedNotice.running = true
   }
 
-  function refreshCompanionPrerequisites() {
-    if (companionCheck.running) return
-    companionCheckTimeout.restart()
-    companionCheck.running = true
+  // Runs after locking: a setup problem is shown on the lock, never a reason to stay unlocked.
+  function checkLockSetup() {
     if (!pinHelperCheck.running) pinHelperCheck.running = true
+    if (lockPreflight.running) return
+    lockWarning = ""
+    lockPreflightTimeout.restart()
+    lockPreflight.running = true
+  }
+
+  function warnLockSetup() {
+    if (lockRequested) lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
   }
 
   function beginLock() {
-    refreshPasswordPam()
-    if (!companionReady) {
-      logEvent("lock-denied: companion-prerequisites")
-      return false
-    }
     if (!passwordPamConfigured) {
-      logEvent("lock-denied: missing-pam")
+      refuseLock()
       return false
     }
 
@@ -261,6 +260,7 @@ Item {
     armBlankTimer()
     logEvent("lock-requested")
     queueSessionLock()
+    checkLockSetup()
 
     Qt.callLater(function() {
       root.refreshBackground()
@@ -273,6 +273,8 @@ Item {
   function finishUnlock() {
     if (!root.currentlyLocked()) return
 
+    recoveryBackoffMs = 0
+    recoveryRetryAtMs = 0
     lockRequested = false
     pendingSessionLock = false
     sessionLockStabilizeTimer.stop()
@@ -293,6 +295,7 @@ Item {
   function runWake() {
     if (!wakeProcess.running) wakeProcess.running = true
     if (lockRequested) armBlankTimer()
+    if (authenticatingPassword) conversationIdleTimer.restart()
     resumeFingerprint()
     nudgeFingerprint()
   }
@@ -402,9 +405,11 @@ Item {
 
   function submitPassword(value) {
     if (!lockRequested) return
+    var response = String(value || "")
+    // Enter on an empty hidden prompt is a stray key, and PAM would count it as a failure.
+    var strayEnter = response.length === 0 && !passwordResponseVisible
     if (pinRecovery) {
-      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running) return
-      var response = String(value || "")
+      if (!recoveringPIN || !awaitingPasswordResponse || !pinRecovery.running || strayEnter) return
       clearPasswordPrompt()
       try {
         var encoded = encodeURIComponent(response)
@@ -415,14 +420,13 @@ Item {
     }
     if (authenticatingPassword) {
       var context = passwordPam
-      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired) return
-      var response = String(value || "")
+      if (!context || !context.active || !awaitingPasswordResponse || !context.responseRequired || strayEnter) return
       clearPasswordPrompt()
       context.respond(response)
       return
     }
     // The idle field is read-only: begin first, then type into the actual PAM prompt.
-    if (passwordPam || String(value || "").length > 0) return
+    if (passwordPam || response.length > 0) return
     runWake()
     clearPasswordPrompt()
     passwordNotices = []
@@ -444,15 +448,18 @@ Item {
       passwordPrompt = message
       passwordResponseVisible = context.responseVisible
       awaitingPasswordResponse = true
-    } else if (message.length > 0) {
-      var notices = passwordNotices.slice()
-      if (notices.length === 0 || notices[notices.length - 1] !== message) {
-        if (notices.length < 8) notices.push(message)
-        else notices[7] = message
-        passwordNotices = notices
-      }
+    } else {
+      addPasswordNotice(message)
     }
     runWake()
+  }
+
+  function addPasswordNotice(text) {
+    var notices = passwordNotices.slice()
+    if (text.length === 0 || (notices.length > 0 && notices[notices.length - 1] === text)) return
+    if (notices.length < 8) notices.push(text)
+    else notices[7] = text
+    passwordNotices = notices
   }
 
   function settlePasswordAttempt(context, attempt, success, cancelled) {
@@ -501,6 +508,12 @@ Item {
       failureMessage = "PIN recovery helper unavailable; normal sign-in remains available."
       return
     }
+    var waitMs = recoveryRetryAtMs - Date.now()
+    if (waitMs > 0) {
+      var wait = waitMs > 90000 ? Math.ceil(waitMs / 60000) + " min" : Math.ceil(waitMs / 1000) + " s"
+      failureMessage = "Try PIN reset again in " + wait + "."
+      return
+    }
     clearPasswordPrompt()
     passwordNotices = []
     passwordMessageIsError = false
@@ -521,7 +534,7 @@ Item {
 
   function handlePinRecoveryLine(context, attempt, line) {
     if (!currentPinRecovery(context, attempt)) return
-    if (line.length > 20000 || ++context.messageCount > 256) { stopPinRecovery("failed"); return }
+    if (line.length > 20000) { stopPinRecovery("failed"); return }
     var message
     try { message = JSON.parse(line) } catch (error) { stopPinRecovery("failed"); return }
     if (!message || typeof message !== "object" || Array.isArray(message) || context.resultReceived) { stopPinRecovery("failed"); return }
@@ -531,7 +544,9 @@ Item {
       context.reportedSuccess = message.success
       return
     }
-    if ((message.type !== "prompt" && message.type !== "info" && message.type !== "error") || typeof message.text !== "string" || message.text.length > 8192) {
+    // The helper sends at most 256 messages; its result line is not one of them.
+    if (++context.messageCount > 256 || (message.type !== "prompt" && message.type !== "info" && message.type !== "error")
+        || typeof message.text !== "string" || message.text.length > 8192) {
       stopPinRecovery("failed")
       return
     }
@@ -543,36 +558,53 @@ Item {
       passwordResponseVisible = message.visible
       awaitingPasswordResponse = true
     } else {
-      var notices = passwordNotices.slice()
-      if (notices.length === 0 || notices[notices.length - 1] !== message.text) {
-        if (notices.length < 8) notices.push(message.text)
-        else notices[7] = message.text
-        passwordNotices = notices
-      }
+      addPasswordNotice(message.text)
     }
     runWake()
   }
 
   function stopPinRecovery(result) {
     var context = pinRecovery
-    if (!context) return
-    // Invalidate before killing, and retain the process until it has exited.
+    // A second stop (Esc again) must not restart the escalation.
+    if (!context || !recoveringPIN) return
+    // Invalidate before stopping, and retain the process until it has exited.
     recoveringPIN = false
     recoveryAttempt += 1
     lastRecoveryResult = result
     clearPasswordPrompt()
     passwordNotices = ["PIN change stopped; it may already have completed. Sign in to check."]
     passwordMessageIsError = result === "failed"
-    if (context.running) context.signal(9)
-    else finishPinRecovery(context, context.attemptId, 1)
+    if (!context.running) {
+      finishPinRecovery(context, context.attemptId, 1)
+      return
+    }
+    // End of input makes the helper's PAM conversation fail and clean up; signals only if it hangs.
+    context.stdinEnabled = false
+    pinRecoverySignal = 15
+    pinRecoveryStopTimer.restart()
+  }
+
+  function escalatePinRecoveryStop() {
+    if (!pinRecovery || !pinRecovery.running) return
+    pinRecovery.signal(pinRecoverySignal)
+    pinRecoverySignal = 9
+    pinRecoveryStopTimer.restart()
   }
 
   function finishPinRecovery(context, attempt, exitCode) {
     if (context !== pinRecovery) return
+    pinRecoveryStopTimer.stop()
     if (currentPinRecovery(context, attempt)) {
       lastRecoveryResult = exitCode === 0 && context.reportedSuccess ? "success" : "failed"
       passwordNotices = [lastRecoveryResult === "success" ? "PIN updated; sign in with the new PIN." : "PIN change failed; sign in to check or retry recovery."]
       passwordMessageIsError = lastRecoveryResult !== "success"
+    }
+    // Space out failed or cancelled attempts: 30 s, doubling up to 15 min.
+    if (lastRecoveryResult === "success") {
+      recoveryBackoffMs = 0
+    } else {
+      recoveryBackoffMs = Math.min(Math.max(30000, recoveryBackoffMs * 2), 900000)
+      recoveryRetryAtMs = Date.now() + recoveryBackoffMs
     }
     recoveringPIN = false
     pinRecovery = null
@@ -715,6 +747,7 @@ Item {
         responseVisible: root.passwordResponseVisible
         conversationMessage: root.passwordNotices.join("\n\n")
         promptMessage: root.passwordPrompt
+        warningMessage: root.lockWarning
         onRecoveryRequested: root.beginPinRecovery()
         conversationError: root.passwordMessageIsError
         onCancelRequested: root.cancelPasswordAttempt()
@@ -779,6 +812,12 @@ Item {
       onCompleted: function(result) { root.completePasswordAttempt(conversation, attemptId, result) }
       onError: function(error) { root.handlePasswordFailure(conversation, attemptId) }
     }
+  }
+
+  Timer {
+    id: pinRecoveryStopTimer
+    interval: 2000
+    onTriggered: root.escalatePinRecoveryStop()
   }
 
   Component {
@@ -995,10 +1034,11 @@ Item {
         root.armBlankTimer(resumeMs)
         return
       }
-      // Only a password check in flight should hold the display up. The
+      // Only a password check waiting on PAM should hold the display up; a
+      // prompt waiting for the user blanks like the idle lock. The
       // fingerprint PAM stays armed for the whole lock, so gating on
       // `authenticating` here would keep the panel lit until unlock.
-      if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
+      if (root.lockRequested && (!root.authenticatingPassword || root.awaitingPasswordResponse)) root.runBlank()
     }
   }
 
@@ -1052,49 +1092,53 @@ Item {
     }
   }
 
+  // Cancels a sign-in or PIN change after a minute without PAM messages or user activity.
+  Timer {
+    id: conversationIdleTimer
+    interval: 60000
+    onTriggered: root.cancelPasswordAttempt()
+  }
+
   onAuthenticatingPasswordChanged: {
+    if (authenticatingPassword) conversationIdleTimer.restart()
+    else conversationIdleTimer.stop()
     if (!lockRequested) return
     if (authenticatingPassword) idleBlankTimer.stop()
     else armBlankTimer()
   }
 
   FileView {
-    id: passwordPamFile
     path: "/etc/pam.d/omarchy-himmelblau-lock-password"
-    preload: false
-    blockAllReads: true
     watchChanges: true
     printErrors: false
-    onLoaded: root.passwordPamConfigured = text() === "#%PAM-1.0\nauth       required                    pam_faillock.so preauth silent deny=10 unlock_time=120\nauth       [success=1 default=ignore] pam_localuser.so\nauth       [success=3 ignore=ignore default=bad] pam_himmelblau.so ignore_unknown_user\n-auth      [success=2 default=ignore]  pam_systemd_home.so\nauth       [success=1 default=bad]     pam_unix.so try_first_pass nullok\nauth       [default=die]               pam_faillock.so authfail deny=10 unlock_time=120\nauth       optional                    pam_permit.so\nauth       required                    pam_env.so\nauth       required                    pam_faillock.so authsucc\naccount    include                     system-local-login\n"
+    onLoaded: root.passwordPamConfigured = true
     onLoadFailed: root.passwordPamConfigured = false
-    onFileChanged: root.refreshPasswordPam()
+    onFileChanged: reload()
   }
 
   Process {
-    id: companionCheck
+    id: lockRefusedNotice
+    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password"]
+  }
+
+  Process {
+    id: lockPreflight
     command: ["/usr/bin/omarchy-himmelblau", "locker-preflight"]
     stdout: SplitParser { onRead: function(data) {} }
     stderr: SplitParser { onRead: function(data) {} }
     onExited: function(exitCode) {
-      companionCheckTimeout.stop()
-      root.companionReady = exitCode === 0
+      lockPreflightTimeout.stop()
+      if (exitCode !== 0) root.warnLockSetup()
     }
   }
 
   Timer {
-    id: companionCheckTimeout
-    interval: 5000
+    id: lockPreflightTimeout
+    interval: 15000
     onTriggered: {
-      root.companionReady = false
-      if (companionCheck.running) companionCheck.signal(9)
+      root.warnLockSetup()
+      lockPreflight.signal(15)
     }
-  }
-
-  Timer {
-    interval: 5000
-    running: !root.currentlyLocked()
-    repeat: true
-    onTriggered: root.refreshCompanionPrerequisites()
   }
 
   Process {
@@ -1105,13 +1149,8 @@ Item {
 
   // No lock before PAM is known good. An answer from before then may be stale --
   // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
-  onCompanionReadyChanged: {
-    if (companionReady) recoverStrandedLock()
-  }
-
   onPasswordPamConfiguredChanged: {
     if (!passwordPamConfigured) return
-    if (strandedLock) { recoverStrandedLock(); return }
 
     strandedLock = false
     strandedLockResolved = false
@@ -1120,8 +1159,6 @@ Item {
   }
 
   Component.onCompleted: {
-    refreshPasswordPam()
-    refreshCompanionPrerequisites()
     knownScreenCount = realScreenCount()
     refreshBackground()
     refreshFingerprintStatus()
@@ -1132,7 +1169,10 @@ Item {
     target: "lock"
 
     function lock(): string {
-      if (!root.passwordPamConfigured) return "missing-pam"
+      if (!root.passwordPamConfigured) {
+        root.refuseLock()
+        return "missing-pam"
+      }
       // omarchy-system-sleep-lock asks for the lock before every suspend.
       if (root.currentlyLocked()) root.noteSleepRequested()
       if (!root.currentlyLocked() && !root.beginLock()) return "failed"
@@ -1152,7 +1192,7 @@ Item {
         secure: sessionLock.secure,
         realScreens: root.realScreenCount(),
         passwordPam: root.passwordPamConfigured,
-        companionReady: root.companionReady,
+        lockWarning: root.lockWarning,
         recoveryAvailable: root.pinRecoveryAvailable,
         fingerprint: root.fingerprintConfigured,
         fingerprintUnavailable: root.fingerprintUnavailable,
