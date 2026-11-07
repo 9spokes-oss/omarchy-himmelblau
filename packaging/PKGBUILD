@@ -1,7 +1,7 @@
 # Maintainer: 9Spokes OSS
 pkgname=omarchy-himmelblau
 pkgver=0.1.0
-pkgrel=1
+pkgrel=3
 pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau installation'
 arch=('any')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'

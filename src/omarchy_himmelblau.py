@@ -147,6 +147,15 @@ def read_generated_config():
 
 
 def configuration_scope(domain, user):
+    current = read(CONFIG)
+    parent = CONFIG.parent
+    if (not parent.is_dir() or parent.stat().st_uid != os.geteuid()
+            or stat.S_IMODE(parent.stat().st_mode) != 0o755):
+        raise Error('Main configuration directory must already be root-owned 0755; protected/missing directory requires manual review')
+    if current is not None:
+        metadata = CONFIG.stat()
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644:
+            raise Error('Existing main configuration must be root-owned 0644; protected/foreign configuration requires manual review')
     # The local main file supersedes vendor/runtime mains, but drop-ins merge.
     # Supporting arbitrary operator drop-in precedence is deliberately out of scope.
     for layer in (*CONFIG_LAYERS, CONFIG):
@@ -261,6 +270,29 @@ def planned(path, data, mode):
             'after': digest(data), 'data': data, 'mode': mode}
 
 
+def theme_directories(entries):
+    directories = set()
+    for entry in entries:
+        path = Path(entry['path'])
+        if path.is_relative_to(COPY_THEME):
+            parent = path.parent
+            while parent.is_relative_to(COPY_THEME):
+                directories.add(parent)
+                if parent == COPY_THEME:
+                    break
+                parent = parent.parent
+    return sorted(directories, key=lambda path: (len(path.parts), str(path)))
+
+
+def checked_theme_directories(entries):
+    directories = theme_directories(entries)
+    for directory in directories:
+        safe(directory / '.guard')
+        if not directory.is_dir() or directory.stat().st_uid != os.geteuid():
+            raise Error(f'Unowned or missing companion theme directory: {directory}')
+    return directories
+
+
 def setup(domain, user, admin=False):
     domain, user = identity(domain, user)
     if read(STATE) is not None:
@@ -285,7 +317,7 @@ def setup(domain, user, admin=False):
     if lock is None:
         raise Error('Missing Omarchy lock source')
     patch_source('lock-single-response', lock)
-    add(CONFIG, managed_config(read(CONFIG), domain, user), 0o600)
+    add(CONFIG, managed_config(read(CONFIG), domain, user), 0o644)
     if COPY_THEME.exists() or COPY_THEME.is_symlink():
         raise Error('Companion SDDM theme already exists without managed state')
     if THEME.is_symlink() or not THEME.is_dir():
@@ -321,6 +353,10 @@ def setup(domain, user, admin=False):
              'files': [{k: v for k, v in entry.items() if k != 'data'} for entry in changes]}
     save_state(state)
     try:
+        for directory in theme_directories(changes):
+            safe(directory / '.guard')
+            directory.mkdir(mode=0o755)
+            directory.chmod(0o755)  # Public greeter assets, independent of root umask.
         for entry in changes:
             atomic(Path(entry['path']), entry['data'], entry['mode'])
     except Exception:
@@ -360,6 +396,12 @@ def root_issues(state):
         path = Path(entry['path'])
         if actual is None or digest(actual) != entry['after'] or stat.S_IMODE(path.stat().st_mode) != entry['mode'] or path.stat().st_uid != os.geteuid():
             issues.append(f'Managed file drift: {entry["path"]}')
+    try:
+        for directory in checked_theme_directories(state['files']):
+            if stat.S_IMODE(directory.stat().st_mode) != 0o755:
+                issues.append(f'Companion theme directory must be 0755: {directory}')
+    except Error as error:
+        issues.append(str(error))
     pam = read(PAM)
     expected_pam = json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']['after']
     if pam is None or digest(pam) != expected_pam:
@@ -406,6 +448,10 @@ def repair():
     if source is None:
         raise Error('Missing lock source')
     patch_source('lock-single-response', source)
+    directories = checked_theme_directories(state['files'])
+    for directory in directories:
+        if stat.S_IMODE(directory.stat().st_mode) != 0o755:
+            directory.chmod(0o755)
     for path, data, mode in repairs:
         atomic(path, data, mode)
     doctor()
@@ -460,6 +506,8 @@ def user_paths():
     user = account.pw_name
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', user) or '..' in user:
         raise Error('Unsupported native clone user ID')
+    if (user + '.lock').startswith('omarchy.'):
+        raise Error('Native clone ID would use the reserved omarchy. namespace; enable-user is unsupported for this username')
     return (user, home / '.config/omarchy/plugins' / (user + '.lock'),
             home / '.local/state/omarchy-himmelblau/state.json',
             home / '.config/omarchy/hooks/post-update.d/omarchy-himmelblau-check')
@@ -532,6 +580,22 @@ def user_status():
     print(f'{user}.lock source and read-only hook match. Log out/in after changes; runtime activation is not inferred.')
 
 
+def verify_native_clone(user):
+    result = subprocess.run(['omarchy', 'plugin', 'list', '--json'], check=True,
+                            capture_output=True, text=True, env=user_environment())
+    try:
+        plugins = json.loads(result.stdout)
+    except ValueError:
+        raise Error('Native plugin discovery returned invalid JSON') from None
+    if not isinstance(plugins, list):
+        raise Error('Native plugin discovery did not return the supported array schema')
+    matches = [plugin for plugin in plugins if isinstance(plugin, dict) and plugin.get('id') == user + '.lock']
+    if (len(matches) != 1 or matches[0].get('firstParty') is not False
+            or matches[0].get('clonedFrom') != 'omarchy.lock'
+            or matches[0].get('enabled') is not True):
+        raise Error('Native discovery did not confirm the enabled third-party clone and its provenance')
+
+
 def enable_user():
     user, clone, statefile, hook = user_paths()
     unlocked()
@@ -559,6 +623,7 @@ def enable_user():
     atomic(statefile, b'{"phase": "preparing"}\n', 0o600)
     try:
         subprocess.run(['omarchy', 'plugin', 'clone', 'omarchy.lock'], check=True, env=user_environment())
+        verify_native_clone(user)
         actual = read(clone / 'Service.qml')
         if actual != source:
             raise Error('Native clone source differs; inspect manually before using the locker')
@@ -570,8 +635,9 @@ def enable_user():
         atomic(hook, hook_data, 0o755)
         atomic(statefile, (json.dumps({'phase': 'ready', 'version': VERSION, 'clone_hash': digest(expected),
                                      'hook_hash': digest(hook_data), 'clone_files': clone_hashes(clone), 'upstream_files': original_tree}, indent=2) + '\n').encode(), 0o600)
-    except Exception:
-        raise Error('Native clone preparation incomplete; it may be enabled. Do not lock. Disable the native clone and inspect user state before retrying.') from None
+    except Exception as error:
+        detail = f' {error}.' if isinstance(error, Error) else ''
+        raise Error('Native clone preparation incomplete.' + detail + ' It may be enabled. Do not lock. Disable the native clone and inspect user state before retrying.') from None
     print('Native clone prepared and auto-enabled by Omarchy. No shell restart was performed.')
     print('Log out and back in while unlocked before lock testing; keepLoaded code may still be old until then.')
     print('Menu integration is an optional documented JSONC snippet; existing menus were not modified.')

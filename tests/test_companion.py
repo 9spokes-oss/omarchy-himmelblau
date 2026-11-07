@@ -49,7 +49,9 @@ class CompanionTest(unittest.TestCase):
             path.write_bytes((ROOT / 'tests/fixtures' / fixture).read_bytes())
         (m.THEME / 'logo.png').write_bytes(b'synthetic-image')
         m.CONFIG.parent.mkdir(parents=True)
+        m.CONFIG.parent.chmod(0o755)
         m.CONFIG.write_text('# operator comment\n[global]\nconnection_timeout = 17\n\n[example.com]\ncustom = untouched\n')
+        m.CONFIG.chmod(0o644)
         m.LOCAL_PASSWD.write_text('recovery:x:1000:1000::/home/recovery:/bin/bash\n')
         self.before = {path: path.read_bytes() for path in [m.STOCK_PAM, m.LOCK, m.CONFIG]}
 
@@ -187,6 +189,9 @@ class CompanionTest(unittest.TestCase):
                 self.assertEqual(kw['env']['OMARCHY_PATH'], '/usr/share/omarchy')
                 return SimpleNamespace(stdout=json.dumps({key: False for key in
                     ('locked','requested','pending','sessionLocked','secure','authenticating')}))
+            if argv == ['omarchy', 'plugin', 'list', '--json']:
+                return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
+                    'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
             if argv[:3] == ['omarchy', 'plugin', 'clone']:
                 clone.mkdir(parents=True)
                 shutil.copy2(m.LOCK, clone / 'Service.qml')  # manifest.json directory branch copies exactly
@@ -194,7 +199,8 @@ class CompanionTest(unittest.TestCase):
             return run(argv, **kw)
         with patch.object(m, 'user_paths', return_value=paths), patch.object(m.subprocess, 'run', command):
             m.enable_user(); m.user_status(); m.enable_user()
-        self.assertEqual(sum(cmd[0] == 'omarchy' for cmd in commands), 1)
+        self.assertEqual(sum(cmd[:3] == ['omarchy', 'plugin', 'clone'] for cmd in commands), 1)
+        self.assertIn(['omarchy', 'plugin', 'list', '--json'], commands)
         self.assertEqual((clone / 'Service.qml').read_bytes(), m.patch_source('lock-single-response', self.before[m.LOCK]))
         self.assertIn('omarchy-himmelblau status', hook.read_text())
         self.assertNotIn('sudo ', hook.read_text().split('printf')[0])
@@ -213,6 +219,9 @@ class CompanionTest(unittest.TestCase):
             if argv[0] == 'omarchy-shell':
                 return SimpleNamespace(stdout=json.dumps({key: False for key in
                     ('locked','requested','pending','sessionLocked','secure','authenticating')}))
+            if argv == ['omarchy', 'plugin', 'list', '--json']:
+                return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
+                    'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
             if argv[0] == 'omarchy':
                 clone.mkdir(parents=True)
                 (clone / 'Service.qml').write_bytes(m.LOCK.read_bytes().replace(b'import qs.Commons\n', b'import "unexpected"\n'))
@@ -303,6 +312,115 @@ class CompanionTest(unittest.TestCase):
             config.unlink(); config.symlink_to(target / 'unexpected-config')
             with self.assertRaises(m.Error):m.read_generated_config()
         self.assertFalse((target / 'new-file').exists())
+
+    def test_public_theme_directories_under_private_umask_and_repair(self):
+        nested = m.THEME / 'assets/icons'; nested.mkdir(parents=True)
+        (nested / 'lock.png').write_bytes(b'synthetic-icon')
+        previous = os.umask(0o077)
+        try:
+            self.setup()
+        finally:
+            os.umask(previous)
+        directories = [m.COPY_THEME, m.COPY_THEME / 'assets', m.COPY_THEME / 'assets/icons']
+        for directory in directories:
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(m.STATE.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
+        directories[0].chmod(0o700)
+        with self.assertRaisesRegex(m.Error, '0755'):m.doctor()
+        m.repair()
+        self.assertEqual(directories[0].stat().st_mode & 0o777, 0o755)
+        self.assertEqual(m.STATE.parent.stat().st_mode & 0o777, 0o700)
+        # All files must pass preflight before directory permissions are repaired.
+        directories[0].chmod(0o700)
+        m.CONFIG.write_bytes(m.CONFIG.read_bytes() + b'# unexpected operator edit\n')
+        with self.assertRaises(m.Error):m.repair()
+        self.assertEqual(directories[0].stat().st_mode & 0o777, 0o700)
+
+    def test_theme_directory_repair_refuses_foreign_owner_and_symlinks(self):
+        nested = m.THEME / 'assets'; nested.mkdir()
+        (nested / 'icon.png').write_bytes(b'icon')
+        self.setup()
+        m.COPY_THEME.chmod(0o700)
+        original_stat = Path.stat
+        def metadata(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if path == m.COPY_THEME:
+                return SimpleNamespace(st_uid=os.geteuid() + 1, st_gid=result.st_gid, st_mode=result.st_mode)
+            return result
+        with patch.object(Path, 'stat', metadata):
+            with self.assertRaisesRegex(m.Error, 'Unowned'):m.repair()
+        self.assertEqual(m.COPY_THEME.stat().st_mode & 0o777, 0o700)
+        outside = self.base / 'moved-assets'
+        (m.COPY_THEME / 'assets').rename(outside)
+        (m.COPY_THEME / 'assets').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(m.Error, 'Symlink'):m.repair()
+        self.assertEqual(m.COPY_THEME.stat().st_mode & 0o777, 0o700)
+
+    def test_fresh_main_config_is_public_and_protected_config_is_refused(self):
+        m.CONFIG.parent.chmod(0o700)
+        with self.assertRaisesRegex(m.Error, 'directory'):self.setup()
+        self.assertEqual(m.CONFIG.parent.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(m.STATE.exists())
+        m.CONFIG.parent.chmod(0o755)
+        m.CONFIG.chmod(0o600)
+        before = m.CONFIG.read_bytes()
+        with self.assertRaisesRegex(m.Error, 'protected/foreign'):self.setup()
+        self.assertEqual(m.CONFIG.read_bytes(), before)
+        self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(m.PAM.exists())
+        self.assertFalse(m.STATE.exists())
+        m.CONFIG.unlink()
+        previous = os.umask(0o077)
+        try:
+            self.setup()
+        finally:
+            os.umask(previous)
+        self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(m.CONFIG.parent.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(m.STATE.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
+        m.doctor()
+
+    def test_reserved_user_clone_namespace_refused_before_any_mutation(self):
+        for name in ('omarchy', 'omarchy.alice'):
+            with self.subTest(name=name), patch.object(m.os, 'geteuid', return_value=1000), \
+                    patch.object(m, 'canonical_user', return_value=(SimpleNamespace(pw_name=name), self.base)), \
+                    patch.object(m, 'atomic') as write, patch.object(m.subprocess, 'run') as command:
+                with self.assertRaisesRegex(m.Error, 'reserved omarchy. namespace'):m.enable_user()
+                write.assert_not_called()
+                command.assert_not_called()
+
+    def test_native_discovery_bad_postcondition_keeps_partial_state(self):
+        self.setup()
+        valid = {'id': 'alice.lock', 'enabled': True, 'firstParty': False, 'clonedFrom': 'omarchy.lock'}
+        cases = [
+            [{'id': 'omarchy.lock', 'enabled': True, 'firstParty': True, 'clonedFrom': ''}],
+            [dict(valid, firstParty=True)], [dict(valid, enabled=False)],
+            [dict(valid, clonedFrom='other.lock')], {'plugins': [valid]},
+        ]
+        run = subprocess.run
+        for index, listing in enumerate(cases):
+            with self.subTest(listing=listing):
+                home = self.base / f'user-{index}'
+                clone = home / 'plugins/alice.lock'; statefile = home / 'state/state.json'; hook = home / 'hooks/check'
+                def command(argv, **kw):
+                    if argv[0] == 'omarchy-shell':
+                        return SimpleNamespace(stdout=json.dumps({key: False for key in
+                            ('locked','requested','pending','sessionLocked','secure','authenticating')}))
+                    if argv[:3] == ['omarchy','plugin','clone']:
+                        clone.mkdir(parents=True)
+                        shutil.copy2(m.LOCK, clone / 'Service.qml')
+                        return SimpleNamespace(returncode=0)
+                    if argv == ['omarchy','plugin','list','--json']:
+                        return SimpleNamespace(stdout=json.dumps(listing))
+                    return run(argv, **kw)
+                with patch.object(m, 'user_paths', return_value=('alice', clone, statefile, hook)), \
+                        patch.object(m.subprocess, 'run', command):
+                    with self.assertRaisesRegex(m.Error, 'preparation incomplete'):m.enable_user()
+                self.assertEqual(json.loads(statefile.read_text())['phase'], 'preparing')
+                self.assertEqual((clone / 'Service.qml').read_bytes(), m.LOCK.read_bytes())
+                self.assertFalse(hook.exists())
 
     def test_identity_validation(self):
         self.assertEqual(m.identity('EXAMPLE.COM', 'Alice@EXAMPLE.COM'), ('example.com', 'alice@example.com'))
