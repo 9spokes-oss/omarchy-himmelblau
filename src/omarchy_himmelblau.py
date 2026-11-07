@@ -581,7 +581,7 @@ def setup(domain, user, admin=False):
         save_state(state)
     except Exception:
         try:
-            rollback(_setup_recovery=True)
+            undo_setup()
         except Exception:
             raise Error('Setup interrupted; automatic rollback blocked. Originals retained in root state; inspect manually.') from None
         raise Error('Setup failed; files changed by this attempt were restored.') from None
@@ -1024,7 +1024,7 @@ def require_no_live_locker(recovery_only=False):
     try:
         result = run(['/usr/bin/loginctl', 'list-sessions', '--json=short'], text=True, timeout=5)
         sessions = json.loads(result.stdout)
-        if not isinstance(sessions, list) or len(sessions) > 64:
+        if not isinstance(sessions, list):
             raise Error('Unknown session enumeration')
         for session in sessions:
             name = session.get('session') if isinstance(session, dict) else None
@@ -1044,11 +1044,24 @@ def require_no_live_locker(recovery_only=False):
         raise Error('Rollback/recovery requires all graphical/locker sessions exited; unknown state is refused. Use --recovery-only only from independent recovery access.') from None
 
 
-def rollback(recovery_only=False, _setup_recovery=False):
+def rollback(recovery_only=False):
     state = load_state()
     no_pending_recovery()
-    if not (_setup_recovery and state.get('transaction', {}).get('kind') == 'setup'):
-        require_no_live_locker(recovery_only)
+    require_no_live_locker(recovery_only)
+    restore_managed_files(state)
+    print('Root managed files restored. Required beforehand: disable the clone and exit every session using it; keepLoaded code survives disabling. User clone/hooks remain separate.')
+
+
+def undo_setup():
+    # A failed setup ran from a live session, so the locker check does not apply.
+    state = load_state()
+    no_pending_recovery()
+    if state.get('transaction', {}).get('kind') != 'setup':
+        raise Error('No interrupted setup to undo')
+    restore_managed_files(state)
+
+
+def restore_managed_files(state):
     # Validate every target first: never partly restore over unrecognized edits.
     if COPY_THEME.is_dir():
         expected = {entry['path'] for entry in state['files']}
@@ -1072,8 +1085,7 @@ def rollback(recovery_only=False, _setup_recovery=False):
             unlink_durable(path, missing_ok=True)
         else:
             atomic(path, base64.b64decode(entry['before']), entry['before_mode'])
-            if os.geteuid() == 0:
-                os.chown(path, entry['before_uid'], entry['before_gid'])
+            os.chown(path, entry['before_uid'], entry['before_gid'])
         state['transaction']['progress'][entry['path']] = 'restored'
         save_state(state)
     # Only remove empty companion theme directories; never recursively delete others' data.
@@ -1082,7 +1094,6 @@ def rollback(recovery_only=False, _setup_recovery=False):
             rmdir_durable(directory)
         rmdir_durable(COPY_THEME)
     unlink_durable(STATE)
-    print('Root managed files restored. Required beforehand: disable the clone and exit every session using it; keepLoaded code survives disabling. User clone/hooks remain separate.')
 
 
 def no_extended_acl(path):
@@ -1397,6 +1408,10 @@ def verify_native_clone(user):
         raise Error('Native discovery did not confirm the enabled third-party clone and its provenance')
 
 
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2  # linux/fs.h
+
+
 def exchange_directories(left, right):
     import ctypes
     libc = ctypes.CDLL(None, use_errno=True)
@@ -1405,7 +1420,7 @@ def exchange_directories(left, right):
         raise Error('Atomic directory exchange unavailable; refusing unsafe clone update')
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(left), -100, os.fsencode(right), 2):
+    if rename(AT_FDCWD, os.fsencode(left), AT_FDCWD, os.fsencode(right), RENAME_EXCHANGE):
         raise Error('Atomic directory exchange failed; clone not replaced')
 
 
