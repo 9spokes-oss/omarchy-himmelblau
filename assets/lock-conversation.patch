@@ -144,7 +144,10 @@
 +    passwordPam = context
 +    if (!context || !context.start()) handlePasswordFailure(context, passwordAttempt)
 +  }
-+
+ 
+-    if (!passwordPam.start()) {
+-      handlePasswordFailure()
+-      return
 +  function handlePasswordMessage(context, attempt) {
 +    if (!currentPasswordAttempt(context, attempt) || !context.active) return
 +    clearPasswordPrompt()
@@ -154,20 +157,26 @@
 +      passwordPrompt = message
 +      passwordResponseVisible = context.responseVisible
 +      awaitingPasswordResponse = true
-+    } else if (message.length > 0) {
-+      var notices = passwordNotices.slice()
-+      if (notices.length === 0 || notices[notices.length - 1] !== message) {
-+        if (notices.length < 8) notices.push(message)
-+        else notices[7] = message
-+        passwordNotices = notices
-+      }
-+    }
++    } else {
++      addPasswordNotice(message)
+     }
+-
+-    Qt.callLater(respondToPasswordPrompt)
 +    runWake()
-+  }
+   }
  
--    if (!passwordPam.start()) {
--      handlePasswordFailure()
--      return
+-  function respondToPasswordPrompt() {
+-    if (!authenticatingPassword || !passwordPam.active || !passwordPam.responseRequired) return
+-    passwordPam.respond(pendingPassword)
++  function addPasswordNotice(text) {
++    var notices = passwordNotices.slice()
++    if (text.length === 0 || (notices.length > 0 && notices[notices.length - 1] === text)) return
++    if (notices.length < 8) notices.push(text)
++    else notices[7] = text
++    passwordNotices = notices
+   }
+ 
+-  function handlePasswordFailure() {
 +  function settlePasswordAttempt(context, attempt, success, cancelled) {
 +    if (!currentPasswordAttempt(context, attempt)) return
 +    authenticatingPassword = false
@@ -180,7 +189,7 @@
 +      if (context.active) context.abort()
 +      context.destroy()
 +    }
-+    if (!lockRequested) return
+     if (!lockRequested) return
 +    if (success) {
 +      finishUnlock()
 +    } else if (!cancelled) {
@@ -190,29 +199,23 @@
 +    } else {
 +      failureMessage = ""
 +      runWake()
-     }
++    }
 +  }
- 
--    Qt.callLater(respondToPasswordPrompt)
++
 +  function handlePasswordFailure(context, attempt) {
 +    settlePasswordAttempt(context, attempt, false, false)
-   }
- 
--  function respondToPasswordPrompt() {
--    if (!authenticatingPassword || !passwordPam.active || !passwordPam.responseRequired) return
--    passwordPam.respond(pendingPassword)
++  }
++
 +  function cancelPasswordAttempt() {
 +    if (pinRecovery) { stopPinRecovery("cancelled"); return }
 +    if (authenticatingPassword) settlePasswordAttempt(passwordPam, passwordAttempt, false, true)
 +    else clearPasswordPrompt()
-   }
- 
--  function handlePasswordFailure() {
--    if (!lockRequested) return
++  }
++
 +  function completePasswordAttempt(context, attempt, result) {
 +    settlePasswordAttempt(context, attempt, result === PamResult.Success, false)
 +  }
-+
+ 
 +  function beginPinRecovery() {
 +    if (!lockRequested || authenticatingPassword || passwordPam || pinRecovery) return
 +    if (!pinRecoveryAvailable) {
@@ -240,7 +243,7 @@
 +
 +  function handlePinRecoveryLine(context, attempt, line) {
 +    if (!currentPinRecovery(context, attempt)) return
-+    if (line.length > 20000 || ++context.messageCount > 256) { stopPinRecovery("failed"); return }
++    if (line.length > 20000) { stopPinRecovery("failed"); return }
 +    var message
 +    try { message = JSON.parse(line) } catch (error) { stopPinRecovery("failed"); return }
 +    if (!message || typeof message !== "object" || Array.isArray(message) || context.resultReceived) { stopPinRecovery("failed"); return }
@@ -250,7 +253,9 @@
 +      context.reportedSuccess = message.success
 +      return
 +    }
-+    if ((message.type !== "prompt" && message.type !== "info" && message.type !== "error") || typeof message.text !== "string" || message.text.length > 8192) {
++    // The helper sends at most 256 messages; its result line is not one of them.
++    if (++context.messageCount > 256 || (message.type !== "prompt" && message.type !== "info" && message.type !== "error")
++        || typeof message.text !== "string" || message.text.length > 8192) {
 +      stopPinRecovery("failed")
 +      return
 +    }
@@ -262,16 +267,11 @@
 +      passwordResponseVisible = message.visible
 +      awaitingPasswordResponse = true
 +    } else {
-+      var notices = passwordNotices.slice()
-+      if (notices.length === 0 || notices[notices.length - 1] !== message.text) {
-+        if (notices.length < 8) notices.push(message.text)
-+        else notices[7] = message.text
-+        passwordNotices = notices
-+      }
++      addPasswordNotice(message.text)
 +    }
 +    runWake()
 +  }
- 
++
 +  function stopPinRecovery(result) {
 +    var context = pinRecovery
 +    // A second stop (Esc again) must not restart the escalation.

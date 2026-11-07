@@ -444,15 +444,18 @@ Item {
       passwordPrompt = message
       passwordResponseVisible = context.responseVisible
       awaitingPasswordResponse = true
-    } else if (message.length > 0) {
-      var notices = passwordNotices.slice()
-      if (notices.length === 0 || notices[notices.length - 1] !== message) {
-        if (notices.length < 8) notices.push(message)
-        else notices[7] = message
-        passwordNotices = notices
-      }
+    } else {
+      addPasswordNotice(message)
     }
     runWake()
+  }
+
+  function addPasswordNotice(text) {
+    var notices = passwordNotices.slice()
+    if (text.length === 0 || (notices.length > 0 && notices[notices.length - 1] === text)) return
+    if (notices.length < 8) notices.push(text)
+    else notices[7] = text
+    passwordNotices = notices
   }
 
   function settlePasswordAttempt(context, attempt, success, cancelled) {
@@ -521,7 +524,7 @@ Item {
 
   function handlePinRecoveryLine(context, attempt, line) {
     if (!currentPinRecovery(context, attempt)) return
-    if (line.length > 20000 || ++context.messageCount > 256) { stopPinRecovery("failed"); return }
+    if (line.length > 20000) { stopPinRecovery("failed"); return }
     var message
     try { message = JSON.parse(line) } catch (error) { stopPinRecovery("failed"); return }
     if (!message || typeof message !== "object" || Array.isArray(message) || context.resultReceived) { stopPinRecovery("failed"); return }
@@ -531,7 +534,9 @@ Item {
       context.reportedSuccess = message.success
       return
     }
-    if ((message.type !== "prompt" && message.type !== "info" && message.type !== "error") || typeof message.text !== "string" || message.text.length > 8192) {
+    // The helper sends at most 256 messages; its result line is not one of them.
+    if (++context.messageCount > 256 || (message.type !== "prompt" && message.type !== "info" && message.type !== "error")
+        || typeof message.text !== "string" || message.text.length > 8192) {
       stopPinRecovery("failed")
       return
     }
@@ -543,12 +548,7 @@ Item {
       passwordResponseVisible = message.visible
       awaitingPasswordResponse = true
     } else {
-      var notices = passwordNotices.slice()
-      if (notices.length === 0 || notices[notices.length - 1] !== message.text) {
-        if (notices.length < 8) notices.push(message.text)
-        else notices[7] = message.text
-        passwordNotices = notices
-      }
+      addPasswordNotice(message.text)
     }
     runWake()
   }

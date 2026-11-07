@@ -47,7 +47,7 @@ function harness() {
   state.contexts.push(context);return context;
  }};
  const scope=vm.createContext(state);
- for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','escalatePinRecoveryStop','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
+ for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','addPasswordNotice','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','escalatePinRecoveryStop','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
  return state;
 }
 let s=harness();s.submitPassword('must-not-silently-discard');assert.equal(s.contexts.length,0);
@@ -102,6 +102,12 @@ s.submitPassword('');s.beginPinRecovery();assert.equal(s.passwordPam,null);asser
 recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.lastRecoveryResult,'cancelled');assert.equal(s.unlocks,0);assert.equal(s.pinRecoveryStopTimer.running,false);
 s.escalatePinRecoveryStop();assert.deepEqual(recovery.signals,[15,9]);
 s.submitPassword('');c=s.passwordPam;recovery.exit(0);assert.equal(s.passwordPam,c);assert.equal(s.unlocks,0);
+// The helper's 256-message cap does not count its result line.
+s=harness();s.beginPinRecovery();recovery=s.pinRecovery;
+for(let i=0;i<256;i++)recovery.line({type:'info',text:`step ${i}`});assert.equal(s.passwordNotices.length,8);
+recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.lastRecoveryResult,'success');
+s=harness();s.beginPinRecovery();recovery=s.pinRecovery;
+for(let i=0;i<257;i++)recovery.line({type:'info',text:'x'});assert.equal(s.lastRecoveryResult,'failed');assert.equal(recovery.stdinEnabled,false);
 // Invalid helper protocol fails closed; old callbacks cannot modify a new operation.
 s=harness();s.beginPinRecovery();recovery=s.pinRecovery;s.handlePinRecoveryLine(recovery,recovery.attemptId,'bad-json');assert.equal(recovery.stdinEnabled,false);assert.equal(s.lastRecoveryResult,'failed');recovery.exit(1);assert.equal(s.unlocks,0);
 
