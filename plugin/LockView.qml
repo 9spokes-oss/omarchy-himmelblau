@@ -26,7 +26,7 @@ Item {
   property string passwordText: ""
   property bool syncingPasswordText: false
 
-  readonly property string placeholderText: authenticatingPassword ? (awaitingResponse ? "Enter response" : "Waiting…") : "Press Enter to sign in"
+  readonly property string placeholderText: authenticatingPassword ? (awaitingResponse ? "Enter response" : Commons.I18n.t("lock.checking")) : "Press Enter to sign in"
   readonly property int fieldWidth: 381
   readonly property int fieldHeight: 67
   readonly property int outlineThickness: 3
