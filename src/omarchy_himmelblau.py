@@ -55,6 +55,12 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def run(argv, *, env=COMMAND_ENV, timeout=30, check=True, **kwargs):
+    """Run a fixed-path command with a clean environment; output is always captured."""
+    return subprocess.run(argv, check=check, capture_output=True, env=env, cwd='/',
+                          timeout=timeout, **kwargs)
+
+
 def safe(path):
     """Reject symlinks anywhere in a path, including existing parent directories."""
     path = Path(path)
@@ -137,9 +143,8 @@ def patch_source(name, data):
     with tempfile.TemporaryDirectory(prefix='omarchy-himmelblau-') as work:
         target = Path(work) / info['filename']
         target.write_bytes(data)
-        subprocess.run(['/usr/bin/patch', '--batch', '--fuzz=0', '-p1', '-d', work],
-                       input=(ASSETS / (name + '.patch')).read_bytes(), check=True,
-                       capture_output=True, env=COMMAND_ENV, cwd='/')
+        run(['/usr/bin/patch', '--batch', '--fuzz=0', '-p1', '-d', work],
+            input=(ASSETS / (name + '.patch')).read_bytes())
         result = target.read_bytes()
     if digest(result) != info['after']:
         raise Error(f'Unexpected patch result: {name}')
@@ -290,9 +295,9 @@ def admin_rule(principal):
 
 def validate_sudo_rule(content):
     with tempfile.NamedTemporaryFile() as candidate:
-        candidate.write(content); candidate.flush()
-        subprocess.run(['/usr/bin/visudo', '-cf', candidate.name], check=True,
-                       capture_output=True, env=COMMAND_ENV, cwd='/')
+        candidate.write(content)
+        candidate.flush()
+        run(['/usr/bin/visudo', '-cf', candidate.name])
 
 
 def identity_file(principal):
@@ -658,9 +663,8 @@ def native_sddm_contract():
     native_payload_contract()
     # This verifies installed artifacts, never the running daemon.
     try:
-        result = subprocess.run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], check=True,
-                                capture_output=True, text=True, env=COMMAND_ENV, cwd='/')
-    except (OSError, subprocess.CalledProcessError):
+        result = run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], text=True)
+    except (OSError, subprocess.SubprocessError):
         raise Error('Reviewed native sddm-himmelblau 0.21.0-3 package required') from None
     if result.stdout.strip() != 'sddm-himmelblau 0.21.0-3':
         raise Error('Unsupported native SDDM package version; review required')
@@ -931,8 +935,7 @@ def require_no_live_locker(recovery_only=False):
         print('Recovery-only override: runtime safety is not verified; independent recovery access is required.')
         return
     try:
-        result = subprocess.run(['/usr/bin/loginctl', 'list-sessions', '--json=short'],
-                                check=True, capture_output=True, text=True, env=COMMAND_ENV, cwd='/', timeout=5)
+        result = run(['/usr/bin/loginctl', 'list-sessions', '--json=short'], text=True, timeout=5)
         sessions = json.loads(result.stdout)
         if not isinstance(sessions, list) or len(sessions) > 64:
             raise Error('Unknown session enumeration')
@@ -940,15 +943,14 @@ def require_no_live_locker(recovery_only=False):
             name = session.get('session') if isinstance(session, dict) else None
             if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name):
                 raise Error('Unknown session identifier')
-            detail = subprocess.run(['/usr/bin/loginctl', 'show-session', name, '--property=Type', '--property=Class'],
-                                    check=True, capture_output=True, text=True, env=COMMAND_ENV, cwd='/', timeout=5)
+            detail = run(['/usr/bin/loginctl', 'show-session', name,
+                          '--property=Type', '--property=Class'], text=True, timeout=5)
             properties = dict(line.split('=', 1) for line in detail.stdout.splitlines() if '=' in line)
             if properties.get('Type') not in ('tty', 'unspecified', 'x11', 'wayland') or not properties.get('Class'):
                 raise Error('Unknown session state')
             if properties['Type'] in ('x11', 'wayland') and properties['Class'] != 'greeter':
                 raise Error('A graphical session remains active')
-        processes = subprocess.run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'],
-                                   capture_output=True, env=COMMAND_ENV, cwd='/', timeout=5)
+        processes = run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'], check=False, timeout=5)
         if processes.returncode != 1:
             raise Error('Locker/compositor processes remain or process state is unknown')
     except (OSError, ValueError, subprocess.SubprocessError, Error):
@@ -1067,8 +1069,8 @@ def user_environment():
 
 
 def unlocked():
-    result = subprocess.run(['/usr/bin/omarchy-shell', 'lock', 'status'], check=True,
-                            capture_output=True, text=True, env=user_environment())
+    result = run(['/usr/bin/omarchy-shell', 'lock', 'status'], text=True,
+                 env=user_environment(), timeout=5)
     try:
         state = json.loads(result.stdout)
     except ValueError:
@@ -1149,8 +1151,8 @@ def legacy_user_status(quiet=False):
 
 
 def native_plugins():
-    result = subprocess.run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], check=True,
-                            capture_output=True, text=True, env=user_environment(), timeout=5)
+    result = run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], text=True,
+                 env=user_environment(), timeout=5)
     try:
         plugins = json.loads(result.stdout)
     except ValueError:
@@ -1286,8 +1288,7 @@ def activate_plugin(migrate=False):
             raise Error('Unsupported legacy lock view; migration refused')
     def change(action, plugin):
         unlocked()
-        subprocess.run(['/usr/bin/omarchy', 'plugin', action, plugin], check=True,
-                       capture_output=True, env=user_environment(), timeout=5)
+        run(['/usr/bin/omarchy', 'plugin', action, plugin], env=user_environment(), timeout=5)
     try:
         if old_active:
             change('disable', old_id)
@@ -1303,8 +1304,8 @@ def activate_plugin(migrate=False):
 
 
 def verify_native_clone(user):
-    result = subprocess.run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], check=True,
-                            capture_output=True, text=True, env=user_environment())
+    result = run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], text=True,
+                 env=user_environment(), timeout=5)
     try:
         plugins = json.loads(result.stdout)
     except ValueError:
@@ -1455,7 +1456,8 @@ def enable_user(upgrade=False):
     # It auto-enables the clone; keepLoaded code requires logout/login to adopt the patch.
     atomic(statefile, b'{"phase": "preparing"}\n', 0o600)
     try:
-        subprocess.run(['/usr/bin/omarchy', 'plugin', 'clone', 'omarchy.lock'], check=True, env=user_environment())
+        run(['/usr/bin/omarchy', 'plugin', 'clone', 'omarchy.lock'], env=user_environment(),
+            timeout=120)
         verify_native_clone(user)
         actual = read(clone / 'Service.qml')
         if actual != source:
@@ -1532,8 +1534,10 @@ def main(argv=None):
 if __name__ == '__main__':
     try:
         main()
-    except (Error, OSError, ValueError, subprocess.CalledProcessError) as error:
-        # Never print subprocess stdout/stderr (PAM/configuration can contain secrets).
-        if isinstance(error, subprocess.CalledProcessError):
-            sys.exit('Required command failed; no captured output was logged. Inspect its state directly.')
+    except subprocess.TimeoutExpired as error:
+        sys.exit(f'Command timed out: {error.cmd[0]}')
+    except subprocess.CalledProcessError as error:
+        # Never print subprocess output: PAM and configuration text can contain secrets.
+        sys.exit(f'Command failed: {error.cmd[0]}')
+    except (Error, OSError, ValueError) as error:
         sys.exit(str(error))
