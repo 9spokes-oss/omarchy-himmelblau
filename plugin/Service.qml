@@ -289,6 +289,7 @@ Item {
   function runWake() {
     if (!wakeProcess.running) wakeProcess.running = true
     if (lockRequested) armBlankTimer()
+    if (authenticatingPassword) conversationIdleTimer.restart()
     resumeFingerprint()
     nudgeFingerprint()
   }
@@ -1013,10 +1014,11 @@ Item {
         root.armBlankTimer(resumeMs)
         return
       }
-      // Only a password check in flight should hold the display up. The
+      // Only a password check waiting on PAM should hold the display up; a
+      // prompt waiting for the user blanks like the idle lock. The
       // fingerprint PAM stays armed for the whole lock, so gating on
       // `authenticating` here would keep the panel lit until unlock.
-      if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
+      if (root.lockRequested && (!root.authenticatingPassword || root.awaitingPasswordResponse)) root.runBlank()
     }
   }
 
@@ -1070,7 +1072,16 @@ Item {
     }
   }
 
+  // Cancels a sign-in or PIN change after a minute without PAM messages or user activity.
+  Timer {
+    id: conversationIdleTimer
+    interval: 60000
+    onTriggered: root.cancelPasswordAttempt()
+  }
+
   onAuthenticatingPasswordChanged: {
+    if (authenticatingPassword) conversationIdleTimer.restart()
+    else conversationIdleTimer.stop()
     if (!lockRequested) return
     if (authenticatingPassword) idleBlankTimer.stop()
     else armBlankTimer()

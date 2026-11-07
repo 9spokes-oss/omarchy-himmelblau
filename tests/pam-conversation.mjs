@@ -115,6 +115,12 @@ assert.equal(s.pinRecovery,null);assert.equal(s.unlocks,0);assert.equal(s.lockRe
 assert.equal(s.lastRecoveryResult,'failed');assert.match(s.failureMessage,/helper unavailable/);
 s.submitPassword('');c=s.passwordPam;c.prompt('PIN:');s.submitPassword('dummy');c.complete(0);assert.equal(s.unlocks,1);
 
+// User activity during a conversation restarts its one-minute cancel timer.
+const wake={wakeProcess:{running:true},lockRequested:true,authenticatingPassword:true,restarts:0,
+ armBlankTimer(){},resumeFingerprint(){},nudgeFingerprint(){},conversationIdleTimer:{restart(){wake.restarts++;}}};
+vm.runInContext(fn(service,'runWake'),vm.createContext(wake),{timeout:1000});
+wake.runWake();assert.equal(wake.restarts,1);wake.authenticatingPassword=false;wake.runWake();assert.equal(wake.restarts,1);
+
 // Only a missing PAM file refuses a lock, visibly; the setup check runs after locking.
 function guardHarness(pam) {
  const state={passwordPamConfigured:pam,lockRequested:false,lockWarning:'stale',events:[],started:0,

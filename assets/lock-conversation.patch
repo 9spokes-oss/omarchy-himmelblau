@@ -80,7 +80,15 @@
  
      Qt.callLater(function() {
        root.refreshBackground()
-@@ -353,36 +385,212 @@
+@@ -257,6 +289,7 @@
+   function runWake() {
+     if (!wakeProcess.running) wakeProcess.running = true
+     if (lockRequested) armBlankTimer()
++    if (authenticatingPassword) conversationIdleTimer.restart()
+     resumeFingerprint()
+     nudgeFingerprint()
+   }
+@@ -353,36 +386,212 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -168,7 +176,7 @@
 +    if (context) {
 +      if (context.active) context.abort()
 +      context.destroy()
-     }
++    }
 +    if (!lockRequested) return
 +    if (success) {
 +      finishUnlock()
@@ -179,7 +187,7 @@
 +    } else {
 +      failureMessage = ""
 +      runWake()
-+    }
+     }
 +  }
  
 -    Qt.callLater(respondToPasswordPrompt)
@@ -201,7 +209,7 @@
 +  function completePasswordAttempt(context, attempt, result) {
 +    settlePasswordAttempt(context, attempt, result === PamResult.Success, false)
 +  }
- 
++
 +  function beginPinRecovery() {
 +    if (!lockRequested || authenticatingPassword || passwordPam || pinRecovery) return
 +    if (!pinRecoveryAvailable) {
@@ -260,7 +268,7 @@
 +    }
 +    runWake()
 +  }
-+
+ 
 +  function stopPinRecovery(result) {
 +    var context = pinRecovery
 +    // A second stop (Esc again) must not restart the escalation.
@@ -310,7 +318,7 @@
      runWake()
    }
  
-@@ -514,6 +722,14 @@
+@@ -514,6 +723,14 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -325,7 +333,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +780,40 @@
+@@ -564,25 +781,40 @@
      }
    }
  
@@ -383,7 +391,7 @@
      }
    }
  
-@@ -710,7 +941,7 @@
+@@ -710,7 +942,7 @@
    Process {
      id: posterProc
      property string sourcePath: ""
@@ -392,7 +400,37 @@
      stdout: StdioCollector { id: posterOutput; waitForEnd: true }
      onExited: function(exitCode) {
        if (sourcePath !== root.backgroundPath) {
-@@ -846,7 +1077,7 @@
+@@ -782,10 +1014,11 @@
+         root.armBlankTimer(resumeMs)
+         return
+       }
+-      // Only a password check in flight should hold the display up. The
++      // Only a password check waiting on PAM should hold the display up; a
++      // prompt waiting for the user blanks like the idle lock. The
+       // fingerprint PAM stays armed for the whole lock, so gating on
+       // `authenticating` here would keep the panel lit until unlock.
+-      if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
++      if (root.lockRequested && (!root.authenticatingPassword || root.awaitingPasswordResponse)) root.runBlank()
+     }
+   }
+ 
+@@ -839,14 +1072,23 @@
+     }
+   }
+ 
++  // Cancels a sign-in or PIN change after a minute without PAM messages or user activity.
++  Timer {
++    id: conversationIdleTimer
++    interval: 60000
++    onTriggered: root.cancelPasswordAttempt()
++  }
++
+   onAuthenticatingPasswordChanged: {
++    if (authenticatingPassword) conversationIdleTimer.restart()
++    else conversationIdleTimer.stop()
+     if (!lockRequested) return
+     if (authenticatingPassword) idleBlankTimer.stop()
+     else armBlankTimer()
    }
  
    FileView {
@@ -401,7 +439,7 @@
      watchChanges: true
      printErrors: false
      onLoaded: root.passwordPamConfigured = true
-@@ -854,6 +1085,37 @@
+@@ -854,6 +1096,37 @@
      onFileChanged: reload()
    }
  
@@ -439,7 +477,7 @@
    // No lock before PAM is known good. An answer from before then may be stale --
    // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
    onPasswordPamConfiguredChanged: {
-@@ -876,7 +1138,10 @@
+@@ -876,7 +1149,10 @@
      target: "lock"
  
      function lock(): string {
@@ -451,7 +489,7 @@
        // omarchy-system-sleep-lock asks for the lock before every suspend.
        if (root.currentlyLocked()) root.noteSleepRequested()
        if (!root.currentlyLocked() && !root.beginLock()) return "failed"
-@@ -896,9 +1161,13 @@
+@@ -896,9 +1172,13 @@
          secure: sessionLock.secure,
          realScreens: root.realScreenCount(),
          passwordPam: root.passwordPamConfigured,
