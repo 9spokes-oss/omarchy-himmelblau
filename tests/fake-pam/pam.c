@@ -35,8 +35,17 @@ int pam_start(const char *service,const char *user,const struct pam_conv *conv,p
  if(strcmp(service,"omarchy-himmelblau-pin-change")||strcmp(user,"alice@example.test")||prctl(PR_GET_DUMPABLE)!=0||limit.rlim_cur!=0)return PAM_SYSTEM_ERR;
  h.conv=*conv;*out=&h;return PAM_SUCCESS;
 }
+/* 8191 ASCII bytes, then a two-byte character that straddles the 8192-byte cut. */
+static char long_info[8200];
+static int send_long_info(pam_handle_t *handle){
+ memset(long_info,'a',8191);memcpy(long_info+8191,"\xc3\xa4tail",7);
+ const struct pam_message info={PAM_TEXT_INFO,long_info},*msg=&info;struct pam_response *answer=NULL;
+ int result=handle->conv.conv(1,&msg,&answer,handle->conv.appdata_ptr);free(answer);return result;
+}
 int pam_chauthtok(pam_handle_t *handle,int flags){
- (void)flags;if(!account_checked)return PAM_SYSTEM_ERR;const struct pam_message messages[]={
+ (void)flags;if(!account_checked)return PAM_SYSTEM_ERR;
+ if(getenv("FIXTURE_LONG_INFO")&&send_long_info(handle)!=PAM_SUCCESS)return PAM_CONV_ERR;
+ const struct pam_message messages[]={
  {PAM_TEXT_INFO,"Use number 42 in Authenticator <b>literal</b>"},
  {PAM_PROMPT_ECHO_OFF,"New PIN:"},{PAM_PROMPT_ECHO_OFF,"Confirm PIN:"},
  {PAM_PROMPT_ECHO_ON,"One-time code:"},{PAM_ERROR_MSG,"A literal test error"}};

@@ -31,8 +31,31 @@ class PinHelperTest(unittest.TestCase):
         self.assertFalse(messages[1]['visible']);self.assertTrue(messages[3]['visible'])
         self.assertIn('42',messages[0]['text']);self.assertTrue(messages[-1]['success'])
         self.assertNotIn(b'p%C3',result.stdout);self.assertNotIn(b'test-secret',result.stdout);self.assertEqual(result.stderr,b'')
+    def test_long_pam_text_is_cut_at_a_character_boundary(self):
+        result = self.run_helper(b'response p%C3%A4ss\nresponse p%C3%A4ss\nresponse test-otp\n',
+                                 env={'FIXTURE_LONG_INFO': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        messages = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(messages[0], {'type': 'info', 'visible': False, 'text': 'a' * 8191})
+        self.assertTrue(messages[-1]['success'])
+
+    def test_reads_no_further_than_the_last_response(self):
+        # Unbuffered stdin: input after the last answer stays unread, so no
+        # response bytes linger in a stdio buffer that is never wiped.
+        # A pipe, because glibc seeks a regular file back to the logical position at exit.
+        responses = b'response p%C3%A4ss\nresponse p%C3%A4ss\nresponse test-otp\n'
+        read_end, write_end = os.pipe()
+        try:
+            os.write(write_end, responses + b'response unread\n')
+            os.close(write_end)
+            result = subprocess.run([str(self.binary)], stdin=read_end, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(os.read(read_end, 1024), b'response unread\n')
+        finally:
+            os.close(read_end)
+
     def test_eof_malformed_and_oversized_responses_fail_closed(self):
-        for data in [b'',b'response %00\n',b'response %QX\n',b'response '+b'a'*20000+b'\n']:
+        for data in [b'',b'response %00\n',b'response %QX\n',b'response '+b'a'*(3*4096+1)+b'\n']:
             with self.subTest(data_length=len(data)):
                 result=self.run_helper(data);self.assertNotEqual(result.returncode,0)
                 self.assertFalse(json.loads(result.stdout.splitlines()[-1])['success'])

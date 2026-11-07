@@ -24,8 +24,8 @@ source=("sddm-$pkgver.tar.gz::https://codeload.github.com/sddm/sddm/tar.gz/refs/
         'sddm-himmelblau-pin-change.pam' 'LGPL-2.1.txt' 'source.tar.gz')
 # Updated by the reviewed patch/provenance export; no SKIP checksums.
 sha256sums=('f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'
-             'd99afbd7584394df6997a1d55ecae24443d0adb7bc3488bbbde71ee9ac9ad4aa'
-             'ce97cb8217d9b59803492b3c428c78d26f1f93f812e5e5856ad1b4c61621af65'
+             '7f6ae3250f72a7de65e4b622d4396895005c73ee1e91c5901272c37e2c83bd05'
+             'c56a764929753447e181fe150a0496c7d8cb4ed548c734ab471ffc436eae9577'
              'ed27b1e7ccacf252c38006591cbd8526e02b566601982c88e2ba9ec290b9f335'
              'dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551'
              '@SOURCE_SHA256@')
