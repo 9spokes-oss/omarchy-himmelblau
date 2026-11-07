@@ -19,8 +19,9 @@ On Omarchy `4.5.0-3`, Himmelblau `4.0.8-1` and Quickshell `0.3.2.r7.g2b4501a-1`:
   Successful PIN replacement requires a separate login/unlock.
 - Intune enrollment with the existing Entra identity. The device is **noncompliant**
   because no compliance policy is assigned; it is unencrypted and uses software keys.
-- Chromium SSO into My Apps, including normal browser exit/reopen after granting
-  Background SSO permission for the application host.
+- Chromium SSO into My Apps and a historical profile-specific exit/reopen success
+  after granting Background SSO permission. Current cold starts are unreliable;
+  see the [browser diagnostic evidence](docs/intune-sso.md#browser-cold-start-diagnostics).
 
 These are results from one dedicated QEMU/KVM lab and tenant, not support guarantees
 for every MFA method, distribution, Conditional Access rule or future update. Offline

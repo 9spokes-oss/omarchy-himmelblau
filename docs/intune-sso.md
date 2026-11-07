@@ -146,9 +146,43 @@ generated policy installed as root-owned `0644`, an identical second installatio
 succeeded, and the other policy files and desktop processes remained unchanged.
 After user consent, metadata verified all 19 requested exact-origin grants in both
 the active default profile and the inactive clean-test profile, without an
-all-HTTPS grant. My Apps opened in the verified default profile, but normal
-Exit/reopen still presented an authentication challenge. Diagnosis is ongoing;
-the grants do not establish successful restart SSO. Acceptance for the other M365
-apps remains unverified. The earlier successful My Apps restart test covered its
-individual site grant in the tested profile. Pass/fail observations are scoped
-to the recorded profile, not all Chromium profiles.
+all-HTTPS grant. Subsequent default-profile cold starts gave mixed results; see
+the diagnostic record below. Acceptance for the other M365 apps remains
+unverified. The earlier successful My Apps restart test covered its individual
+site grant in the tested profile. Pass/fail observations are scoped to the
+recorded profile, not all Chromium profiles.
+
+## Browser cold-start diagnostics
+
+On 2026-11-08, Chromium `155.0.8059.84-1` with extension `1.13.0` was tested in
+the verified default profile. With `DeveloperToolsAvailability` unset (default
+`0`), worker inspection for the force-installed extension was unavailable even
+with extension Developer mode enabled. A temporary lab-only value of `1` exposed
+the inactive worker. Opening its inspector wakes the worker, so the resulting
+metadata describes post-inspection state, not passive browser startup.
+
+The actual-worker diagnostic confirmed the expected extension context, all 19
+exact-host grants, no broad grant, one expected DNR rule with a nonempty SSO
+header, and the SSO refresh alarm. No header or token values were emitted or
+saved. My Apps succeeded after closing the debugger. Rule presence does not prove
+that a request used the header or that the server accepted it.
+
+Subsequent tests used normal browser Exit and a new browser process in the same
+profile, without an extension popup, debugger or account toggle:
+
+- Direct My Apps navigation reached an email step, then a security-key challenge.
+- The next cold launch opened `about:blank`; after roughly 40 seconds, My Apps
+  succeeded without credentials.
+- The next immediate cold launch also succeeded without credentials.
+- A further immediate cold launch showed an email form. A fresh My Apps
+  navigation in that same process later succeeded without entering email or
+  credentials, or toggling accounts.
+
+These mixed outcomes support intermittent startup timing as a diagnostic lead.
+They do not establish the responsible code, credential freshness or request-header
+injection. A fixed sleep is not a robust fix. All 19 grants were retained; other
+M365 applications remain unverified. The temporary debugging policy was removed;
+after policy reload, Chromium showed no configured `DeveloperToolsAvailability`
+policy. The M365 policy file was unchanged, and My Apps still opened. Normal idle
+locking was restored (`enabled=true`, `stayAwake=false`) while the unlocked
+desktop, original terminal and current browser remained running.
