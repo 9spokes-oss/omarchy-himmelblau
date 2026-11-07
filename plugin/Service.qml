@@ -10,9 +10,8 @@ import "FingerprintModel.js" as FingerprintModel
 Item {
   id: root
 
-  property bool strandedRecoveryInProgress: false
-  property bool companionReady: false
   property bool pinRecoveryAvailable: false
+  property string lockWarning: ""
 
   property var shell: null
   property string omarchyPath: ""
@@ -146,14 +145,11 @@ Item {
   }
 
   function recoverStrandedLock() {
-    if (!strandedLock || currentlyLocked() || !passwordPamConfigured || !companionReady || strandedRecoveryInProgress) return
-    strandedRecoveryInProgress = true
-    var recovered = false
-    try { recovered = beginLock() } finally { strandedRecoveryInProgress = false }
-    if (!recovered) return
+    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
+
     strandedLock = false
-    strandedLockResolved = true
     logEvent("lock-stranded: recovering")
+    beginLock()
   }
 
   function refreshBackground() {
@@ -230,29 +226,27 @@ Item {
     if (fingerprintPam.active) fingerprintPam.abort()
   }
 
-  function refreshPasswordPam() {
-    // Never trust a previous watch event when entering a new lock.
-    passwordPamConfigured = false
-    passwordPamFile.path = ""
-    passwordPamFile.path = "/etc/pam.d/omarchy-himmelblau-lock-password"
-    passwordPamFile.text()
+  function refuseLock() {
+    logEvent("lock-denied: missing-pam")
+    if (!lockRefusedNotice.running) lockRefusedNotice.running = true
   }
 
-  function refreshCompanionPrerequisites() {
-    if (companionCheck.running) return
-    companionCheckTimeout.restart()
-    companionCheck.running = true
+  // Runs after locking: a setup problem is shown on the lock, never a reason to stay unlocked.
+  function checkLockSetup() {
     if (!pinHelperCheck.running) pinHelperCheck.running = true
+    if (lockPreflight.running) return
+    lockWarning = ""
+    lockPreflightTimeout.restart()
+    lockPreflight.running = true
+  }
+
+  function warnLockSetup() {
+    if (lockRequested) lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
   }
 
   function beginLock() {
-    refreshPasswordPam()
-    if (!companionReady) {
-      logEvent("lock-denied: companion-prerequisites")
-      return false
-    }
     if (!passwordPamConfigured) {
-      logEvent("lock-denied: missing-pam")
+      refuseLock()
       return false
     }
 
@@ -261,6 +255,7 @@ Item {
     armBlankTimer()
     logEvent("lock-requested")
     queueSessionLock()
+    checkLockSetup()
 
     Qt.callLater(function() {
       root.refreshBackground()
@@ -715,6 +710,7 @@ Item {
         responseVisible: root.passwordResponseVisible
         conversationMessage: root.passwordNotices.join("\n\n")
         promptMessage: root.passwordPrompt
+        warningMessage: root.lockWarning
         onRecoveryRequested: root.beginPinRecovery()
         conversationError: root.passwordMessageIsError
         onCancelRequested: root.cancelPasswordAttempt()
@@ -1059,42 +1055,37 @@ Item {
   }
 
   FileView {
-    id: passwordPamFile
     path: "/etc/pam.d/omarchy-himmelblau-lock-password"
-    preload: false
-    blockAllReads: true
     watchChanges: true
     printErrors: false
-    onLoaded: root.passwordPamConfigured = text() === "#%PAM-1.0\nauth       required                    pam_faillock.so preauth silent deny=10 unlock_time=120\nauth       [success=1 default=ignore] pam_localuser.so\nauth       [success=3 ignore=ignore default=bad] pam_himmelblau.so ignore_unknown_user\n-auth      [success=2 default=ignore]  pam_systemd_home.so\nauth       [success=1 default=bad]     pam_unix.so try_first_pass nullok\nauth       [default=die]               pam_faillock.so authfail deny=10 unlock_time=120\nauth       optional                    pam_permit.so\nauth       required                    pam_env.so\nauth       required                    pam_faillock.so authsucc\naccount    include                     system-local-login\n"
+    onLoaded: root.passwordPamConfigured = true
     onLoadFailed: root.passwordPamConfigured = false
-    onFileChanged: root.refreshPasswordPam()
+    onFileChanged: reload()
   }
 
   Process {
-    id: companionCheck
+    id: lockRefusedNotice
+    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password"]
+  }
+
+  Process {
+    id: lockPreflight
     command: ["/usr/bin/omarchy-himmelblau", "locker-preflight"]
     stdout: SplitParser { onRead: function(data) {} }
     stderr: SplitParser { onRead: function(data) {} }
     onExited: function(exitCode) {
-      companionCheckTimeout.stop()
-      root.companionReady = exitCode === 0
+      lockPreflightTimeout.stop()
+      if (exitCode !== 0) root.warnLockSetup()
     }
   }
 
   Timer {
-    id: companionCheckTimeout
-    interval: 5000
+    id: lockPreflightTimeout
+    interval: 15000
     onTriggered: {
-      root.companionReady = false
-      if (companionCheck.running) companionCheck.signal(9)
+      root.warnLockSetup()
+      lockPreflight.signal(15)
     }
-  }
-
-  Timer {
-    interval: 5000
-    running: !root.currentlyLocked()
-    repeat: true
-    onTriggered: root.refreshCompanionPrerequisites()
   }
 
   Process {
@@ -1105,13 +1096,8 @@ Item {
 
   // No lock before PAM is known good. An answer from before then may be stale --
   // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
-  onCompanionReadyChanged: {
-    if (companionReady) recoverStrandedLock()
-  }
-
   onPasswordPamConfiguredChanged: {
     if (!passwordPamConfigured) return
-    if (strandedLock) { recoverStrandedLock(); return }
 
     strandedLock = false
     strandedLockResolved = false
@@ -1120,8 +1106,6 @@ Item {
   }
 
   Component.onCompleted: {
-    refreshPasswordPam()
-    refreshCompanionPrerequisites()
     knownScreenCount = realScreenCount()
     refreshBackground()
     refreshFingerprintStatus()
@@ -1132,7 +1116,10 @@ Item {
     target: "lock"
 
     function lock(): string {
-      if (!root.passwordPamConfigured) return "missing-pam"
+      if (!root.passwordPamConfigured) {
+        root.refuseLock()
+        return "missing-pam"
+      }
       // omarchy-system-sleep-lock asks for the lock before every suspend.
       if (root.currentlyLocked()) root.noteSleepRequested()
       if (!root.currentlyLocked() && !root.beginLock()) return "failed"
@@ -1152,7 +1139,7 @@ Item {
         secure: sessionLock.secure,
         realScreens: root.realScreenCount(),
         passwordPam: root.passwordPamConfigured,
-        companionReady: root.companionReady,
+        lockWarning: root.lockWarning,
         recoveryAvailable: root.pinRecoveryAvailable,
         fingerprint: root.fingerprintConfigured,
         fingerprintUnavailable: root.fingerprintUnavailable,

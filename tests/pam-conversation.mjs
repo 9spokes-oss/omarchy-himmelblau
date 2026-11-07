@@ -110,48 +110,21 @@ assert.equal(s.pinRecovery,null);assert.equal(s.unlocks,0);assert.equal(s.lockRe
 assert.equal(s.lastRecoveryResult,'failed');assert.match(s.failureMessage,/helper unavailable/);
 s.submitPassword('');c=s.passwordPam;c.prompt('PIN:');s.submitPassword('dummy');c.complete(0);assert.equal(s.unlocks,1);
 
-// Exercise actual pre-lock refresh, including a stale successful watch result.
-function guardHarness(readable, ready=true) {
- const state={passwordPamConfigured:true,companionReady:ready,lockRequested:false,events:[],started:0,
+// Only a missing PAM file refuses a lock, visibly; the setup check runs after locking.
+function guardHarness(pam) {
+ const state={passwordPamConfigured:pam,lockRequested:false,lockWarning:'stale',events:[],started:0,
   logEvent(event){state.events.push(event);},resetAuthenticationState(){state.started++;},armBlankTimer(){},queueSessionLock(){},
-  refreshBackground(){},refreshFingerprintStatus(){},Qt:{callLater(){}},};
+  refreshBackground(){},refreshFingerprintStatus(){},Qt:{callLater(){}},
+  lockRefusedNotice:{running:false},lockPreflight:{running:false},lockPreflightTimeout:{restart(){}},pinHelperCheck:{running:false}};
  state.root=state;
- state.passwordPamFile={reload(){state.passwordPamConfigured=false;},text(){state.passwordPamConfigured=readable;return readable?'expected':'';}};
  const scope=vm.createContext(state);
- for(const name of ['refreshPasswordPam','beginLock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
+ for(const name of ['refuseLock','checkLockSetup','beginLock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
  return state;
 }
-for(const ready of [true,false]) {
- const guard=guardHarness(false,ready);assert.equal(guard.beginLock(),false);assert.equal(guard.started,0);assert.equal(guard.lockRequested,false);
-}
-const guard=guardHarness(true);assert.equal(guard.beginLock(),true);assert.equal(guard.started,1);assert.equal(guard.lockRequested,true);
-// A startup orphan verdict can arrive before companion readiness. Keep and retry it.
-const orphan=guardHarness(true,false);
-orphan.strandedLock=true;orphan.strandedLockResolved=true;orphan.strandedRecoveryInProgress=false;
-orphan.currentlyLocked=()=>orphan.lockRequested;
-const orphanScope=vm.createContext(orphan);
-vm.runInContext(fn(service,'recoverStrandedLock'),orphanScope,{timeout:1000});
-orphan.recoverStrandedLock();assert.equal(orphan.strandedLock,true);assert.equal(orphan.lockRequested,false);
-orphan.companionReady=true;
-const orphanRead=orphan.passwordPamFile.text;orphan.passwordPamFile.text=()=>{const value=orphanRead();orphan.recoverStrandedLock();return value;};
-orphan.recoverStrandedLock();
-assert.equal(orphan.strandedLock,false);assert.equal(orphan.strandedLockResolved,true);assert.equal(orphan.lockRequested,true);assert.equal(orphan.started,1);
-orphan.strandedLock=true;orphan.recoverStrandedLock();assert.equal(orphan.started,1); // never reload an existing lock
-assert.match(service,/onCompanionReadyChanged:\s*\{\s*if \(companionReady\) recoverStrandedLock\(\)/);
-// Refresh cancels any prior reader before a fixed-path synchronous read.
-const refresh=guardHarness(true);const order=[];let pamPath='stale';
-refresh.passwordPamFile={set path(value){pamPath=value;order.push(value);},get path(){return pamPath;},text(){order.push('read');refresh.passwordPamConfigured=true;}};
-refresh.refreshPasswordPam();assert.deepEqual(order,['','/etc/pam.d/omarchy-himmelblau-lock-password','read']);
-
-// A periodic check does not flicker a previously validated guard; initial state stays closed.
-for(const previous of [true,false]) {
- const state={companionReady:previous,companionCheck:{running:false},pinHelperCheck:{running:false},companionCheckTimeout:{restart(){}}};
- state.root=state;const context=vm.createContext(state);
- vm.runInContext(fn(service,'refreshCompanionPrerequisites'),context,{timeout:1000});
- state.refreshCompanionPrerequisites();assert.equal(state.companionReady,previous);assert.equal(state.companionCheck.running,true);
-}
+let guard=guardHarness(false);assert.equal(guard.beginLock(),false);assert.equal(guard.lockRequested,false);assert.equal(guard.started,0);
+assert.equal(guard.lockRefusedNotice.running,true);assert.deepEqual(guard.events,['lock-denied: missing-pam']);assert.equal(guard.lockPreflight.running,false);
+guard=guardHarness(true);assert.equal(guard.beginLock(),true);assert.equal(guard.lockRequested,true);assert.equal(guard.started,1);
+assert.equal(guard.lockPreflight.running,true);assert.equal(guard.pinHelperCheck.running,true);assert.equal(guard.lockWarning,'');assert.equal(guard.lockRefusedNotice.running,false);
 assert.match(service,/path: "\/etc\/pam.d\/omarchy-himmelblau-lock-password"/);
-assert.match(service,/blockAllReads: true/);assert.match(service,/preload: false/);
-assert.match(service,/onLoaded: root.passwordPamConfigured = text\(\) ===/);
 assert.match(service,/command: \["\/usr\/bin\/omarchy-himmelblau", "locker-preflight"\]/);
 console.log('PASS: auth and PIN recovery conversations, info/poll/OTP/confirmation, real fingerprint reset, failure/cancel/retry/late callbacks, no replay or reset unlock');

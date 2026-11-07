@@ -17,6 +17,7 @@ Item {
   property bool responseVisible: false
   property string conversationMessage: ""
   property string promptMessage: ""
+  property string warningMessage: ""
   property bool conversationError: false
   property string failureMessage: ""
   property int failedAttempts: 0
@@ -344,6 +345,21 @@ Item {
       font.family: Style.font.family
       font.pixelSize: Style.font.heading
       font.italic: true
+      horizontalAlignment: Text.AlignHCenter
+    }
+
+    Text {
+      anchors.bottom: parent.bottom
+      anchors.bottomMargin: 48
+      anchors.horizontalCenter: parent.horizontalCenter
+      width: Math.min(root.width - 48, 720)
+      visible: root.warningMessage.length > 0
+      text: root.warningMessage
+      textFormat: Text.PlainText
+      wrapMode: Text.Wrap
+      color: Commons.Color.lock.textError
+      font.family: Style.font.family
+      font.pixelSize: root.fieldFontSize
       horizontalAlignment: Text.AlignHCenter
     }
   }
