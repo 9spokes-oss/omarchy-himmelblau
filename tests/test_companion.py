@@ -45,6 +45,7 @@ class CompanionTest(unittest.TestCase):
         self.mock_paths.start(); self.addCleanup(self.mock_paths.stop)
         # The host sandbox maps / and /tmp ownership to nobody; production guards
         # remain enabled in the CLI and are separate from isolated temporary roots.
+        self.real_ancestor_guard = m.check_state_ancestors
         ancestor_guard = patch.object(m, 'check_state_ancestors')
         ancestor_guard.start(); self.addCleanup(ancestor_guard.stop)
         self.real_user_path_guard = m.user_path_guard
@@ -379,6 +380,36 @@ class CompanionTest(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt): m.rollback()
         m.recover()
         self.assertFalse(m.STATE.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_state_access_refuses_writable_or_foreign_ancestors(self):
+        self.setup()
+        state = m.load_state()
+        stat = Path.stat
+        foreign = set()
+        def mapped(path, *args, **kwargs):
+            # Ancestors outside the sandbox are root-owned 0755 on a real system.
+            if not path.is_relative_to(self.base):
+                return SimpleNamespace(st_uid=0, st_mode=0o40755)
+            result = stat(path, *args, **kwargs)
+            if path in foreign:
+                return SimpleNamespace(st_uid=os.geteuid() + 1, st_mode=result.st_mode)
+            return result
+        actions = (m.load_state, lambda: m.save_state(state))
+        with patch.object(m, 'check_state_ancestors', self.real_ancestor_guard), \
+                patch.object(Path, 'stat', mapped):
+            for action in actions:
+                action()
+            self.base.chmod(0o777)
+            try:
+                for action in actions:
+                    with self.assertRaisesRegex(m.Error, 'Unsafe state ancestor'):
+                        action()
+            finally:
+                self.base.chmod(0o700)
+            foreign.add(self.base)
+            for action in actions:
+                with self.assertRaisesRegex(m.Error, 'Unsafe state ancestor'):
+                    action()
 
     def test_atomic_replace_and_delete_fsync_parent_directory(self):
         target = self.base / 'durable'; calls=[]
