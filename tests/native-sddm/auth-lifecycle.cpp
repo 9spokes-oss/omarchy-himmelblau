@@ -29,6 +29,16 @@ private slots:
         QCOMPARE(requests.count(), 1);
         QVERIFY(auth.request()->prompts().isEmpty());
     }
+    void cancelInvalidatesAtOnce() {
+        Auth auth;
+        QSignalSpy requests(&auth, &Auth::requestChanged);
+        QSignalSpy finished(&auth, &Auth::finished);
+        auth.cancel();
+        QVERIFY(auth.isCancelled());
+        QVERIFY(!auth.isActive());
+        QCOMPARE(requests.count(), 1);
+        QCOMPARE(finished.count(), 0); // no helper ran, so nothing finishes
+    }
 };
 QTEST_GUILESS_MAIN(AuthLifecycleProofs)
 #include "auth-lifecycle.moc"
