@@ -62,6 +62,8 @@ Item {
   property int recoveryAttempt: 0
   property string lastRecoveryResult: "none"
   property int pinRecoverySignal: 15
+  property int recoveryBackoffMs: 0
+  property double recoveryRetryAtMs: 0
   property string failureMessage: ""
   property int failedAttempts: 0
   property string backgroundPath: ""
@@ -271,6 +273,8 @@ Item {
   function finishUnlock() {
     if (!root.currentlyLocked()) return
 
+    recoveryBackoffMs = 0
+    recoveryRetryAtMs = 0
     lockRequested = false
     pendingSessionLock = false
     sessionLockStabilizeTimer.stop()
@@ -504,6 +508,12 @@ Item {
       failureMessage = "PIN recovery helper unavailable; normal sign-in remains available."
       return
     }
+    var waitMs = recoveryRetryAtMs - Date.now()
+    if (waitMs > 0) {
+      var wait = waitMs > 90000 ? Math.ceil(waitMs / 60000) + " min" : Math.ceil(waitMs / 1000) + " s"
+      failureMessage = "Try PIN reset again in " + wait + "."
+      return
+    }
     clearPasswordPrompt()
     passwordNotices = []
     passwordMessageIsError = false
@@ -588,6 +598,13 @@ Item {
       lastRecoveryResult = exitCode === 0 && context.reportedSuccess ? "success" : "failed"
       passwordNotices = [lastRecoveryResult === "success" ? "PIN updated; sign in with the new PIN." : "PIN change failed; sign in to check or retry recovery."]
       passwordMessageIsError = lastRecoveryResult !== "success"
+    }
+    // Space out failed or cancelled attempts: 30 s, doubling up to 15 min.
+    if (lastRecoveryResult === "success") {
+      recoveryBackoffMs = 0
+    } else {
+      recoveryBackoffMs = Math.min(Math.max(30000, recoveryBackoffMs * 2), 900000)
+      recoveryRetryAtMs = Date.now() + recoveryBackoffMs
     }
     recoveringPIN = false
     pinRecovery = null

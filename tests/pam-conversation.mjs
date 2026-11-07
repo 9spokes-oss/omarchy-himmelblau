@@ -25,7 +25,7 @@ function fn(source, name) {
 function harness() {
  const state={pinRecoveryAvailable:true,lockRequested:true, authenticatingPassword:false,passwordPam:null,passwordAttempt:0,
   awaitingPasswordResponse:false,passwordResponseVisible:false,passwordPrompt:'',passwordNotices:[],
-  passwordMessageIsError:false,pinRecovery:null,recoveringPIN:false,recoveryAttempt:0,lastRecoveryResult:'none',pinRecoverySignal:15,enteredPassword:'',failureMessage:'',failedAttempts:0,unlocks:0,contexts:[],
+  passwordMessageIsError:false,pinRecovery:null,recoveringPIN:false,recoveryAttempt:0,lastRecoveryResult:'none',pinRecoverySignal:15,recoveryBackoffMs:0,recoveryRetryAtMs:0,now:1e6,enteredPassword:'',failureMessage:'',failedAttempts:0,unlocks:0,contexts:[],
   runWake(){},logEvent(event){if(event==='unlocked')state.unlocks++;},PamResult:{Success:0},
   I18n:{t(){return{arg(n){return `failed ${n}`;}}},formatNumber(n){return n;}}};
  state.sessionLock={locked:true,secure:true};state.fingerprintPam={active:false};
@@ -35,6 +35,7 @@ function harness() {
   write(text){this.writes.push(text);},signal(number){this.signals.push(number);},destroy(){this.destroyed=true;},
   line(message){state.handlePinRecoveryLine(this,this.attemptId,JSON.stringify(message));},
   exit(code){this.running=false;state.finishPinRecovery(this,this.attemptId,code);}};}};
+ state.Date={now(){return state.now;}};
  state.root=state;
  state.passwordPamFactory={createObject(parent, properties){
   const context={...properties,active:false,responseRequired:false,responseVisible:false,message:'',messageIsError:false,replies:[],
@@ -108,6 +109,14 @@ for(let i=0;i<256;i++)recovery.line({type:'info',text:`step ${i}`});assert.equal
 recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.lastRecoveryResult,'success');
 s=harness();s.beginPinRecovery();recovery=s.pinRecovery;
 for(let i=0;i<257;i++)recovery.line({type:'info',text:'x'});assert.equal(s.lastRecoveryResult,'failed');assert.equal(recovery.stdinEnabled,false);
+// Failed or cancelled PIN changes back off 30 s, doubling to 15 min; success or an unlock resets it.
+s=harness();const waits=[];
+for(let i=0;i<7;i++){s.beginPinRecovery();recovery=s.pinRecovery;if(i%2)s.cancelPasswordAttempt();recovery.exit(1);waits.push(s.recoveryBackoffMs);
+ s.now+=s.recoveryBackoffMs-1000;s.beginPinRecovery();assert.equal(s.pinRecovery,null);assert.match(s.failureMessage,/again in 1 s/);s.now+=1000;}
+assert.deepEqual(waits,[30000,60000,120000,240000,480000,900000,900000]);
+s.now-=1000;s.beginPinRecovery();assert.match(s.failureMessage,/again in 1 s/);s.now-=899000;s.beginPinRecovery();assert.match(s.failureMessage,/again in 15 min/);
+s.now+=900000;s.beginPinRecovery();recovery=s.pinRecovery;recovery.line({type:'result',success:true});recovery.exit(0);assert.equal(s.recoveryBackoffMs,0);
+s.beginPinRecovery();s.pinRecovery.exit(1);s.finishUnlock();assert.equal(s.recoveryRetryAtMs,0);s.lockRequested=true;s.beginPinRecovery();assert.notEqual(s.pinRecovery,null);
 // Invalid helper protocol fails closed; old callbacks cannot modify a new operation.
 s=harness();s.beginPinRecovery();recovery=s.pinRecovery;s.handlePinRecoveryLine(recovery,recovery.attemptId,'bad-json');assert.equal(recovery.stdinEnabled,false);assert.equal(s.lastRecoveryResult,'failed');recovery.exit(1);assert.equal(s.unlocks,0);
 
