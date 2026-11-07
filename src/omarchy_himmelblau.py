@@ -126,15 +126,38 @@ def atomic(path, data, mode):
             os.unlink(name)
 
 
+_MANIFESTS = {}
+
+
+def manifest(name):
+    """Return one validated entry of patches.json, parsed once per assets directory."""
+    path = ASSETS / 'patches.json'
+    if path not in _MANIFESTS:
+        try:
+            _MANIFESTS[path] = json.loads(path.read_text())
+        except ValueError:
+            raise Error(f'Invalid {path}') from None
+    entries = _MANIFESTS[path]
+    entry = entries.get(name) if isinstance(entries, dict) else None
+    if name == 'fixed-plugin':
+        required = {'id': str, 'files': dict, 'upstream': dict}
+    else:
+        required = {'filename': str, 'before': str, 'after': str}
+    if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
+                                          for key, kind in required.items()):
+        raise Error(f'Invalid {path} entry: {name}')
+    return entry
+
+
 def supported_source_hash(name, data):
-    info = json.loads((ASSETS / 'patches.json').read_text())[name]
+    info = manifest(name)
     if digest(data) not in (info['before'], info['after']):
         raise Error(f'Unsupported upstream source for {name}; refusing drift')
     return info['after']
 
 
 def patch_source(name, data):
-    info = json.loads((ASSETS / 'patches.json').read_text())[name]
+    info = manifest(name)
     actual = digest(data)
     if actual == info['after']:
         return data  # Known patched source: adopt, never pretend it was pristine.
@@ -160,19 +183,35 @@ def identity(domain, user):
     return domain, user.lower()
 
 
+INI_SECTION = re.compile(r'^\s*\[([^]]+)\]\s*(?:[#;].*)?$')
+INI_KEY = re.compile(r'^\s*([a-zA-Z_]+)\s*=\s*(.*?)\s*$')
+
+
+def ini_lines(text):
+    """Yield (line index, section, key, value); key and value are None on a section header."""
+    section = None
+    for index, line in enumerate(text.splitlines()):
+        line = line.strip()
+        if match := INI_SECTION.match(line):
+            section = match[1].lower()
+            yield index, section, None, None
+        elif match := INI_KEY.match(line):
+            value = re.split(r'\s+[;#]', match[2], maxsplit=1)[0].strip()
+            yield index, section, match[1].lower(), value
+
+
+def managed_keys(domain, user, apply_policy):
+    return {'domain': domain, 'pam_allow_groups': user,
+            'apply_policy': str(apply_policy).lower(), 'use_etc_skel': 'true'}
+
+
 def validate_scope(data, domain, user, apply_policy=False):
     # Himmelblau unions pam_allow_groups from ALL sections, not only global.
-    wanted = {'domain': domain, 'pam_allow_groups': user,
-              'apply_policy': str(apply_policy).lower(), 'use_etc_skel': 'true'}
-    for line in (data or b'').decode().splitlines():
-        match = re.match(r'^\s*([a-zA-Z_]+)\s*=\s*(.*?)\s*$', line)
-        if not match:
-            continue
-        key = match[1].lower()
-        value = re.split(r'\s+[;#]', match[2], maxsplit=1)[0].strip().lower()
-        if key in wanted and value != wanted[key].lower():
+    wanted = managed_keys(domain, user, apply_policy)
+    for _, _, key, value in ini_lines((data or b'').decode()):
+        if key in wanted and value.lower() != wanted[key].lower():
             raise Error(f'Conflicting scoped Himmelblau key in configuration hierarchy: {key}')
-        if key == 'domains' and any(item.strip() != domain for item in value.split(',')):
+        if key == 'domains' and any(item.strip() != domain for item in value.lower().split(',')):
             raise Error('Additional configured domains require manual scope review')
 
 
@@ -230,31 +269,27 @@ def managed_config(data, domain, user, apply_policy=False):
     """Preserve existing text/settings; refuse conflicting explicit managed keys."""
     validate_scope(data, domain, user, apply_policy)
     text = (data or b'').decode()
-    wanted = {'domain': domain, 'pam_allow_groups': user,
-              'apply_policy': str(apply_policy).lower(), 'use_etc_skel': 'true'}
+    wanted = managed_keys(domain, user, apply_policy)
     lines = text.splitlines(keepends=True)
-    section = None
+    previous = None
     global_seen = False
     found = set()
     insert = len(lines)
-    for index, line in enumerate(lines):
-        if match := re.match(r'^\s*\[([^]]+)\]\s*(?:[#;].*)?$', line.strip()):
-            if section == 'global':
+    for index, section, key, value in ini_lines(text):
+        if key is None:
+            if previous == 'global':
                 insert = index
-            section = match[1].lower()
+            previous = section
             if section == 'global':
                 if global_seen:
                     raise Error('Duplicate global configuration section')
                 global_seen = True
-        elif section == 'global' and (match := re.match(r'^\s*([a-zA-Z_]+)\s*=\s*(.*?)\s*$', line.strip())):
-            key = match[1].lower()
-            if key in wanted:
-                if key in found:
-                    raise Error(f'Duplicate managed key: {key}')
-                found.add(key)
-                value = re.split(r'\s+[;#]', match[2], maxsplit=1)[0].strip()
-                if value.lower() != wanted[key].lower():
-                    raise Error(f'Conflicting existing Himmelblau key: {key}; review manually')
+        elif section == 'global' and key in wanted:
+            if key in found:
+                raise Error(f'Duplicate managed key: {key}')
+            found.add(key)
+            if value.lower() != wanted[key].lower():
+                raise Error(f'Conflicting existing Himmelblau key: {key}')
     extra = ''.join(f'{key} = {value}\n' for key, value in wanted.items() if key not in found)
     if not global_seen:
         return (text.rstrip() + '\n\n[global]\n' + extra).lstrip('\n').encode()
@@ -360,7 +395,44 @@ def load_state():
     check_state_ancestors(STATE.parent)
     if STATE.parent.stat().st_uid != os.geteuid() or stat.S_IMODE(STATE.parent.stat().st_mode) != 0o700:
         raise Error('Unsafe state directory ownership/mode')
-    return json.loads(data)
+    return check_state(parse_json(data, STATE))
+
+
+def parse_json(data, path):
+    try:
+        return json.loads(data)
+    except ValueError:
+        raise Error(f'Invalid JSON: {path}') from None
+
+
+def check_state(state):
+    """Raise Error unless root state has every field the root commands index."""
+    def valid_entry(entry):
+        if not isinstance(entry, dict) or 'before' not in entry:
+            return False
+        fields = {'path': str, 'after': str, 'mode': int}
+        if entry['before'] is not None:
+            fields.update(before=str, before_mode=int, before_uid=int, before_gid=int)
+        return all(type(entry.get(key)) is kind for key, kind in fields.items())
+    fields = {'domain': str, 'user': str, 'admin': bool, 'files': list}
+    if not (isinstance(state, dict)
+            and all(type(state.get(key)) is kind for key, kind in fields.items())
+            and all(valid_entry(entry) for entry in state['files'])
+            and ('transaction' not in state
+                 or isinstance(state['transaction'], dict)
+                 and isinstance(state['transaction'].get('progress'), dict))):
+        raise Error(f'Invalid state file: {STATE}')
+    return state
+
+
+def user_state(data, path):
+    state = parse_json(data, path)
+    fields = {'version': str, 'clone_hash': str, 'hook_hash': str,
+              'upstream_files': dict, 'clone_files': dict}
+    if not isinstance(state, dict) or (state.get('phase') == 'ready' and any(
+            not isinstance(state.get(key), kind) for key, kind in fields.items())):
+        raise Error(f'Invalid state file: {path}')
+    return state
 
 
 def check_state_ancestors(path):
@@ -535,12 +607,11 @@ def policy(enable):
     validate_scope(read_generated_config(), state['domain'], state['user'], enable)
     before = read(CONFIG)
     lines = before.decode().splitlines(keepends=True)
-    section = None
     replaced = 0
-    for index, line in enumerate(lines):
-        if match := re.match(r'^\s*\[([^]]+)\]\s*(?:[#;].*)?$', line.strip()):
-            section = match[1].lower()
-        elif section == 'global' and (match := re.match(r'^(\s*apply_policy\s*=\s*)(true|false)(.*)$', line, re.I)):
+    for index, section, key, _ in ini_lines(before.decode()):
+        line = lines[index]
+        if (section == 'global' and key == 'apply_policy'
+                and (match := re.match(r'^(\s*apply_policy\s*=\s*)(true|false)(.*)$', line, re.I))):
             lines[index] = match[1] + str(enable).lower() + match[3] + line[match.end():]
             replaced += 1
     if replaced != 1:
@@ -586,8 +657,7 @@ def policy(enable):
 
 def stock_pam():
     data = read(STOCK_PAM)
-    info = json.loads((ASSETS / 'patches.json').read_text())['lock-pam']
-    if data is None or digest(data) != info['before']:
+    if data is None or digest(data) != manifest('lock-pam')['before']:
         raise Error('Stock Omarchy PAM is modified/unsupported; restore a reviewed pristine source before setup or repair')
     return data
 
@@ -605,16 +675,16 @@ def native_payload_contract():
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644 or metadata.st_size > 1024 * 1024:
         raise Error('Unsafe independent native payload manifest')
     no_extended_acl(NATIVE_PAYLOAD)
-    manifest = json.loads(read(NATIVE_PAYLOAD))
-    if not isinstance(manifest, dict):
-        raise Error('Invalid native payload manifest')
-    if (manifest.get('package') != 'sddm-himmelblau' or manifest.get('version') != '0.21.0-3'
-            or not isinstance(manifest.get('artifact_sha256'), str)
-            or not re.fullmatch(r'[0-9a-f]{64}', manifest['artifact_sha256'])
-            or not isinstance(manifest.get('source_commit'), str)
-            or not re.fullmatch(r'[0-9a-f]{40}', manifest['source_commit'])):
+    payload = json.loads(read(NATIVE_PAYLOAD))
+    if not isinstance(payload, dict):
+        raise Error('Invalid native payload payload')
+    if (payload.get('package') != 'sddm-himmelblau' or payload.get('version') != '0.21.0-3'
+            or not isinstance(payload.get('artifact_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', payload['artifact_sha256'])
+            or not isinstance(payload.get('source_commit'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', payload['source_commit'])):
         raise Error('Unsupported independent native payload provenance')
-    files = manifest.get('files')
+    files = payload.get('files')
     if not isinstance(files, dict) or not {str(path) for path in NATIVE_EXECUTABLES}.issubset(files):
         raise Error('Incomplete native authentication executable manifest')
     component_files = set()
@@ -695,8 +765,7 @@ def root_issues(state, *, transaction=None):
         stock_pam()
         native_sddm_contract()
         supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
-        info = json.loads((ASSETS / 'patches.json').read_text())['sddm-conversation']
-        if digest(read(COPY_THEME / 'Main.qml') or b'') != info['after']:
+        if digest(read(COPY_THEME / 'Main.qml') or b'') != manifest('sddm-conversation')['after']:
             raise Error('SDDM conversation theme requires explicit root repair')
     except Error as error:
         issues.append(str(error))
@@ -714,8 +783,7 @@ def root_issues(state, *, transaction=None):
     if read(PIN_PAM) != PIN_PAM_CONTENT:
         issues.append('PIN replacement PAM service missing/drifted; explicit repair required')
     pam = read(PAM)
-    expected_pam = json.loads((ASSETS / 'patches.json').read_text())['lock-pam']['after']
-    if pam is None or digest(pam) != expected_pam:
+    if pam is None or digest(pam) != manifest('lock-pam')['after']:
         issues.append(f'Lock PAM drift: {PAM}')
     for name, path in [('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         try:
@@ -749,13 +817,13 @@ def repair():
     configuration_scope(state['domain'], state['user'], policy_mode(state))
     require_complete_configuration(state['domain'], state['user'], policy_mode(state))
     desired_pam = patch_source('lock-pam', stock_pam())
-    manifest = json.loads((ASSETS / 'patches.json').read_text())
+    theme_info = manifest('sddm-conversation')
     theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
     theme_path = COPY_THEME / 'Main.qml'
     theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
     if theme_entry is None:
         raise Error('Missing managed SDDM theme state')
-    legacy = theme_entry['after'] == manifest['sddm-conversation']['legacy_after']
+    legacy = theme_entry['after'] == theme_info.get('legacy_after')
     if legacy:
         version = state.get('version')
         # 0.2 repair installed its PIN service without updating 0.1 root labels.
@@ -764,7 +832,7 @@ def repair():
                 (recorded_pin is None or recorded_pin['after'] not in (digest(PIN_PAM_CONTENT), digest(LEGACY_PIN_PAM_CONTENT))
                  or read(PIN_PAM) not in (PIN_PAM_CONTENT, LEGACY_PIN_PAM_CONTENT))):
             raise Error('Legacy SDDM theme requires matching managed 0.2 history')
-    if not legacy and theme_entry['after'] != manifest['sddm-conversation']['after']:
+    if not legacy and theme_entry['after'] != theme_info['after']:
         raise Error('Unsupported managed SDDM theme state')
     repairs = []
     pin_entry = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
@@ -796,7 +864,7 @@ def repair():
             entry['after'] = digest(PIN_PAM_CONTENT)
             repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
             continue
-        if path == PAM and (data is None or digest(data) == manifest['lock-pam']['before']):
+        if path == PAM and (data is None or digest(data) == manifest('lock-pam')['before']):
             if digest(desired_pam) == entry['after']:
                 repairs.append((path, desired_pam, entry['mode']))
                 continue
@@ -887,9 +955,9 @@ def recover(recovery_only=False):
     metadata = backup.stat()
     if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
         raise Error('Unsafe recovery journal ownership/mode')
-    journal = json.loads(read(backup))
-    if not isinstance(journal.get('files'), list) or 'after_state' not in journal or 'progress' not in journal:
-        raise Error('Legacy recovery journal requires manual inspection')
+    journal = parse_json(read(backup), backup)
+    if not valid_journal(journal):
+        raise Error(f'Unsupported recovery journal: {backup}')
     before_state = base64.b64decode(journal['state'])
     current_state = read(STATE)
     if current_state != before_state and digest(current_state) != journal.get('after_state'):
@@ -928,6 +996,20 @@ def recover(recovery_only=False):
     journal_step(backup, journal, '@state', 'restored')
     unlink_durable(backup)
     print('Interrupted transaction restored to its previous managed state. No services or tenant operations performed.')
+
+
+def valid_journal(journal):
+    def valid_entry(entry):
+        return (isinstance(entry, dict) and type(entry.get('path')) is str
+                and type(entry.get('mode')) is int and type(entry.get('after')) is str
+                and (entry.get('data') is None or type(entry['data']) is str))
+    return (isinstance(journal, dict) and type(journal.get('state')) is str
+            and type(journal.get('after_state')) is str
+            and isinstance(journal.get('progress'), dict)
+            and isinstance(journal.get('files'), list)
+            and all(valid_entry(entry) for entry in journal['files'])
+            and isinstance(journal.get('directories', {}), dict)
+            and all(type(mode) is int for mode in journal.get('directories', {}).values()))
 
 
 def require_no_live_locker(recovery_only=False):
@@ -1120,13 +1202,13 @@ def legacy_user_status(quiet=False):
     data = read(statefile)
     if data is None:
         raise Error('No managed user clone; run enable-user in an unlocked graphical session')
-    state = json.loads(data)
+    state = user_state(data, statefile)
     if state.get('phase') != 'ready':
         raise Error('Partial native clone setup; keep unlocked, inspect clone, disable it explicitly, and recover before retrying')
     recorded = dict(state['upstream_files'])
-    manifest = json.loads((ASSETS / 'patches.json').read_text())
-    if recorded.get('Service.qml') == manifest['lock-conversation'].get('previous_after'):
-        recorded['Service.qml'] = manifest['lock-conversation']['after']
+    service = manifest('lock-conversation')
+    if recorded.get('Service.qml') == service.get('previous_after'):
+        recorded['Service.qml'] = service['after']
     if upstream_hashes() != recorded:
         raise Error('Upstream lock plugin changed after cloning; explicit review and a new native clone are required')
     if clone_hashes(clone) != state['clone_files']:
@@ -1139,7 +1221,7 @@ def legacy_user_status(quiet=False):
         raise Error('PIN replacement service missing/drifted; explicit root repair required')
     for name, path in [('lock-pam', PAM), ('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         actual = read(path)
-        info = json.loads((ASSETS / 'patches.json').read_text())[name]
+        info = manifest(name)
         if name == 'lock-pam':
             if actual is None or digest(actual) != info['after']:
                 raise Error('Dedicated lock PAM missing/drifted; review then run sudo omarchy-himmelblau repair explicitly')
@@ -1173,7 +1255,7 @@ def lock_implementations(plugins):
 
 def fixed_plugin_files():
     account, home = canonical_user()
-    info = json.loads((ASSETS / 'patches.json').read_text())['fixed-plugin']
+    info = manifest('fixed-plugin')
     directory = home / '.config/omarchy/plugins' / info['id']
     user_path_guard(home, directory)
     expected = info['files']
@@ -1201,9 +1283,8 @@ def fixed_plugin_files():
 
 def lock_prerequisites():
     # The lock uses only the dedicated service; stock PAM matters to setup/repair.
-    info = json.loads((ASSETS / 'patches.json').read_text())
     data = read(PAM)
-    if data is None or digest(data) != info['lock-pam']['after']:
+    if data is None or digest(data) != manifest('lock-pam')['after']:
         raise Error('Dedicated lock PAM missing or drifted; explicit root setup/repair required')
     metadata = PAM.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
@@ -1236,7 +1317,7 @@ def locker_preflight():
     enabled = lock_implementations(plugins)
     if len(enabled) != 1:
         raise Error('Exactly one enabled lock implementation is required')
-    if enabled[0]['id'] == '9spokes.himmelblau-lock':
+    if enabled[0]['id'] == manifest('fixed-plugin')['id']:
         plugin_status(quiet=True, plugins=plugins)
     else:
         user, clone, statefile, hook = user_paths()
@@ -1250,7 +1331,7 @@ def user_status():
     enabled = lock_implementations(plugins)
     if len(enabled) > 1:
         raise Error('Multiple enabled lock implementations; remain unlocked and resolve explicitly')
-    if enabled and enabled[0]['id'] == '9spokes.himmelblau-lock':
+    if enabled and enabled[0]['id'] == manifest('fixed-plugin')['id']:
         plugin_status(plugins=plugins)
     else:
         legacy_user_status()
@@ -1280,10 +1361,11 @@ def activate_plugin(migrate=False):
             raise Error('Managed legacy lock is enabled; explicit --migrate is required')
         user, clone, statefile, hook = user_paths()
         legacy_user_status(quiet=True)
-        sources = json.loads((ASSETS / 'patches.json').read_text())
-        if digest(read(clone / 'Service.qml') or b'') not in (sources['lock-conversation']['after'], sources['lock-conversation'].get('previous_after')):
+        service = manifest('lock-conversation')
+        if digest(read(clone / 'Service.qml') or b'') not in (service['after'],
+                                                             service.get('previous_after')):
             raise Error('Unsupported legacy lock source; migration refused')
-        if digest(read(clone / 'LockView.qml') or b'') != sources['lock-view']['after']:
+        if digest(read(clone / 'LockView.qml') or b'') != manifest('lock-view')['after']:
             raise Error('Unsupported legacy lock view; migration refused')
     def change(action, plugin):
         unlocked()
@@ -1303,15 +1385,7 @@ def activate_plugin(migrate=False):
 
 
 def verify_native_clone(user):
-    result = run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], text=True,
-                 env=user_environment(), timeout=5)
-    try:
-        plugins = json.loads(result.stdout)
-    except ValueError:
-        raise Error('Native plugin discovery returned invalid JSON') from None
-    if not isinstance(plugins, list):
-        raise Error('Native plugin discovery did not return the supported array schema')
-    matches = [plugin for plugin in plugins if isinstance(plugin, dict) and plugin.get('id') == user + '.lock']
+    matches = [plugin for plugin in native_plugins() if plugin['id'] == user + '.lock']
     if (len(matches) != 1 or matches[0].get('firstParty') is not False
             or matches[0].get('clonedFrom') != 'omarchy.lock'
             or matches[0].get('enabled') is not True):
@@ -1389,22 +1463,22 @@ def replace_clone(clone, statefile, state, files, hook, hook_data=None):
 
 def upgrade_user(user, clone, statefile, hook):
     stock_pam()
-    manifest = json.loads((ASSETS / 'patches.json').read_text())
-    if digest(read(PAM) or b'') != manifest['lock-pam']['after']:
+    if digest(read(PAM) or b'') != manifest('lock-pam')['after']:
         raise Error('Dedicated authentication PAM service drift; upgrade refused')
-    state = json.loads(read(statefile))
+    state = user_state(read(statefile), statefile)
     if state.get('phase') != 'ready' or state.get('version') != '0.1.0':
         raise Error('Only an unchanged managed 0.1.0 clone can use this upgrade path')
     if clone_hashes(clone) != state['clone_files'] or digest(read(hook) or b'') != state['hook_hash']:
         raise Error('Managed clone/hook drift; upgrade refused')
-    manifest = json.loads((ASSETS / 'patches.json').read_text())
+    legacy_service = manifest('lock-conversation').get('legacy_after')
+    stock_view = manifest('lock-view')['before']
     service = read(clone / 'Service.qml')
     view = read(clone / 'LockView.qml')
-    if digest(service or b'') != manifest['lock-conversation']['legacy_after'] or digest(view or b'') != manifest['lock-view']['before']:
+    if digest(service or b'') != legacy_service or digest(view or b'') != stock_view:
         raise Error('Unsupported legacy clone sources')
     current = upstream_hashes()
     recorded = dict(state['upstream_files'])
-    if recorded.get('Service.qml') != manifest['lock-conversation']['legacy_after'] or recorded.get('LockView.qml') != manifest['lock-view']['before']:
+    if recorded.get('Service.qml') != legacy_service or recorded.get('LockView.qml') != stock_view:
         raise Error('Unsupported legacy upstream snapshot')
     recorded['Service.qml'] = current['Service.qml']
     recorded['LockView.qml'] = current['LockView.qml']
@@ -1423,7 +1497,8 @@ def upgrade_user(user, clone, statefile, hook):
 
 def enable_user(upgrade=False):
     user, clone, statefile, hook = user_paths()
-    if any(plugin['id'] == '9spokes.himmelblau-lock' and plugin['enabled'] for plugin in native_plugins()):
+    fixed_id = manifest('fixed-plugin')['id']
+    if any(plugin['id'] == fixed_id and plugin['enabled'] for plugin in native_plugins()):
         raise Error('Fixed lock plugin is enabled; legacy clone creation/update is refused')
     unlocked()
     if read(statefile) is not None:
@@ -1438,10 +1513,9 @@ def enable_user(upgrade=False):
         raise Error('Native clone already exists without managed state; refusing to overwrite')
     if read(hook) is not None:
         raise Error('Post-update hook already exists without managed state')
-    info = json.loads((ASSETS / 'patches.json').read_text())
     stock_pam()
     pam = read(PAM)
-    if pam is None or digest(pam) != info['lock-pam']['after']:
+    if pam is None or digest(pam) != manifest('lock-pam')['after']:
         raise Error('Run root setup/repair before enable-user')
     source = read(LOCK)
     if source is None:
@@ -1530,9 +1604,9 @@ def main(argv=None):
             recover(args.recovery_only)
 
 
-if __name__ == '__main__':
+def cli(argv=None):
     try:
-        main()
+        main(argv)
     except subprocess.TimeoutExpired as error:
         sys.exit(f'Command timed out: {error.cmd[0]}')
     except subprocess.CalledProcessError as error:
@@ -1540,3 +1614,7 @@ if __name__ == '__main__':
         sys.exit(f'Command failed: {error.cmd[0]}')
     except (Error, OSError, ValueError) as error:
         sys.exit(str(error))
+
+
+if __name__ == '__main__':
+    cli()

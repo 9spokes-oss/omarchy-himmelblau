@@ -1243,6 +1243,32 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaises(m.Error):m.repair()
         self.assertEqual(m.STATE.read_bytes(),before);self.assertFalse(m.PIN_PAM.exists())
 
+    def test_malformed_state_exits_with_one_line_error(self):
+        self.setup()
+        state = m.load_state()
+        cases = [b'not json', b'[]', json.dumps({**state, 'files': [{}]}).encode(),
+                 json.dumps({**state, 'admin': 'no'}).encode(),
+                 json.dumps({**state, 'transaction': {'kind': 'setup'}}).encode()]
+        for data in cases:
+            with self.subTest(data=data[:30]), patch.object(m, 'root_required'):
+                m.STATE.write_bytes(data)
+                with self.assertRaises(SystemExit) as exit:
+                    m.cli(['repair'])
+                self.assertRegex(exit.exception.code, f'^Invalid (JSON|state file): {m.STATE}$')
+
+    def test_malformed_patch_manifest_exits_with_one_line_error(self):
+        assets = self.base / 'assets'
+        assets.mkdir()
+        m.PAM.write_bytes(b'synthetic')
+        for data in ('not json', '[]', '{"lock-pam": {"before": 1}}'):
+            with self.subTest(data=data), patch.object(m, 'ASSETS', assets):
+                (assets / 'patches.json').write_text(data)
+                m._MANIFESTS.clear()
+                with self.assertRaises(SystemExit) as exit:
+                    m.cli(['plugin-status'])
+                self.assertTrue(exit.exception.code.startswith(f'Invalid {assets}/patches.json'))
+        m._MANIFESTS.clear()
+
     def test_identity_validation(self):
         self.assertEqual(m.identity('EXAMPLE.COM', 'Alice@EXAMPLE.COM'), ('example.com', 'alice@example.com'))
         for domain, upn in [('example.com','alice@other.com'), ('x;echo','a@x;echo'), ('example.com','a\n@EXAMPLE.COM')]:
