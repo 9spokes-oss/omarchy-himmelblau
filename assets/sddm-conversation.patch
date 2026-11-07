@@ -23,7 +23,7 @@
    property int sessionIndex: {
      for (var i = 0; i < sessionModel.rowCount(); i++) {
        var name = (sessionModel.data(sessionModel.index(i, 0), Qt.DisplayRole) || "").toString()
-@@ -18,21 +31,111 @@
+@@ -18,21 +31,116 @@
      return sessionModel.lastIndex
    }
  
@@ -123,7 +123,12 @@
 +      if (result === 3 && root.recovering) root.notices = ["PIN updated; sign in with the new PIN."]
 +      else if (result === 2 && !root.recovering) { root.sessionStarted = true; root.notices = ["Starting session…"] }
 +      else if (result === 1) root.notices = [root.recovering ? "PIN change cancelled; it may already have completed. Sign in to check." : "Sign-in cancelled."]
-+      else root.notices = [root.recovering ? "PIN change failed; sign in to check or retry." : "Sign-in failed. Try again."]
++      else {
++        // Keep what the daemon said (for example a PIN reset backoff) above the result.
++        var messages = root.notices.slice(-7)
++        messages.push(root.recovering ? "PIN change failed; sign in to check or retry." : "Sign-in failed. Try again.")
++        root.notices = messages
++      }
 +    }
 +    function onSocketDisconnected() {
 +      password.text = ""
@@ -142,7 +147,7 @@
  
      Image {
        id: logo
-@@ -43,6 +146,90 @@
+@@ -43,6 +151,90 @@
        anchors.horizontalCenter: parent.horizontalCenter
      }
  
@@ -233,7 +238,7 @@
      Row {
        anchors.horizontalCenter: parent.horizontalCenter
        spacing: 15
-@@ -72,7 +259,7 @@
+@@ -72,7 +264,7 @@
            spacing: 5
  
            Repeater {
@@ -242,7 +247,7 @@
  
              Image {
                source: "bullet.png"
-@@ -82,28 +269,43 @@
+@@ -82,28 +274,43 @@
            }
          }
  
@@ -292,7 +297,7 @@
                event.accepted = true
              }
            }
-@@ -111,6 +313,28 @@
+@@ -111,6 +318,28 @@
        }
      }
  

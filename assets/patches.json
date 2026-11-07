@@ -17,7 +17,7 @@
   "sddm-conversation": {
     "filename": "Main.qml",
     "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
-    "after": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e"
+    "after": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a"
   },
   "fixed-plugin": {
     "id": "9spokes.himmelblau-lock",

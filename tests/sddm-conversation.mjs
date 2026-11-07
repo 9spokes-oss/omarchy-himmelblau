@@ -133,6 +133,28 @@ s.onSocketDisconnected();
 assert.equal(s.password.text, '');
 assert.equal(s.activeAttempt, 0);
 
+// A throttled PIN reset keeps the daemon's reason above the failure line.
+({ state: s, calls } = fixture());
+s.startConversation(true);
+s.onConversationMessage(1, 'Too many PIN reset attempts. Try again in 30 seconds.', true);
+s.onConversationFinished(1, 0);
+assert.equal(s.activeAttempt, 0);
+assert.equal(s.noticeError, true);
+assert.deepEqual([...s.notices], ['Too many PIN reset attempts. Try again in 30 seconds.',
+  'PIN change failed; sign in to check or retry.']);
+// A failed sign-in also keeps PAM's messages, and the list stays at eight lines.
+s.startConversation(false);
+for (let i = 0; i < 8; i++) s.onConversationMessage(2, `notice ${i}`, false);
+s.onConversationFinished(2, 0);
+assert.equal(s.notices.length, 8);
+assert.equal(s.notices[0], 'notice 1');
+assert.equal(s.notices[7], 'Sign-in failed. Try again.');
+// Other results replace the list.
+s.startConversation(false);
+s.onConversationMessage(3, 'stale', false);
+s.onConversationFinished(3, 1);
+assert.deepEqual([...s.notices], ['Sign-in cancelled.']);
+
 // Ordinary typing is never swallowed.
 assert.equal(s.keyAction({ key: 999, modifiers: 0, accepted: true }), false);
 
@@ -140,4 +162,4 @@ assert.ok(source.includes('enabled: root.conversationAvailable && root.activeAtt
 assert.ok(source.includes('textFormat: Text.PlainText'));
 assert.ok(!source.includes('console.log'));
 
-console.log('PASS: SDDM capability guard, fresh correlated prompts, cancel/authorization cutoff, stale events, PIN recovery never launches a session');
+console.log('PASS: SDDM capability guard, fresh correlated prompts, cancel/authorization cutoff, stale events, PIN recovery never launches a session, failure keeps daemon notices');
