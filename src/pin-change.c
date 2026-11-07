@@ -12,14 +12,16 @@
 #include <string.h>
 #include "recovery-account.h"
 
-#define RESPONSE_MAX 4096
+/* Same limits as the SDDM helper: 4096 UTF-16 code units are at most 12288
+ * UTF-8 bytes; longer PAM text is cut to MESSAGE_MAX bytes. */
+#define RESPONSE_MAX (3 * 4096)
 #define MESSAGE_MAX 8192
 static FILE *protocol;
 static unsigned messages;
 
-static void quoted(const char *text) {
+static void quoted(const char *text, size_t length) {
     fputc('"', protocol);
-    for (size_t i = 0; text[i]; i++) {
+    for (size_t i = 0; i < length; i++) {
         unsigned char c = (unsigned char)text[i];
         if (c == '"' || c == '\\') { fputc('\\', protocol); fputc(c, protocol); }
         else if (c < 0x20) fprintf(protocol, "\\u%04x", c);
@@ -28,9 +30,12 @@ static void quoted(const char *text) {
     fputc('"', protocol);
 }
 static int message(const char *kind, const char *text, int visible) {
-    if (!text || strnlen(text, MESSAGE_MAX + 1) > MESSAGE_MAX || ++messages > 256) return -1;
+    if (!text || ++messages > 256) return -1;
+    size_t length = strnlen(text, MESSAGE_MAX);
+    /* When cutting, do not split a UTF-8 sequence. */
+    while (length && text[length] && ((unsigned char)text[length] & 0xC0) == 0x80) length--;
     fprintf(protocol, "{\"type\":\"%s\",\"visible\":%s,\"text\":", kind, visible ? "true" : "false");
-    quoted(text); fputs("}\n", protocol);
+    quoted(text, length); fputs("}\n", protocol);
     return fflush(protocol);
 }
 static int hex(unsigned char c) {
@@ -93,6 +98,8 @@ int main(int argc, char **argv) {
     struct rlimit no_core = {0, 0};
     if (argc != 1 || getuid() == 0 || getuid() != geteuid() || getgid() != getegid()
         || setrlimit(RLIMIT_CORE, &no_core) || prctl(PR_SET_DUMPABLE, 0)) return 2;
+    /* Responses are secrets: keep them out of a stdio buffer that is never wiped. */
+    if (setvbuf(stdin, NULL, _IONBF, 0)) return 2;
     int channel = dup(STDOUT_FILENO), sink = open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (channel < 0 || sink < 0 || fcntl(channel, F_SETFD, FD_CLOEXEC) < 0
         || dup2(sink, STDOUT_FILENO) < 0 || dup2(sink, STDERR_FILENO) < 0) return 2;
