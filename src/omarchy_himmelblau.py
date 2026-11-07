@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import pwd
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -438,16 +437,6 @@ def check_state(state):
                  or isinstance(state['transaction'], dict)
                  and isinstance(state['transaction'].get('progress'), dict))):
         raise Error(f'Invalid state file: {STATE}')
-    return state
-
-
-def user_state(data, path):
-    state = parse_json(data, path)
-    fields = {'version': str, 'clone_hash': str, 'hook_hash': str,
-              'upstream_files': dict, 'clone_files': dict}
-    if not isinstance(state, dict) or (state.get('phase') == 'ready' and any(
-            not isinstance(state.get(key), kind) for key, kind in fields.items())):
-        raise Error(f'Invalid state file: {path}')
     return state
 
 
@@ -1174,23 +1163,6 @@ def canonical_user():
     return account, home
 
 
-def user_paths():
-    if os.geteuid() == 0:
-        raise Error('enable-user must run as the graphical user, never through sudo')
-    account, home = canonical_user()
-    user = account.pw_name
-    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]*', user) or '..' in user:
-        raise Error('Unsupported native clone user ID')
-    if (user + '.lock').startswith('omarchy.'):
-        raise Error(f'Clone ID {user}.lock is in the reserved omarchy. namespace')
-    paths = (home / '.config/omarchy/plugins' / (user + '.lock'),
-             home / '.local/state/omarchy-himmelblau/state.json',
-             home / '.config/omarchy/hooks/post-update.d/omarchy-himmelblau-check')
-    for path in paths:
-        user_path_guard(home, path)
-    return (user, *paths)
-
-
 def user_environment():
     account, home = canonical_user()
     keys = ('DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS')
@@ -1209,77 +1181,6 @@ def unlocked():
     keys = ('locked', 'requested', 'pending', 'sessionLocked', 'secure', 'authenticating')
     if any(state.get(key) is not False for key in keys):
         raise Error('Session is locked or its lock state is unknown')
-
-
-def clone_hashes(clone):
-    safe(clone / '.guard')
-    metadata = clone.stat()
-    if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
-        raise Error('Unsafe clone root ownership/permissions')
-    no_extended_acl(clone)
-    result = {}
-    for path in sorted(clone.rglob('*')):
-        if path.is_symlink():
-            raise Error('Symlink inside managed native clone')
-        if path.is_dir():
-            metadata = path.stat()
-            if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
-                raise Error('Unsafe clone directory ownership/permissions')
-            no_extended_acl(path)
-        if path.is_file():
-            metadata = path.stat()
-            if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
-                raise Error('Unsafe clone file ownership/permissions')
-            no_extended_acl(path)
-            result[str(path.relative_to(clone))] = digest(read(path))
-    return result
-
-
-def upstream_hashes():
-    files = clone_hashes(LOCK.parent)
-    source = read(LOCK)
-    if source is None:
-        raise Error('Missing upstream lock service')
-    # Known before/after QML have identical intended behavior once patched.
-    files['Service.qml'] = supported_source_hash('lock-conversation', source)
-    files['LockView.qml'] = supported_source_hash('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
-    return files
-
-
-def legacy_user_status(quiet=False):
-    user, clone, statefile, hook = user_paths()
-    data = read(statefile)
-    if data is None:
-        raise Error('No managed user lock clone')
-    state = user_state(data, statefile)
-    if state.get('phase') != 'ready':
-        raise Error('Partial native clone setup from an interrupted enable-user')
-    recorded = dict(state['upstream_files'])
-    service = manifest('lock-conversation')
-    if recorded.get('Service.qml') == service.get('previous_after'):
-        recorded['Service.qml'] = service['after']
-    if upstream_hashes() != recorded:
-        raise Error('Upstream lock plugin changed after cloning')
-    if clone_hashes(clone) != state['clone_files']:
-        raise Error('Managed native clone has changed')
-    for path, expected in [(clone / 'Service.qml', state['clone_hash']), (hook, state['hook_hash'])]:
-        actual = read(path)
-        if actual is None or digest(actual) != expected:
-            raise Error(f'User managed drift: {path}')
-    if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
-    sources = [('lock-pam', PAM), ('lock-conversation', LOCK),
-               ('lock-view', LOCK.parent / 'LockView.qml')]
-    for name, path in sources:
-        actual = read(path)
-        info = manifest(name)
-        if name == 'lock-pam':
-            if actual is None or digest(actual) != info['after']:
-                raise Error('Dedicated lock PAM is missing or changed')
-        elif actual is None or digest(actual) not in (info['before'], info['after']):
-            raise Error(f'Unsupported upstream source: {path}')
-    if not quiet:
-        print(f'{user}.lock source and hook match.')
 
 
 def native_plugins():
@@ -1342,12 +1243,11 @@ def lock_prerequisites():
         raise Error('Unsafe dedicated lock PAM metadata')
 
 
-def plugin_status(quiet=False, plugins=None):
-    if os.geteuid() == 0:
-        raise Error('Plugin checks must run as the graphical user')
+def plugin_status(quiet=False):
+    user_required()
     lock_prerequisites()
     info = fixed_plugin_files()
-    plugins = native_plugins() if plugins is None else plugins
+    plugins = native_plugins()
     candidates = [plugin for plugin in plugins if plugin['id'] == info['id']]
     if (len(candidates) != 1 or candidates[0].get('firstParty') is not False
             or candidates[0].get('clonedFrom') != 'omarchy.lock'):
@@ -1360,37 +1260,12 @@ def plugin_status(quiet=False, plugins=None):
 
 
 def locker_preflight():
-    # Quiet metadata-only subprocess used by the QML guard; no authentication.
-    if os.geteuid() == 0:
-        raise Error('Locker preflight must run as the graphical user')
-    lock_prerequisites()
-    plugins = native_plugins()
-    enabled = lock_implementations(plugins)
-    if len(enabled) != 1:
-        raise Error('Exactly one enabled lock implementation is required')
-    if enabled[0]['id'] == manifest('fixed-plugin')['id']:
-        plugin_status(quiet=True, plugins=plugins)
-    else:
-        user, clone, statefile, hook = user_paths()
-        if enabled[0]['id'] != user + '.lock':
-            raise Error('Unrecognized enabled lock implementation')
-        legacy_user_status(quiet=True)
+    """Run by the lock plugin's guard: exit 0 when the fixed plugin can authenticate."""
+    plugin_status(quiet=True)
 
 
-def user_status():
-    plugins = native_plugins()
-    enabled = lock_implementations(plugins)
-    if len(enabled) > 1:
-        raise Error('More than one lock implementation is enabled')
-    if enabled and enabled[0]['id'] == manifest('fixed-plugin')['id']:
-        plugin_status(plugins=plugins)
-    else:
-        legacy_user_status()
-
-
-def activate_plugin(migrate=False):
-    if os.geteuid() == 0:
-        raise Error('Plugin activation must run as the graphical user')
+def activate_plugin():
+    user_required()
     unlocked()
     lock_prerequisites()
     info = fixed_plugin_files()
@@ -1399,212 +1274,17 @@ def activate_plugin(migrate=False):
     if (len(fixed) != 1 or fixed[0].get('firstParty') is not False
             or fixed[0].get('clonedFrom') != 'omarchy.lock'):
         raise Error('Fixed lock plugin is not installed as a clone of omarchy.lock')
-    account, home = canonical_user()
-    old_id = account.pw_name + '.lock'
     enabled = lock_implementations(plugins)
-    others = [plugin for plugin in enabled if plugin['id'] not in ('omarchy.lock', info['id'], old_id)]
-    if others or len(enabled) > 1:
-        raise Error('Unknown/conflicting lock implementation is enabled')
-    old_active = any(plugin['id'] == old_id and plugin.get('firstParty') is False
-                     and plugin.get('clonedFrom') == 'omarchy.lock' for plugin in enabled)
-    if old_active:
-        if not migrate:
-            raise Error('Legacy lock clone is enabled; pass --migrate to replace it')
-        user, clone, statefile, hook = user_paths()
-        legacy_user_status(quiet=True)
-        service = manifest('lock-conversation')
-        if digest(read(clone / 'Service.qml') or b'') not in (service['after'],
-                                                             service.get('previous_after')):
-            raise Error('Unsupported legacy lock source; migration refused')
-        if digest(read(clone / 'LockView.qml') or b'') != manifest('lock-view')['after']:
-            raise Error('Unsupported legacy lock view; migration refused')
-    def change(action, plugin):
-        unlocked()
-        run(['/usr/bin/omarchy', 'plugin', action, plugin], env=user_environment(), timeout=5)
+    if len(enabled) > 1 or any(plugin['id'] not in ('omarchy.lock', info['id']) for plugin in enabled):
+        raise Error('Another lock implementation is enabled; disable it first')
     try:
-        if old_active:
-            change('disable', old_id)
-            if any(plugin['id'] == old_id for plugin in lock_implementations(native_plugins())):
-                raise Error('Native API did not disable the legacy clone')
-        change('enable', info['id'])
+        unlocked()
+        run(['/usr/bin/omarchy', 'plugin', 'enable', info['id']], env=user_environment(), timeout=5)
         plugin_status(quiet=True)
     except Exception:
         # Even a failed native command may have changed persisted selection.
-        # The old keepLoaded service may still exist. Do not restart or delete it.
         raise Error('Plugin activation incomplete; the enabled lock plugin may have changed') from None
     print('Fixed lock plugin enabled; restart the shell or log in again before locking.')
-
-
-def verify_native_clone(user):
-    matches = [plugin for plugin in native_plugins() if plugin['id'] == user + '.lock']
-    if (len(matches) != 1 or matches[0].get('firstParty') is not False
-            or matches[0].get('clonedFrom') != 'omarchy.lock'
-            or matches[0].get('enabled') is not True):
-        raise Error('Native discovery did not confirm the enabled third-party clone and its provenance')
-
-
-AT_FDCWD = -100
-RENAME_EXCHANGE = 2  # linux/fs.h
-
-
-def exchange_directories(left, right):
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename = getattr(libc, 'renameat2', None)
-    if rename is None:
-        raise Error('renameat2 is unavailable')
-    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    rename.restype = ctypes.c_int
-    if rename(AT_FDCWD, os.fsencode(left), AT_FDCWD, os.fsencode(right), RENAME_EXCHANGE):
-        raise Error('Atomic directory exchange failed')
-
-
-def replace_clone(clone, statefile, state, files, hook, hook_data=None):
-    # Stage outside the watched plugins tree, on the same filesystem.
-    old_state = read(statefile)
-    old_hook = read(hook)
-    old_hashes = clone_hashes(clone)
-    safe(clone.parent.parent / '.guard')
-    work = Path(tempfile.mkdtemp(prefix='.himmelblau-stage-', dir=clone.parent.parent))
-    cleanup = True
-    try:
-        candidate = work / 'clone'
-        shutil.copytree(clone, candidate)
-        if old_state is not None:
-            atomic(work / 'previous-state.json', old_state, 0o600)
-        if old_hook is not None:
-            atomic(work / 'previous-hook', old_hook, 0o600)
-        for name, data in files.items():
-            atomic(candidate / name, data, 0o644)
-        state['clone_files'] = clone_hashes(candidate)
-        if clone_hashes(clone) != old_hashes:
-            raise Error('Clone changed during staging; refusing update')
-        for staged in candidate.rglob('*'):
-            if staged.is_file():
-                with staged.open('rb') as source:
-                    os.fsync(source.fileno())
-        for directory in sorted((path for path in candidate.rglob('*') if path.is_dir()), reverse=True):
-            fsync_directory(directory)
-        fsync_directory(candidate)
-        fsync_directory(work)
-        fsync_directory(work.parent)
-        unlocked()
-        exchange_directories(clone, candidate)
-        try:
-            fsync_directory(clone.parent)
-            fsync_directory(candidate.parent)
-            if hook_data is not None:
-                atomic(hook, hook_data, 0o755)
-            atomic(statefile, (json.dumps(state, indent=2) + '\n').encode(), 0o600)
-        except Exception:
-            try:
-                exchange_directories(clone, candidate)
-                fsync_directory(clone.parent)
-                fsync_directory(candidate.parent)
-            except Exception:
-                cleanup = False
-                raise Error(f'Could not restore the old clone; backups are in {work}') from None
-            if old_hook is None:
-                unlink_durable(hook, missing_ok=True)
-            else:
-                atomic(hook, old_hook, 0o755)
-            if old_state is not None:
-                atomic(statefile, old_state, 0o600)
-            raise
-    finally:
-        if cleanup:
-            shutil.rmtree(work)
-
-
-def upgrade_user(user, clone, statefile, hook):
-    stock_pam()
-    if digest(read(PAM) or b'') != manifest('lock-pam')['after']:
-        raise Error('Dedicated authentication PAM service drift; upgrade refused')
-    state = user_state(read(statefile), statefile)
-    if state.get('phase') != 'ready' or state.get('version') != '0.1.0':
-        raise Error('Only an unchanged managed 0.1.0 clone can use this upgrade path')
-    if clone_hashes(clone) != state['clone_files'] or digest(read(hook) or b'') != state['hook_hash']:
-        raise Error('Managed clone/hook drift; upgrade refused')
-    legacy_service = manifest('lock-conversation').get('legacy_after')
-    stock_view = manifest('lock-view')['before']
-    service = read(clone / 'Service.qml')
-    view = read(clone / 'LockView.qml')
-    if digest(service or b'') != legacy_service or digest(view or b'') != stock_view:
-        raise Error('Unsupported legacy clone sources')
-    current = upstream_hashes()
-    recorded = dict(state['upstream_files'])
-    if recorded.get('Service.qml') != legacy_service or recorded.get('LockView.qml') != stock_view:
-        raise Error('Unsupported legacy upstream snapshot')
-    recorded['Service.qml'] = current['Service.qml']
-    recorded['LockView.qml'] = current['LockView.qml']
-    if recorded != current:
-        raise Error('Upstream lock plugin drift; upgrade refused')
-    if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
-    verify_native_clone(user)
-    source = read(LOCK)
-    patched = {'Service.qml': patch_source('lock-conversation', source),
-               'LockView.qml': patch_source('lock-view', read(LOCK.parent / 'LockView.qml'))}
-    state.update(version=VERSION, upstream_files=current, clone_hash=digest(patched['Service.qml']))
-    replace_clone(clone, statefile, state, patched, hook)
-    print('Managed clone upgraded; restart the shell before locking.')
-
-
-def enable_user(upgrade=False):
-    user, clone, statefile, hook = user_paths()
-    fixed_id = manifest('fixed-plugin')['id']
-    if any(plugin['id'] == fixed_id and plugin['enabled'] for plugin in native_plugins()):
-        raise Error('Fixed lock plugin is enabled; legacy clones are not supported with it')
-    unlocked()
-    if read(statefile) is not None:
-        if upgrade:
-            upgrade_user(user, clone, statefile, hook)
-            return
-        user_status()
-        print('Managed clone already exists; no changes')
-        return
-    safe(clone / 'Service.qml')
-    if clone.exists() or clone.is_symlink():
-        raise Error(f'{clone} exists but is not managed')
-    if read(hook) is not None:
-        raise Error(f'{hook} exists but is not managed')
-    stock_pam()
-    pam = read(PAM)
-    if pam is None or digest(pam) != manifest('lock-pam')['after']:
-        raise Error('Dedicated lock PAM is missing or changed')
-    source = read(LOCK)
-    if source is None:
-        raise Error('Missing original lock source')
-    expected = patch_source('lock-conversation', source)
-    expected_view = patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
-    if read(PIN_PAM) != PIN_PAM_CONTENT:
-        raise Error(f'PIN replacement service is missing or changed: {PIN_PAM}')
-    original_tree = upstream_hashes()
-    # Omarchy performs the complete native clone, including internal import rewriting.
-    # It auto-enables the clone; keepLoaded code requires logout/login to adopt the patch.
-    atomic(statefile, b'{"phase": "preparing"}\n', 0o600)
-    try:
-        run(['/usr/bin/omarchy', 'plugin', 'clone', 'omarchy.lock'], env=user_environment(),
-            timeout=120)
-        verify_native_clone(user)
-        actual = read(clone / 'Service.qml')
-        if actual != source:
-            raise Error('Native clone source differs from the installed lock source')
-        if read(clone / 'LockView.qml') != read(LOCK.parent / 'LockView.qml'):
-            raise Error('Native clone view differs from supported source')
-        hook_data = ("#!/bin/sh\n# Read-only post-update check. Never repairs or reloads a locker.\n"
-                     "if ! /usr/bin/omarchy-himmelblau status; then\n"
-                     "  printf '%s\\n' 'Review drift; root repair requires explicit"
-                     " sudo omarchy-himmelblau repair.' >&2\n"
-                     "fi\n").encode()
-        new_state = {'phase': 'ready', 'version': VERSION, 'clone_hash': digest(expected),
-                     'hook_hash': digest(hook_data), 'upstream_files': original_tree}
-        files = {'Service.qml': expected, 'LockView.qml': expected_view}
-        replace_clone(clone, statefile, new_state, files, hook, hook_data)
-    except Exception as error:
-        detail = f': {error}' if isinstance(error, Error) else ''
-        raise Error(f'Native clone preparation incomplete{detail}; the clone may be enabled') from None
-    print('Native clone prepared and enabled; log out and back in before locking.')
 
 
 def main(argv=None):
@@ -1618,6 +1298,7 @@ def main(argv=None):
     setup_parser.add_argument('--user', required=True)
     setup_parser.add_argument('--admin', action='store_true',
                               help='allow the account to use sudo with its password or PIN')
+    # status is the same check as plugin-status; existing post-update hooks call it.
     for command in ('doctor', 'status', 'repair', 'plugin-status', 'locker-preflight'):
         sub.add_parser(command)
     for command in ('rollback', 'recover'):
@@ -1628,12 +1309,7 @@ def main(argv=None):
     policy_choice = policy_parser.add_mutually_exclusive_group(required=True)
     policy_choice.add_argument('--enable', dest='policy_enabled', action='store_true')
     policy_choice.add_argument('--disable', dest='policy_enabled', action='store_false')
-    fixed_parser = sub.add_parser('activate-plugin')
-    fixed_parser.add_argument('--migrate', action='store_true',
-                              help='disable the managed legacy clone first')
-    user_parser = sub.add_parser('enable-user')
-    user_parser.add_argument('--upgrade', action='store_true',
-                             help='upgrade an unchanged legacy managed clone')
+    sub.add_parser('activate-plugin')
     args = parser.parse_args(argv)
     if args.development:
         if os.geteuid() == 0:
@@ -1643,16 +1319,11 @@ def main(argv=None):
         global ASSETS
         ASSETS = Path(__file__).resolve().parents[1] / 'assets'
     if args.command == 'activate-plugin':
-        activate_plugin(args.migrate)
-    elif args.command == 'plugin-status':
+        activate_plugin()
+    elif args.command in ('status', 'plugin-status'):
         plugin_status()
     elif args.command == 'locker-preflight':
         locker_preflight()
-    elif args.command == 'enable-user':
-        enable_user(args.upgrade)
-    elif args.command == 'status':
-        user_required()
-        user_status()
     else:
         root_required()
         if args.command == 'doctor':
