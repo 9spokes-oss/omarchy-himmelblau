@@ -109,11 +109,16 @@ remain enabled. Review browser permissions separately when narrowing prior acces
 this script does not audit or remove them.
 
 In the intended profile, open `chrome://policy`, reload policies, and verify the
-extension's `wellKnownApps` value. Open the extension popup and apply its pending
-policy update, then approve the displayed exact-site permissions. Managed policy
-prefills the request; it does not bypass browser consent. Test My Apps, Teams,
-Outlook and the tenant's SharePoint separately, including normal Exit/reopen without
-toggling accounts. Stop and record any credential challenge rather than assuming SSO.
+extension's `wellKnownApps` value and **OK** status. Open or reopen the extension
+popup; its badge can signal a pending managed policy update. If the popup shows
+**A managed policy update is pending**, click **Apply** and approve the displayed
+exact-site permissions. The absence of a pending update is ambiguous: permissions
+may already be granted, or the extension may not have refreshed. Do not blindly rewrite
+a policy whose value and status are correct. Managed policy prefills the request;
+it does not bypass browser consent. Test My Apps, Teams, Outlook and the tenant's
+SharePoint separately, including normal Exit/reopen without opening the popup or
+toggling accounts first. Stop and record any credential challenge rather than
+assuming SSO.
 
 Version `1.13.0` supports this exact-site policy without an extension fork. Do **not**
 deploy `wellKnownApps: {"*": true}` with that version: its reconciliation can remove
