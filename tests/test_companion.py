@@ -183,28 +183,6 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.SUDOERS.read_bytes(), before); self.assertEqual(m.STATE.read_bytes(), state)
         self.assertEqual(m.load_state()['identity'], {'requested_upn':'alice@example.com','canonical_name':'alice','uid':123456})
 
-    def test_legacy_identity_and_numeric_admin_migrate_only_with_explicit_repair(self):
-        original_config = m.CONFIG.read_bytes()
-        with patch.object(m, 'validate_sudo_rule'): self.setup(admin=True)
-        state = m.load_state(); state.pop('identity')
-        state['files'] = [entry for entry in state['files'] if Path(entry['path']) != m.RECOVERY_ACCOUNT]
-        m.RECOVERY_ACCOUNT.unlink()
-        legacy = b'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n#123456 ALL=(ALL:ALL) ALL\n'
-        m.SUDOERS.chmod(0o640); m.SUDOERS.write_bytes(legacy); m.SUDOERS.chmod(0o440)
-        for entry in state['files']:
-            if Path(entry['path']) == m.SUDOERS: entry['after'] = m.digest(legacy)
-            if Path(entry['path']) == m.PIN_PAM: entry['after'] = m.digest(m.LEGACY_PIN_PAM_CONTENT)
-        m.PIN_PAM.write_bytes(m.LEGACY_PIN_PAM_CONTENT); m.save_state(state)
-        with self.assertRaises(m.Error): m.doctor()
-        self.assertEqual(m.SUDOERS.read_bytes(), legacy)
-        with patch.object(m, 'validate_sudo_rule'): m.repair()
-        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), b'alice@example.com\nalice\n123456\n')
-        self.assertIn(b'"alice" ALL=', m.SUDOERS.read_bytes())
-        self.assertIn(b'account [success=ok default=die] pam_himmelblau.so', m.PIN_PAM.read_bytes())
-        m.doctor(); m.rollback()
-        self.assertFalse(m.RECOVERY_ACCOUNT.exists()); self.assertFalse(m.SUDOERS.exists())
-        self.assertEqual(m.CONFIG.read_bytes(), original_config)
-
     def test_admin_canonical_name_grammar_and_roundtrip(self):
         for name in ('#1234', '%wheel', '+netgroup', 'ALL', 'a,b', 'a:b', 'a\nb', 'a"b', '-option'):
             account = SimpleNamespace(pw_name=name, pw_uid=123456)
@@ -493,7 +471,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(calls, [['/usr/bin/omarchy','plugin','enable','9spokes.himmelblau-lock']])
         self.assertTrue(listing[1]['enabled']); self.assertFalse(listing[0]['enabled'])
 
-    def test_fixed_plugin_fresh_activation_does_not_require_legacy_username(self):
+    def test_fixed_plugin_activation_works_for_any_username(self):
         directory, listing = self.fixed_plugin_fixture()
         account, home = m.canonical_user.return_value
         for name in ('omarchy', 'alice@example.com'):
@@ -535,10 +513,10 @@ class CompanionTest(unittest.TestCase):
              patch.object(m.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
             with self.assertRaisesRegex(m.Error, 'activation incomplete'): m.activate_plugin()
 
-    def test_policy_legacy_default_and_explicit_toggle_preserve_original(self):
+    def test_policy_toggle_and_repair_preserve_original(self):
         before = m.CONFIG.read_bytes()
         m.setup('example.com', 'alice@example.com')
-        state = m.load_state(); state.pop('apply_policy'); state['version'] = '0.3.0'; m.save_state(state)
+        state = m.load_state()
         m.doctor()
         original = next(item.copy() for item in state['files'] if Path(item['path']) == m.CONFIG)
         original_run = m.subprocess.run
@@ -723,18 +701,80 @@ class CompanionTest(unittest.TestCase):
         self.assertFalse(m.OVERRIDE.exists())
         self.assertFalse(m.COPY_THEME.exists())
 
-    def legacy_root(self):
+    def missing_pam_root(self):
         self.setup()
-        state = m.load_state()
-        state['version'] = '0.2.0'
-        legacy = m.patch_source('sddm-username', (m.THEME / 'Main.qml').read_bytes())
+        m.PAM.unlink()
+        return m.STATE.read_bytes()
+
+    def test_repair_refuses_content_and_permission_drift_before_writes(self):
+        old = self.missing_pam_root()
         main = m.COPY_THEME / 'Main.qml'
-        main.write_bytes(legacy)
-        for entry in state['files']:
-            if entry['path'] == str(main):
-                entry['after'] = m.digest(legacy)
-        m.save_state(state)
-        return main, legacy, m.STATE.read_bytes()
+        original = main.read_bytes()
+        for data, mode in [(original + b'// drift', 0o644), (original, 0o600)]:
+            with self.subTest(mode=mode):
+                main.write_bytes(data)
+                main.chmod(mode)
+                with self.assertRaises(m.Error):
+                    m.repair()
+                self.assertEqual(m.STATE.read_bytes(), old)
+                self.assertFalse(m.PAM.exists())
+                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+
+    def test_repair_refuses_extra_theme_files_before_writes(self):
+        old = self.missing_pam_root()
+        (m.COPY_THEME / 'unexpected.qml').write_bytes(b'operator asset')
+        with self.assertRaisesRegex(m.Error, 'Unexpected companion theme entry'):
+            m.repair()
+        self.assertFalse(m.PAM.exists())
+        self.assertEqual(m.STATE.read_bytes(), old)
+
+    def test_repair_rolls_back_files_and_state_on_write_failure(self):
+        old = self.missing_pam_root()
+        atomic = m.atomic
+        for failed_path in (m.PAM, m.STATE):
+            with self.subTest(path=failed_path):
+                failed = False
+                def injected(path, data, mode):
+                    nonlocal failed
+                    if path == failed_path and not failed:
+                        failed = True
+                        raise OSError('synthetic repair failure')
+                    return atomic(path, data, mode)
+                with patch.object(m, 'atomic', injected):
+                    with self.assertRaisesRegex(m.Error, 'Repair failed and was undone'):
+                        m.repair()
+                self.assertFalse(m.PAM.exists())
+                self.assertEqual(m.STATE.read_bytes(), old)
+                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+
+    def test_repair_failed_rollback_retains_recoverable_journal(self):
+        old = self.missing_pam_root()
+        atomic = m.atomic
+        def injected(path, data, mode):
+            if path == m.STATE:
+                raise OSError('state write and restore failure')
+            return atomic(path, data, mode)
+        with patch.object(m, 'atomic', injected):
+            with self.assertRaisesRegex(m.Error, 'originals are in'):
+                m.repair()
+        journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
+        self.assertEqual(m.base64.b64decode(journal['state']), old)
+        self.assertEqual(journal['files'], [{'path': str(m.PAM), 'data': None, 'mode': 0o644,
+                                             'after': m.digest(m.patch_source('lock-pam', self.before[m.STOCK_PAM]))}])
+        with self.assertRaisesRegex(m.Error, 'Pending repair recovery'):
+            m.repair()
+
+    def test_repair_restores_deleted_recovery_account_and_pin_service(self):
+        self.setup()
+        recovery = m.RECOVERY_ACCOUNT.read_bytes()
+        m.RECOVERY_ACCOUNT.unlink()
+        m.PIN_PAM.unlink()
+        with self.assertRaises(m.Error):
+            m.doctor()
+        m.repair()
+        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), recovery)
+        self.assertEqual(m.PIN_PAM.read_bytes(), m.PIN_PAM_CONTENT)
+        m.doctor()
 
     def test_native_packaged_pin_pam_matches_companion_contract(self):
         # Read the real package payload, not the test's synthesized guest fixture.
@@ -753,95 +793,6 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaisesRegex(m.Error, 'Native SDDM PIN'): m.repair()
         m.rollback()
         self.assertEqual(m.SDDM_PIN_PAM.read_bytes(), native + b'# drift\n')
-
-    def test_known_02_theme_upgrade_preserves_originals_and_locker(self):
-        main, legacy, old = self.legacy_root()
-        old_state = json.loads(old)
-        unchanged = {Path(e['path']): Path(e['path']).read_bytes() for e in old_state['files'] if e['path'] != str(main)}
-        with self.assertRaisesRegex(m.Error, 'explicit root repair'): m.doctor()
-        with self.assertRaises(m.Error): self.setup()
-        self.assertEqual(main.read_bytes(), legacy)
-        m.repair()
-        upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], '0.5.2')
-        self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
-        for previous, current in zip(old_state['files'], upgraded['files']):
-            self.assertEqual({k:v for k,v in previous.items() if k != 'after'}, {k:v for k,v in current.items() if k != 'after'})
-        for path, data in unchanged.items(): self.assertEqual(path.read_bytes(), data)
-        m.rollback()
-        self.assertFalse(main.exists())
-
-    def test_01_root_label_with_completed_02_pin_repair_upgrades(self):
-        main, legacy, old = self.legacy_root()
-        state = json.loads(old); state['version'] = '0.1.0'; m.save_state(state)
-        m.repair()
-        self.assertEqual(m.load_state()['version'], '0.5.2')
-        self.assertNotEqual(main.read_bytes(), legacy)
-
-    def test_01_root_label_without_02_pin_state_refuses_upgrade(self):
-        main, legacy, old = self.legacy_root()
-        state = json.loads(old); state['version'] = '0.1.0'
-        m.save_state(state); m.PIN_PAM.unlink(); before = m.STATE.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'matching managed 0.2 history'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), before)
-        self.assertFalse(m.PIN_PAM.exists())
-        m.PIN_PAM.write_bytes(m.PIN_PAM_CONTENT)
-        state['files'] = [e for e in state['files'] if e['path'] != str(m.PIN_PAM)]
-        m.save_state(state); m.PIN_PAM.unlink(); before = m.STATE.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'matching managed 0.2 history'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), before)
-        self.assertEqual(main.read_bytes(), legacy)
-
-    def test_02_upgrade_refuses_drift_state_and_permission_changes(self):
-        main, legacy, old = self.legacy_root()
-        for data, mode, version in [(legacy + b'// drift', 0o644, '0.2.0'),
-                                    (legacy, 0o600, '0.2.0'), (legacy, 0o644, 'unknown')]:
-            with self.subTest(mode=mode, version=version):
-                main.write_bytes(data); main.chmod(mode)
-                state = json.loads(old); state['version'] = version; m.save_state(state)
-                before = m.STATE.read_bytes()
-                with self.assertRaises(m.Error): m.repair()
-                self.assertEqual(m.STATE.read_bytes(), before)
-                self.assertEqual(main.read_bytes(), data)
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
-
-    def test_02_upgrade_refuses_extra_theme_files_before_writes(self):
-        main, legacy, old = self.legacy_root()
-        (m.COPY_THEME / 'unexpected.qml').write_bytes(b'operator asset')
-        with self.assertRaisesRegex(m.Error, 'Unexpected companion theme entry'): m.repair()
-        self.assertEqual(main.read_bytes(), legacy)
-        self.assertEqual(m.STATE.read_bytes(), old)
-
-    def test_02_upgrade_rolls_back_theme_and_state_on_write_failure(self):
-        main, legacy, old = self.legacy_root()
-        atomic = m.atomic
-        for failed_path in (main, m.STATE):
-            with self.subTest(path=failed_path):
-                failed = False
-                def injected(path, data, mode):
-                    nonlocal failed
-                    if path == failed_path and not failed:
-                        failed = True
-                        raise OSError('synthetic upgrade failure')
-                    return atomic(path, data, mode)
-                with patch.object(m, 'atomic', injected):
-                    with self.assertRaisesRegex(m.Error, 'Repair failed and was undone'): m.repair()
-                self.assertEqual(main.read_bytes(), legacy)
-                self.assertEqual(m.STATE.read_bytes(), old)
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
-
-    def test_02_failed_rollback_retains_recoverable_journal(self):
-        main, legacy, old = self.legacy_root()
-        atomic = m.atomic
-        def injected(path, data, mode):
-            if path == m.STATE: raise OSError('state write and restore failure')
-            return atomic(path, data, mode)
-        with patch.object(m, 'atomic', injected):
-            with self.assertRaisesRegex(m.Error, 'originals are in'): m.repair()
-        journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
-        self.assertEqual(m.base64.b64decode(journal['state']), old)
-        self.assertEqual(m.base64.b64decode(journal['files'][0]['data']), legacy)
-        with self.assertRaisesRegex(m.Error, 'Pending repair recovery'): m.repair()
 
     def test_conflicting_config_prevents_all_changes(self):
         for setting in ['domain = other.example', 'pam_allow_groups = other@example.com',
@@ -893,13 +844,13 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.PAM.read_bytes(), pam)
         self.assertTrue(m.STATE.exists())
 
-    def test_legacy_shared_pam_rejected_before_changes(self):
-        legacy = m.patch_source('lock-pam', self.before[m.STOCK_PAM])
-        m.STOCK_PAM.write_bytes(legacy)
+    def test_patched_stock_pam_rejected_before_changes(self):
+        patched = m.patch_source('lock-pam', self.before[m.STOCK_PAM])
+        m.STOCK_PAM.write_bytes(patched)
         with self.assertRaisesRegex(m.Error, 'pristine'):self.setup()
         self.assertFalse(m.STATE.exists())
         self.assertFalse(m.PAM.exists())
-        self.assertEqual(m.STOCK_PAM.read_bytes(), legacy)
+        self.assertEqual(m.STOCK_PAM.read_bytes(), patched)
 
     def test_repair_known_regenerated_pam_only(self):
         self.setup()
@@ -1087,8 +1038,9 @@ class CompanionTest(unittest.TestCase):
         m.doctor()
 
     def test_repair_view_preflight_precedes_new_pin_service_and_state_write(self):
-        self.setup();state=json.loads(m.STATE.read_text());state['files']=[entry for entry in state['files'] if Path(entry['path'])!=m.PIN_PAM]
-        m.save_state(state);m.PIN_PAM.unlink();before=m.STATE.read_bytes()
+        self.setup()
+        m.PIN_PAM.unlink()
+        before = m.STATE.read_bytes()
         view=m.LOCK.parent/'LockView.qml';view.write_bytes(view.read_bytes()+b'// unknown\n')
         with self.assertRaises(m.Error):m.repair()
         self.assertEqual(m.STATE.read_bytes(),before);self.assertFalse(m.PIN_PAM.exists())

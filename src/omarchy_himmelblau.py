@@ -42,8 +42,6 @@ SDDM_PIN_PAM = Path('/etc/pam.d/sddm-himmelblau-pin-change')
 SDDM_PIN_PAM_CONTENT = (b'# Native SDDM PIN replacement; a successful change never starts a session.\n'
                         b'account [success=ok default=die] pam_himmelblau.so\n'
                         b'password required pam_himmelblau.so\n')
-LEGACY_PIN_PAM_CONTENT = PIN_PAM_CONTENT.replace(
-    b'account [success=ok default=die] pam_himmelblau.so\n', b'')
 LOCAL_PASSWD = Path('/etc/passwd')
 CONFIG_LAYERS = (Path('/usr/lib/himmelblau/himmelblau.conf'), Path('/run/himmelblau/himmelblau.conf'))
 SERVER_CONFIG = Path('/var/cache/himmelblaud/himmelblau.conf')
@@ -357,15 +355,16 @@ def recovery_parent():
         raise Error('Recovery policy directory must already be root-owned 0755')
 
 
-def check_identity(state, allow_legacy=False):
+def saved_identity(state):
     principal = administrator(state['user'])
-    if state.get('identity') is None and allow_legacy:
-        return principal
-    if state.get('identity') != principal:
-        raise Error('Saved identity is missing or no longer matches NSS')
+    if state['identity'] != principal:
+        raise Error('Saved identity no longer matches NSS')
+    return principal
+
+
+def check_identity(state):
+    principal = saved_identity(state)
     recovery_parent()
-    if allow_legacy and read(RECOVERY_ACCOUNT) is None:
-        return principal
     if read(RECOVERY_ACCOUNT) != identity_file(principal):
         raise Error('Recovery principal policy missing or drifted')
     metadata = RECOVERY_ACCOUNT.stat()
@@ -374,21 +373,9 @@ def check_identity(state, allow_legacy=False):
     return principal
 
 
-def check_admin_identity(state, allow_legacy=False):
-    if not state['admin']:
-        return None
-    principal = administrator(state['user'])
-    saved = state.get('identity')
-    if saved is None:
-        legacy = (f'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n'
-                  f'#{principal["uid"]} ALL=(ALL:ALL) ALL\n').encode()
-        if not allow_legacy or read(SUDOERS) != legacy:
-            raise Error('Legacy numeric sudo rule needs repair or has changed')
-    elif saved != principal:
-        raise Error('Saved admin identity no longer matches NSS')
-    elif read(SUDOERS) != admin_rule(principal):
+def check_admin_identity(state):
+    if state['admin'] and read(SUDOERS) != admin_rule(saved_identity(state)):
         raise Error('Canonical admin rule drift')
-    return principal
 
 
 def root_required():
@@ -429,7 +416,8 @@ def check_state(state):
         if entry['before'] is not None:
             fields.update(before=str, before_mode=int, before_uid=int, before_gid=int)
         return all(type(entry.get(key)) is kind for key, kind in fields.items())
-    fields = {'domain': str, 'user': str, 'admin': bool, 'files': list}
+    fields = {'domain': str, 'user': str, 'admin': bool, 'apply_policy': bool,
+              'identity': dict, 'files': list}
     if not (isinstance(state, dict)
             and all(type(state.get(key)) is kind for key, kind in fields.items())
             and all(valid_entry(entry) for entry in state['files'])
@@ -594,13 +582,6 @@ def setup(domain, user, admin=False):
     print('Root setup complete.')
 
 
-def policy_mode(state):
-    mode = state.get('apply_policy', False)  # Legacy setup states opted out.
-    if type(mode) is not bool:
-        raise Error('Invalid managed policy mode in state')
-    return mode
-
-
 def policy(enable):
     """Explicit local configuration only; no service or tenant operations."""
     state = load_state()
@@ -610,7 +591,7 @@ def policy(enable):
     issues = root_issues(state)
     if issues:
         raise Error('\n'.join(issues))
-    if policy_mode(state) == enable:
+    if state['apply_policy'] == enable:
         print(f'apply_policy is already {str(enable).lower()}; no changes')
         return
     # Generated configuration loads last. Never rewrite it or ignore conflicts.
@@ -773,8 +754,8 @@ def root_issues(state, *, transaction=None):
             raise Error('Interrupted root transaction; run recover first')
         check_identity(state)
         check_admin_identity(state)
-        configuration_scope(state['domain'], state['user'], policy_mode(state))
-        require_complete_configuration(state['domain'], state['user'], policy_mode(state))
+        configuration_scope(state['domain'], state['user'], state['apply_policy'])
+        require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
         stock_pam()
         native_sddm_contract()
         supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
@@ -827,36 +808,18 @@ def repair():
     if state.get('transaction') is not None:
         raise Error('Interrupted root transaction; run recover first')
     native_sddm_contract()
-    principal = check_identity(state, allow_legacy=True)
-    check_admin_identity(state, allow_legacy=True)
-    configuration_scope(state['domain'], state['user'], policy_mode(state))
-    require_complete_configuration(state['domain'], state['user'], policy_mode(state))
+    principal = saved_identity(state)
+    recovery_parent()
+    check_admin_identity(state)
+    configuration_scope(state['domain'], state['user'], state['apply_policy'])
+    require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
     desired_pam = patch_source('lock-pam', stock_pam())
-    theme_info = manifest('sddm-conversation')
-    theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
+    patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
     theme_path = COPY_THEME / 'Main.qml'
     theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
-    if theme_entry is None:
-        raise Error('Missing managed SDDM theme state')
-    legacy = theme_entry['after'] == theme_info.get('legacy_after')
-    if legacy:
-        version = state.get('version')
-        # 0.2 repair installed its PIN service without updating 0.1 root labels.
-        recorded_pin = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
-        pins = (PIN_PAM_CONTENT, LEGACY_PIN_PAM_CONTENT)
-        pin_ok = (recorded_pin is not None and recorded_pin['after'] in {digest(pin) for pin in pins}
-                  and read(PIN_PAM) in pins)
-        if version not in ('0.1.0', '0.2.0') or (version == '0.1.0' and not pin_ok):
-            raise Error('Legacy SDDM theme requires matching managed 0.2 history')
-    if not legacy and theme_entry['after'] != theme_info['after']:
+    if theme_entry is None or theme_entry['after'] != manifest('sddm-conversation')['after']:
         raise Error('Unsupported managed SDDM theme state')
     repairs = []
-    pin_entry = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
-    if pin_entry is None:
-        if read(PIN_PAM) is not None:
-            raise Error('Unmanaged PIN replacement service conflicts with upgrade')
-        entry = planned(PIN_PAM, PIN_PAM_CONTENT, 0o644)
-        state['files'].append({k: v for k, v in entry.items() if k != 'data'})
     # Full file/source/configuration preflight precedes journal or managed writes.
     for entry in state['files']:
         path = Path(entry['path'])
@@ -869,16 +832,9 @@ def repair():
                 and entry['after'] == digest(identity_file(principal))):
             repairs.append((path, identity_file(principal), entry['mode']))
             continue
-        if path == PIN_PAM and data == LEGACY_PIN_PAM_CONTENT:
-            entry['after'] = digest(PIN_PAM_CONTENT)
-            repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
-            continue
         if data is not None and digest(data) == entry['after']:
-            if path == theme_path and legacy:
-                repairs.append((path, theme, entry['mode']))
             continue
-        if path == PIN_PAM and (data is None or data == LEGACY_PIN_PAM_CONTENT):
-            entry['after'] = digest(PIN_PAM_CONTENT)
+        if path == PIN_PAM and data is None and entry['after'] == digest(PIN_PAM_CONTENT):
             repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
             continue
         if path == PAM and (data is None or digest(data) == manifest('lock-pam')['before']):
@@ -886,27 +842,9 @@ def repair():
                 repairs.append((path, desired_pam, entry['mode']))
                 continue
         raise Error(f'Repair refuses unsupported managed drift: {path}')
-    if state.get('identity') is None:
-        recovery_parent()
-        if read(RECOVERY_ACCOUNT) is not None:
-            raise Error('Unmanaged recovery principal policy conflicts with migration')
-        entry = planned(RECOVERY_ACCOUNT, identity_file(principal), 0o644)
-        state['files'].append({key: value for key, value in entry.items() if key != 'data'})
-        repairs.append((RECOVERY_ACCOUNT, identity_file(principal), 0o644))
-    if state['admin'] and state.get('identity') is None:
-        entry = next((item for item in state['files'] if Path(item['path']) == SUDOERS), None)
-        if entry is None:
-            raise Error('Legacy admin rule lacks managed rollback history')
-        content = admin_rule(principal)
-        validate_sudo_rule(content)
-        repairs.append((SUDOERS, content, 0o440))
-        entry['after'] = digest(content)
-    state['identity'] = principal
     patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
-    # Preserve original rollback metadata; only the managed after-hash changes.
-    theme_entry['after'] = digest(theme)
     state['version'] = VERSION
     originals = []
     for path, data, mode in repairs:
