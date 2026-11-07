@@ -706,6 +706,67 @@ class CompanionTest(unittest.TestCase):
         m.PAM.unlink()
         return m.STATE.read_bytes()
 
+    def previous_release_root(self):
+        """A 0.5.2 install: its theme copy differs from 0.5.3 only in the failure notices."""
+        self.setup()
+        main = m.COPY_THEME / 'Main.qml'
+        current = main.read_bytes()
+        failure = ('      else {\n'
+                   '        // Keep what the daemon said (for example a PIN reset backoff) above the result.\n'
+                   '        var messages = root.notices.slice(-7)\n'
+                   '        messages.push(root.recovering ? "PIN change failed; sign in to check or retry."'
+                   ' : "Sign-in failed. Try again.")\n'
+                   '        root.notices = messages\n'
+                   '      }\n').encode()
+        old_failure = ('      else root.notices = [root.recovering ? "PIN change failed; sign in to check or retry."'
+                       ' : "Sign-in failed. Try again."]\n').encode()
+        self.assertEqual(current.count(failure), 1)
+        previous = current.replace(failure, old_failure)
+        self.assertEqual(m.digest(previous), m.manifest('previous-release')['sddm-conversation'])
+        main.write_bytes(previous)
+        state = m.load_state()
+        state['version'] = m.manifest('previous-release')['version']
+        for entry in state['files']:
+            if entry['path'] == str(main):
+                entry['after'] = m.digest(previous)
+        m.save_state(state)
+        return main, previous, m.STATE.read_bytes()
+
+    def test_previous_release_theme_upgrade_preserves_originals(self):
+        main, previous, old = self.previous_release_root()
+        old_state = json.loads(old)
+        unchanged = {Path(e['path']): Path(e['path']).read_bytes() for e in old_state['files'] if e['path'] != str(main)}
+        with self.assertRaisesRegex(m.Error, 'explicit root repair'): m.doctor()
+        with self.assertRaises(m.Error): self.setup()
+        self.assertEqual(main.read_bytes(), previous)
+        m.repair()
+        upgraded = m.load_state()
+        self.assertEqual(upgraded['version'], m.VERSION)
+        self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
+        for before, after in zip(old_state['files'], upgraded['files']):
+            self.assertEqual({k:v for k,v in before.items() if k != 'after'}, {k:v for k,v in after.items() if k != 'after'})
+        for path, data in unchanged.items(): self.assertEqual(path.read_bytes(), data)
+        m.doctor()
+        m.rollback()
+        self.assertFalse(main.exists())
+        self.assertEqual(m.THEME.joinpath('Main.qml').read_bytes(), (ROOT / 'tests/fixtures/Main.qml').read_bytes())
+
+    def test_previous_release_theme_upgrade_refuses_drift_and_unknown_hashes(self):
+        main, previous, old = self.previous_release_root()
+        main.write_bytes(previous + b'// drift')
+        with self.assertRaisesRegex(m.Error, 'unsupported managed drift'): m.repair()
+        self.assertEqual(m.STATE.read_bytes(), old)
+        main.write_bytes(previous)
+        state = json.loads(old)
+        for entry in state['files']:
+            if entry['path'] == str(main):
+                entry['after'] = m.digest(previous + b'// older')
+        m.save_state(state); before = m.STATE.read_bytes()
+        with self.assertRaisesRegex(m.Error, 'Unsupported managed SDDM theme state'): m.repair()
+        self.assertEqual(m.STATE.read_bytes(), before)
+        self.assertEqual(main.read_bytes(), previous)
+        self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+
     def test_repair_refuses_content_and_permission_drift_before_writes(self):
         old = self.missing_pam_root()
         main = m.COPY_THEME / 'Main.qml'

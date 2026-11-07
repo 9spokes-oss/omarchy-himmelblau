@@ -145,6 +145,9 @@ def manifest(name):
     entry = entries.get(name) if isinstance(entries, dict) else None
     if name == 'fixed-plugin':
         required = {'id': str, 'files': dict, 'upstream': dict}
+    elif name == 'previous-release':
+        # The one release that repair upgrades from.
+        required = {'version': str, 'sddm-conversation': str}
     else:
         required = {'filename': str, 'before': str, 'after': str}
     if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
@@ -816,10 +819,12 @@ def repair():
     configuration_scope(state['domain'], state['user'], state['apply_policy'])
     require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
     desired_pam = patch_source('lock-pam', stock_pam())
-    patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
+    theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
     theme_path = COPY_THEME / 'Main.qml'
     theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
-    if theme_entry is None or theme_entry['after'] != manifest('sddm-conversation')['after']:
+    previous = manifest('previous-release')['sddm-conversation']
+    upgrade = theme_entry is not None and theme_entry['after'] == previous
+    if theme_entry is None or (not upgrade and theme_entry['after'] != digest(theme)):
         raise Error('Unsupported managed SDDM theme state')
     repairs = []
     # Full file/source/configuration preflight precedes journal or managed writes.
@@ -835,6 +840,8 @@ def repair():
             repairs.append((path, identity_file(principal), entry['mode']))
             continue
         if data is not None and digest(data) == entry['after']:
+            if upgrade and path == theme_path:
+                repairs.append((path, theme, entry['mode']))
             continue
         if path == PIN_PAM and data is None and entry['after'] == digest(PIN_PAM_CONTENT):
             repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
@@ -847,6 +854,9 @@ def repair():
     patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
+    if upgrade:
+        # Rollback metadata stays; only the managed result changes.
+        theme_entry['after'] = digest(theme)
     state['version'] = VERSION
     originals = []
     for path, data, mode in repairs:
