@@ -429,6 +429,24 @@ class CompanionTest(unittest.TestCase):
         m.PAM.unlink()
         with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM missing'): m.lock_prerequisites()
 
+    def test_locker_preflight_ignores_stock_pam_drift(self):
+        directory, listing = self.fixed_plugin_fixture()
+        listing[0]['enabled'] = False
+        listing[1]['enabled'] = True
+        m.STOCK_PAM.write_bytes(b'# updated by Omarchy\n')
+        stat = Path.stat
+        def root_owned_pam(path, *args, **kwargs):
+            result = stat(path, *args, **kwargs)
+            if path == m.PAM:
+                return SimpleNamespace(st_uid=0, st_mode=result.st_mode)
+            return result
+        with patch.object(Path, 'stat', root_owned_pam), \
+                patch.object(m, 'native_plugins', return_value=listing):
+            m.locker_preflight()
+            m.PAM.write_bytes(m.PAM.read_bytes() + b'# drift\n')
+            with self.assertRaises(m.Error):
+                m.locker_preflight()
+
     def test_fixed_plugin_rejects_unlisted_and_symlink_runtime_files(self):
         directory, listing = self.fixed_plugin_fixture()
         extra = directory / 'plugin/Extra.qml'; extra.write_text('unlisted')

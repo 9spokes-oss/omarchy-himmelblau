@@ -1135,7 +1135,6 @@ def legacy_user_status(quiet=False):
         actual = read(path)
         if actual is None or digest(actual) != expected:
             raise Error(f'User managed drift: {path}')
-    stock_pam()
     if read(PIN_PAM) != PIN_PAM_CONTENT:
         raise Error('PIN replacement service missing/drifted; explicit root repair required')
     for name, path in [('lock-pam', PAM), ('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
@@ -1201,7 +1200,7 @@ def fixed_plugin_files():
 
 
 def lock_prerequisites():
-    stock_pam()
+    # The lock uses only the dedicated service; stock PAM matters to setup/repair.
     info = json.loads((ASSETS / 'patches.json').read_text())
     data = read(PAM)
     if data is None or digest(data) != info['lock-pam']['after']:
