@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 9Spokes
  * Fixed, root-managed principal binding shared by the two PIN recovery clients.
  * NSS is trusted: round trips detect drift, not global UID uniqueness.
  */

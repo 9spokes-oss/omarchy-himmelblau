@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 ASSETS = Path('/usr/share/omarchy-himmelblau')
 COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -1113,7 +1113,7 @@ def upstream_hashes():
     return files
 
 
-def user_status():
+def legacy_user_status(quiet=False):
     user, clone, statefile, hook = user_paths()
     data = read(statefile)
     if data is None:
@@ -1121,7 +1121,11 @@ def user_status():
     state = json.loads(data)
     if state.get('phase') != 'ready':
         raise Error('Partial native clone setup; keep unlocked, inspect clone, disable it explicitly, and recover before retrying')
-    if upstream_hashes() != state['upstream_files']:
+    recorded = dict(state['upstream_files'])
+    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    if recorded.get('Service.qml') == manifest['lock-conversation'].get('previous_after'):
+        recorded['Service.qml'] = manifest['lock-conversation']['after']
+    if upstream_hashes() != recorded:
         raise Error('Upstream lock plugin changed after cloning; explicit review and a new native clone are required')
     if clone_hashes(clone) != state['clone_files']:
         raise Error('Managed native clone drift; refusing automatic changes')
@@ -1140,7 +1144,162 @@ def user_status():
                 raise Error('Dedicated lock PAM missing/drifted; review then run sudo omarchy-himmelblau repair explicitly')
         elif actual is None or digest(actual) not in (info['before'], info['after']):
             raise Error(f'Unsupported upstream source after update: {path}; explicit review needed')
-    print(f'{user}.lock source and read-only hook match. Log out/in after changes; runtime activation is not inferred.')
+    if not quiet:
+        print(f'{user}.lock source and read-only hook match. Log out/in after changes; runtime activation is not inferred.')
+
+
+def native_plugins():
+    result = subprocess.run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], check=True,
+                            capture_output=True, text=True, env=user_environment(), timeout=5)
+    try:
+        plugins = json.loads(result.stdout)
+    except ValueError:
+        raise Error('Native plugin discovery returned invalid JSON') from None
+    if not isinstance(plugins, list):
+        raise Error('Native plugin discovery did not return the supported array schema')
+    if any(not isinstance(plugin, dict) or not isinstance(plugin.get('id'), str)
+           or type(plugin.get('enabled')) is not bool for plugin in plugins):
+        raise Error('Unsupported native plugin discovery entry')
+    if len({plugin['id'] for plugin in plugins}) != len(plugins):
+        raise Error('Duplicate native plugin discovery ID')
+    return plugins
+
+
+def lock_implementations(plugins):
+    return [plugin for plugin in plugins if plugin.get('enabled') is True and
+            (plugin['id'] == 'omarchy.lock' or plugin.get('clonedFrom') == 'omarchy.lock')]
+
+
+def fixed_plugin_files():
+    account, home = canonical_user()
+    info = json.loads((ASSETS / 'manifest.json').read_text())['fixed-plugin']
+    directory = home / '.config/omarchy/plugins' / info['id']
+    user_path_guard(home, directory)
+    expected = info['files']
+    runtime_files = set()
+    for path in (directory / 'plugin').rglob('*'):
+        user_path_guard(home, path)
+        if path.is_symlink() or path.is_dir():
+            raise Error('Unexpected directory/symlink in fixed plugin runtime tree')
+        runtime_files.add(str(path.relative_to(directory)))
+    if runtime_files != {name for name in expected if name.startswith('plugin/')}:
+        raise Error('Fixed plugin runtime tree differs from companion release')
+    for name, wanted in expected.items():
+        target = directory / name
+        user_path_guard(home, target)
+        data = read(target)
+        if data is None or digest(data) != wanted:
+            raise Error('Fixed plugin source differs from companion release; review and update packages together')
+    for name, wanted in info['upstream'].items():
+        target = LOCK.parent / name
+        data = read(target)
+        if data is None or digest(data) != wanted:
+            raise Error('Unsupported installed Omarchy lock source for fixed plugin')
+    return info
+
+
+def lock_prerequisites():
+    stock_pam()
+    info = json.loads((ASSETS / 'manifest.json').read_text())
+    data = read(PAM)
+    if data is None or digest(data) != info['lock-pam']['after']:
+        raise Error('Dedicated lock PAM missing or drifted; explicit root setup/repair required')
+    metadata = PAM.stat()
+    if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
+        raise Error('Unsafe dedicated lock PAM metadata')
+
+
+def plugin_status(quiet=False, plugins=None):
+    if os.geteuid() == 0:
+        raise Error('Plugin checks must run as the graphical user')
+    lock_prerequisites()
+    info = fixed_plugin_files()
+    plugins = native_plugins() if plugins is None else plugins
+    candidates = [plugin for plugin in plugins if plugin['id'] == info['id']]
+    if (len(candidates) != 1 or candidates[0].get('firstParty') is not False
+            or candidates[0].get('clonedFrom') != 'omarchy.lock'):
+        raise Error('Native discovery did not confirm the fixed third-party lock plugin')
+    enabled = lock_implementations(plugins)
+    if len(enabled) != 1 or enabled[0]['id'] != info['id']:
+        raise Error('Fixed lock plugin must be the only enabled lock implementation')
+    if not quiet:
+        print('Fixed lock plugin source and prerequisites match. Runtime activation still requires an unlocked shell restart.')
+
+
+def locker_preflight():
+    # Quiet metadata-only subprocess used by the QML guard; no authentication.
+    if os.geteuid() == 0:
+        raise Error('Locker preflight must run as the graphical user')
+    lock_prerequisites()
+    plugins = native_plugins()
+    enabled = lock_implementations(plugins)
+    if len(enabled) != 1:
+        raise Error('Exactly one enabled lock implementation is required')
+    if enabled[0]['id'] == '9spokes.himmelblau-lock':
+        plugin_status(quiet=True, plugins=plugins)
+    else:
+        user, clone, statefile, hook = user_paths()
+        if enabled[0]['id'] != user + '.lock':
+            raise Error('Unrecognized enabled lock implementation')
+        legacy_user_status(quiet=True)
+
+
+def user_status():
+    plugins = native_plugins()
+    enabled = lock_implementations(plugins)
+    if len(enabled) > 1:
+        raise Error('Multiple enabled lock implementations; remain unlocked and resolve explicitly')
+    if enabled and enabled[0]['id'] == '9spokes.himmelblau-lock':
+        plugin_status(plugins=plugins)
+    else:
+        legacy_user_status()
+
+
+def activate_plugin(migrate=False):
+    if os.geteuid() == 0:
+        raise Error('Plugin activation must run as the graphical user')
+    unlocked()
+    lock_prerequisites()
+    info = fixed_plugin_files()
+    plugins = native_plugins()
+    fixed = [plugin for plugin in plugins if plugin['id'] == info['id']]
+    if (len(fixed) != 1 or fixed[0].get('firstParty') is not False
+            or fixed[0].get('clonedFrom') != 'omarchy.lock'):
+        raise Error('Install the reviewed repository using native plugin add without --enable first')
+    account, home = canonical_user()
+    old_id = account.pw_name + '.lock'
+    enabled = lock_implementations(plugins)
+    others = [plugin for plugin in enabled if plugin['id'] not in ('omarchy.lock', info['id'], old_id)]
+    if others or len(enabled) > 1:
+        raise Error('Unknown/conflicting enabled lock clone; disable it explicitly while unlocked')
+    old_active = any(plugin['id'] == old_id and plugin.get('firstParty') is False
+                     and plugin.get('clonedFrom') == 'omarchy.lock' for plugin in enabled)
+    if old_active:
+        if not migrate:
+            raise Error('Managed legacy lock is enabled; explicit --migrate is required')
+        user, clone, statefile, hook = user_paths()
+        legacy_user_status(quiet=True)
+        sources = json.loads((ASSETS / 'manifest.json').read_text())
+        if digest(read(clone / 'Service.qml') or b'') not in (sources['lock-conversation']['after'], sources['lock-conversation'].get('previous_after')):
+            raise Error('Unsupported legacy lock source; migration refused')
+        if digest(read(clone / 'LockView.qml') or b'') != sources['lock-view']['after']:
+            raise Error('Unsupported legacy lock view; migration refused')
+    def change(action, plugin):
+        unlocked()
+        subprocess.run(['/usr/bin/omarchy', 'plugin', action, plugin], check=True,
+                       capture_output=True, env=user_environment(), timeout=5)
+    try:
+        if old_active:
+            change('disable', old_id)
+            if any(plugin['id'] == old_id for plugin in lock_implementations(native_plugins())):
+                raise Error('Native API did not disable the legacy clone')
+        change('enable', info['id'])
+        plugin_status(quiet=True)
+    except Exception:
+        # Even a failed native command may have changed persisted selection.
+        # The old keepLoaded service may still exist. Do not restart or delete it.
+        raise Error('Plugin activation incomplete; remain unlocked, inspect native plugin list, disable the fixed ID, and explicitly restore the previous lock before restarting.') from None
+    print('Fixed lock plugin selected; legacy files/state preserved. Do not lock until an explicit unlocked shell restart or logout/login.')
 
 
 def verify_native_clone(user):
@@ -1264,6 +1423,8 @@ def upgrade_user(user, clone, statefile, hook):
 
 def enable_user(upgrade=False):
     user, clone, statefile, hook = user_paths()
+    if any(plugin['id'] == '9spokes.himmelblau-lock' and plugin['enabled'] for plugin in native_plugins()):
+        raise Error('Fixed lock plugin is enabled; legacy clone creation/update is refused')
     unlocked()
     if read(statefile) is not None:
         if upgrade:
@@ -1325,7 +1486,7 @@ def main(argv=None):
     setup_parser.add_argument('--domain', required=True)
     setup_parser.add_argument('--user', required=True)
     setup_parser.add_argument('--admin', action='store_true', help='Opt in the validated canonical NSS principal to authenticated sudo')
-    for command in ('doctor', 'status', 'repair'):
+    for command in ('doctor', 'status', 'repair', 'plugin-status', 'locker-preflight'):
         sub.add_parser(command)
     for command in ('rollback', 'recover'):
         recovery_parser = sub.add_parser(command)
@@ -1334,6 +1495,8 @@ def main(argv=None):
     policy_choice = policy_parser.add_mutually_exclusive_group(required=True)
     policy_choice.add_argument('--enable', dest='policy_enabled', action='store_true')
     policy_choice.add_argument('--disable', dest='policy_enabled', action='store_false')
+    fixed_parser = sub.add_parser('activate-plugin')
+    fixed_parser.add_argument('--migrate', action='store_true', help='Explicitly disable the verified managed legacy clone before selecting fixed plugin')
     user_parser = sub.add_parser('enable-user')
     user_parser.add_argument('--upgrade', action='store_true', help='Upgrade a supported unchanged legacy managed clone atomically')
     args = parser.parse_args(argv)
@@ -1342,7 +1505,13 @@ def main(argv=None):
             raise Error('Development mode requires an unprivileged source checkout')
         global ASSETS
         ASSETS = Path(__file__).resolve().parents[1] / 'assets'
-    if args.command == 'enable-user':
+    if args.command == 'activate-plugin':
+        activate_plugin(args.migrate)
+    elif args.command == 'plugin-status':
+        plugin_status()
+    elif args.command == 'locker-preflight':
+        locker_preflight()
+    elif args.command == 'enable-user':
         enable_user(args.upgrade)
     elif args.command in ('doctor', 'status'):
         doctor() if os.geteuid() == 0 else user_status()

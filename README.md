@@ -25,7 +25,7 @@ sign-in and hardware-backed protection are not established. See the detailed
 
 ## Packages and setup
 
-The `0.5.0` companion requires `sddm-himmelblau=0.21.0-2`. This is a reviewed native
+The `0.5.1` companion requires `sddm-himmelblau=0.21.0-2`. This is a reviewed native
 backport, not a theme-only change or an official upstream SDDM release. Build both
 packages from a clean committed source export using [the release procedure](docs/releasing.md).
 Do not run the template PKGBUILDs directly or build packages as root.
@@ -49,19 +49,48 @@ account through Himmelblau to establish its identity before setup requires NSS
 resolution. The first successful cloud authentication can create a tenant device.
 Do not clear caches or rejoin an existing device to work around a setup failure.
 
-As the target user, while the desktop is unlocked:
+## Install the Omarchy plugin
+
+After installing and configuring the matching companion packages, run as the target
+user while the desktop is unlocked. Native `plugin add` is intentionally used **without
+`--enable`** so dependency and conflict checks happen before activation:
 
 ```sh
-omarchy-himmelblau enable-user
+omarchy plugin add https://github.com/9spokes-oss/omarchy-himmelblau.git
+omarchy-himmelblau activate-plugin
 omarchy-restart-shell
-omarchy-himmelblau status
+omarchy-himmelblau plugin-status
 ```
 
-Activation creates a user-owned native Omarchy lock clone. Usernames that would
-produce an `omarchy.*` clone ID are refused because that namespace is reserved. An
-existing clone can be upgraded with `enable-user --upgrade` after root `repair` and
-review of the upstream snapshot. Stay awake during activation and check shell readiness
-before locking. A rescan alone does not replace `keepLoaded` code.
+If an earlier companion-created user lock clone is enabled, replace the activation
+command with `omarchy-himmelblau activate-plugin --migrate`. It accepts only the known
+managed clone, disables it through Omarchy, verifies one selected lock implementation,
+and preserves its files/state. Unknown or multiple enabled lock clones are refused.
+Keep the session unlocked and Stay Awake during activation. A rescan alone does not
+replace `keepLoaded` code; verify the shell is ready before locking.
+
+The published plugin is `9spokes.himmelblau-lock`, a native clone of `omarchy.lock`.
+It does not install packages, request sudo, join a tenant or overwrite existing user
+configuration on installation. A missing/drifted companion PAM prerequisite prevents
+locking; missing PIN helper support cannot unlock the screen. Keep the recovery
+console available and inspect any prerequisite error before relying on the locker.
+
+The original `enable-user` / `enable-user --upgrade` workflow remains available for
+managed user-specific clones. Do not enable it alongside the published plugin. Plugin
+and companion versions must match; unreviewed Omarchy source or plugin changes are
+refused. Update them together and repeat the unlocked activation checks.
+
+To remove the plugin, first arrange a verified replacement locker for the work
+account, or end the work desktop and use the local recovery account for the remaining
+rollback. The unmodified stock PAM locker does **not** authenticate a Himmelblau PIN;
+switching a live work desktop straight back to it can strand the next lock.
+
+From an unlocked session, disable `9spokes.himmelblau-lock` through Omarchy, select
+and verify the replacement, and restart the shell before removing the disabled plugin
+with `omarchy plugin remove 9spokes.himmelblau-lock`. A previously managed user clone
+is preserved by migration, but must be checked against the current companion before
+reuse. Do not remove system dependencies while any session still uses them. Plugin
+removal does not remove credentials, undo a PIN change or delete tenant objects.
 
 ## Login, lock and PIN recovery
 

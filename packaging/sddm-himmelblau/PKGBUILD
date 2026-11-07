@@ -6,7 +6,7 @@ pkgrel=2
 pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
-license=('GPL-2.0-or-later' 'LGPL-2.1-or-later')
+license=('GPL-2.0-or-later' 'LGPL-2.1-or-later' 'MIT')
 depends=('bash' 'glibc' 'libgcc' 'libstdc++' 'libxau' 'libxcb' 'pam'
          'qt6-base' 'qt6-declarative' 'systemd-libs' 'ttf-font' 'xorg-server' 'xorg-xauth'
          'himmelblau>=4.0.8')
@@ -24,8 +24,8 @@ source=("sddm-$pkgver.tar.gz::https://codeload.github.com/sddm/sddm/tar.gz/refs/
         'sddm-himmelblau-pin-change.pam' 'LGPL-2.1.txt' 'source.tar.gz')
 # Updated by the reviewed patch/provenance export; no SKIP checksums.
 sha256sums=('f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'
-             '278ed4b121e7697b8c1e6a6a5bbb38e76e5246d7e58f26accb5f9ad1bbb7cc6a'
-             '085316bd834e64d9ad45a10caa92fd4cc6926a5ca508f436b96fdd36d5bf40ae'
+             'd99afbd7584394df6997a1d55ecae24443d0adb7bc3488bbbde71ee9ac9ad4aa'
+             'ce97cb8217d9b59803492b3c428c78d26f1f93f812e5e5856ad1b4c61621af65'
              'bc80c69a88224a7f44bc7d75c0340959743d274ed1f88937ba907f090530a2e4'
              'dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551'
              '@SOURCE_SHA256@')
@@ -57,6 +57,7 @@ check() {
 }
 
 package() {
+  local _repo="$srcdir/omarchy-himmelblau"
   DESTDIR="$pkgdir" cmake --install build
   DESTDIR="$pkgdir" cmake --install build5/src/greeter
   DESTDIR="$pkgdir" cmake --install build5/components
@@ -68,5 +69,6 @@ package() {
   install -Dm644 "$srcdir/sddm-himmelblau-pin-change.pam" "$pkgdir/etc/pam.d/sddm-himmelblau-pin-change"
   install -Dm644 "$srcdir/sddm-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/GPL-2.0.txt"
   install -Dm644 "$srcdir/LGPL-2.1.txt" "$pkgdir/usr/share/licenses/$pkgname/LGPL-2.1.txt"
+  install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/MIT-RecoveryAccount.txt"
   # No install script, service restart, authentication or enrollment action.
 }

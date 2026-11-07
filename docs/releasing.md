@@ -33,7 +33,13 @@ dependency waiver. Package installation does not start services or configure PAM
 it does not install it. The resulting companion payload manifest pins all six native
 authentication executables and packaged QML components. Keep `release.json`, both
 package archives, `source.tar.gz`, and SHA256SUMS together. Generate package checksums
-after the final build. Publish them from the reviewed commit as an **experimental
+after the final build. From the exact clean release checkout, also run
+`python3 tools/corresponding-source.py /path/outside-checkout/release`. Publish its
+`sddm-corresponding-source.tar.gz` (complete patched native source) together with
+`source.tar.gz` (companion, patches, recipes and tests) alongside the native binary;
+do not rely solely on an upstream source download remaining available.
+
+Publish them from the reviewed commit as an **experimental
 prerelease**, with actual validation and known limitations. Do not publish private
 VM files, account/tenant/device identifiers, credentials, or authentication traces.
 

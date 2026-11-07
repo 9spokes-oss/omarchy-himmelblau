@@ -1,8 +1,14 @@
 diff --git a/src/auth/Auth.cpp b/src/auth/Auth.cpp
-index 6c9b5c6..612369f 100644
+index 6c9b5c6..0ad9782 100644
 --- a/src/auth/Auth.cpp
 +++ b/src/auth/Auth.cpp
-@@ -67,6 +67,11 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Qt Authentication Library
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -67,6 +69,11 @@ namespace SDDM {
          QString user { };
          QByteArray cookie { };
          bool autologin { false };
@@ -14,7 +20,7 @@ index 6c9b5c6..612369f 100644
          bool greeter { false };
          QProcessEnvironment environment { };
          qint64 id { 0 };
-@@ -145,11 +150,18 @@ namespace SDDM {
+@@ -145,11 +152,18 @@ namespace SDDM {
  
  
      void Auth::Private::setSocket(QLocalSocket *socket) {
@@ -34,7 +40,7 @@ index 6c9b5c6..612369f 100644
          Auth *auth = qobject_cast<Auth*>(parent());
          Msg m = MSG_UNKNOWN;
          SafeDataStream str(socket);
-@@ -174,15 +186,26 @@ namespace SDDM {
+@@ -174,15 +188,26 @@ namespace SDDM {
                  case REQUEST: {
                      Request r;
                      str >> r;
@@ -62,7 +68,7 @@ index 6c9b5c6..612369f 100644
                          str.reset();
                          str << AUTHENTICATED << environment << cookie;
                          str.send();
-@@ -192,9 +215,25 @@ namespace SDDM {
+@@ -192,9 +217,25 @@ namespace SDDM {
                      }
                      break;
                  }
@@ -89,7 +95,7 @@ index 6c9b5c6..612369f 100644
                      Q_EMIT auth->sessionStarted(status);
                      str.reset();
                      str << SESSION_STATUS;
-@@ -202,6 +241,7 @@ namespace SDDM {
+@@ -202,6 +243,7 @@ namespace SDDM {
                      break;
                  }
                  case DISPLAY_SERVER_STARTED: {
@@ -97,7 +103,7 @@ index 6c9b5c6..612369f 100644
                      QString displayName;
                      str >> displayName;
                      Q_EMIT auth->displayServerReady(displayName);
-@@ -230,20 +270,23 @@ namespace SDDM {
+@@ -230,20 +272,23 @@ namespace SDDM {
          else
              qWarning("Auth: sddm-helper exited with %d", exitCode);
  
@@ -123,7 +129,7 @@ index 6c9b5c6..612369f 100644
      }
  
  
-@@ -262,6 +305,9 @@ namespace SDDM {
+@@ -262,6 +307,9 @@ namespace SDDM {
      }
  
      Auth::~Auth() {
@@ -133,7 +139,7 @@ index 6c9b5c6..612369f 100644
          stop();
          delete d;
      }
-@@ -367,11 +413,34 @@ namespace SDDM {
+@@ -367,11 +415,34 @@ namespace SDDM {
          }
      }
  
@@ -169,7 +175,7 @@ index 6c9b5c6..612369f 100644
              args << QStringLiteral("--start") << d->sessionPath;
          if (!d->user.isEmpty())
              args << QStringLiteral("--user") << d->user;
-@@ -385,6 +454,9 @@ namespace SDDM {
+@@ -385,6 +456,9 @@ namespace SDDM {
      }
  
      void Auth::stop() {
@@ -180,10 +186,16 @@ index 6c9b5c6..612369f 100644
              return;
          }
 diff --git a/src/auth/Auth.h b/src/auth/Auth.h
-index c78da55..6f2d624 100644
+index c78da55..86018ef 100644
 --- a/src/auth/Auth.h
 +++ b/src/auth/Auth.h
-@@ -92,6 +92,9 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Qt Authentication library
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -92,6 +94,9 @@ namespace SDDM {
  
          static void registerTypes();
  
@@ -193,7 +205,7 @@ index c78da55..6f2d624 100644
          bool autologin() const;
          bool isGreeter() const;
          bool verbose() const;
-@@ -193,6 +196,7 @@ namespace SDDM {
+@@ -193,6 +198,7 @@ namespace SDDM {
          * @param success true if succeeded
          */
          void authentication(QString user, bool success);
@@ -202,10 +214,16 @@ index c78da55..6f2d624 100644
          /**
          * Emitted when session starting phase finishes
 diff --git a/src/auth/AuthMessages.h b/src/auth/AuthMessages.h
-index 6aea748..6ab4e95 100644
+index 6aea748..337cd80 100644
 --- a/src/auth/AuthMessages.h
 +++ b/src/auth/AuthMessages.h
-@@ -25,6 +25,7 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Message IDs to pass between the library and the helper
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -25,6 +27,7 @@
  #include <QtCore/QProcessEnvironment>
  
  #include "Auth.h"
@@ -213,7 +231,7 @@ index 6aea748..6ab4e95 100644
  
  namespace SDDM {
      class Prompt {
-@@ -38,6 +39,8 @@ namespace SDDM {
+@@ -38,6 +41,8 @@ namespace SDDM {
              clear();
          }
          Prompt& operator=(const Prompt &o) {
@@ -222,7 +240,7 @@ index 6aea748..6ab4e95 100644
              type = o.type;
              response = o.response;
              message = o.message;
-@@ -53,7 +56,7 @@ namespace SDDM {
+@@ -53,7 +58,7 @@ namespace SDDM {
          void clear() {
              type = AuthPrompt::NONE;
              // overwrite the whole thing with zeroes before clearing
@@ -231,7 +249,7 @@ index 6aea748..6ab4e95 100644
              response.clear();
              message.clear();
              hidden = false;
-@@ -98,6 +101,7 @@ namespace SDDM {
+@@ -98,6 +103,7 @@ namespace SDDM {
          AUTHENTICATED,
          SESSION_STATUS,
          DISPLAY_SERVER_STARTED,
@@ -240,10 +258,16 @@ index 6aea748..6ab4e95 100644
      };
  
 diff --git a/src/auth/AuthPrompt.cpp b/src/auth/AuthPrompt.cpp
-index 7434ede..8dd7312 100644
+index 7434ede..15fbf00 100644
 --- a/src/auth/AuthPrompt.cpp
 +++ b/src/auth/AuthPrompt.cpp
-@@ -61,6 +61,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Qt Authentication Library
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -61,6 +63,7 @@ namespace SDDM {
  
      void AuthPrompt::setResponse(const QByteArray &r) {
          if (r != d->response) {
@@ -252,10 +276,16 @@ index 7434ede..8dd7312 100644
              Q_EMIT responseChanged();
          }
 diff --git a/src/auth/AuthRequest.cpp b/src/auth/AuthRequest.cpp
-index 9ccc2d2..54a74a0 100644
+index 9ccc2d2..6c4b6c0 100644
 --- a/src/auth/AuthRequest.cpp
 +++ b/src/auth/AuthRequest.cpp
-@@ -63,9 +63,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Qt Authentication Library
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -63,9 +65,7 @@ namespace SDDM {
              d->finished = false;
          }
          Q_EMIT promptsChanged();
@@ -267,10 +297,16 @@ index 9ccc2d2..54a74a0 100644
  
      QList<AuthPrompt*> AuthRequest::prompts() {
 diff --git a/src/common/Messages.h b/src/common/Messages.h
-index f79a9db..35bc952 100644
+index f79a9db..a06cc68 100644
 --- a/src/common/Messages.h
 +++ b/src/common/Messages.h
-@@ -30,7 +30,10 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2013 Abdurrahman AVCI <abdurrahmanavci@gmail.com>
+ *
+@@ -30,7 +32,10 @@ namespace SDDM {
          Reboot,
          Suspend,
          Hibernate,
@@ -282,7 +318,7 @@ index f79a9db..35bc952 100644
      };
  
      enum class DaemonMessages {
-@@ -39,8 +42,15 @@ namespace SDDM {
+@@ -39,8 +44,15 @@ namespace SDDM {
          LoginSucceeded,
          LoginFailed,
          InformationMessage,
@@ -300,11 +336,12 @@ index f79a9db..35bc952 100644
          PowerOff = 0x0001,
 diff --git a/src/common/RecoveryAccount.h b/src/common/RecoveryAccount.h
 new file mode 100644
-index 0000000..491bd46
+index 0000000..a1246e8
 --- /dev/null
 +++ b/src/common/RecoveryAccount.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,72 @@
 +/* SPDX-License-Identifier: MIT
++ * Copyright (c) 2026 9Spokes
 + * Fixed, root-managed principal binding shared by the two PIN recovery clients.
 + * NSS is trusted: round trips detect drift, not global UID uniqueness.
 + */
@@ -376,10 +413,16 @@ index 0000000..491bd46
 +}
 +#endif
 diff --git a/src/common/SafeDataStream.cpp b/src/common/SafeDataStream.cpp
-index 3b99a66..275cd1a 100644
+index 3b99a66..6a98bb7 100644
 --- a/src/common/SafeDataStream.cpp
 +++ b/src/common/SafeDataStream.cpp
-@@ -22,12 +22,17 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * QDataStream implementation for safe socket operation
+  * Copyright (C) 2014  Martin Bříza <mbriza@redhat.com>
+@@ -22,12 +24,17 @@
  
  #include <QtCore/QDebug>
  #include <QIODevice>
@@ -397,7 +440,7 @@ index 3b99a66..275cd1a 100644
      void SafeDataStream::send() {
          qint64 length = m_data.length();
          qint64 writtenTotal = 0;
-@@ -37,7 +42,7 @@ namespace SDDM {
+@@ -37,7 +44,7 @@ namespace SDDM {
          }
          m_device->write((const char*) &length, sizeof(length));
          while (writtenTotal != length) {
@@ -406,7 +449,7 @@ index 3b99a66..275cd1a 100644
              if (written < 0 || !m_device->isOpen()) {
                  qCritical() << " Auth: SafeDataStream: Could not write all stored data";
                  return;
-@@ -76,6 +81,7 @@ namespace SDDM {
+@@ -76,6 +83,7 @@ namespace SDDM {
      }
  
      void SafeDataStream::reset() {
@@ -415,10 +458,16 @@ index 3b99a66..275cd1a 100644
          device()->reset();
          resetStatus();
 diff --git a/src/common/SafeDataStream.h b/src/common/SafeDataStream.h
-index 721a042..e68fb80 100644
+index 721a042..0048ffe 100644
 --- a/src/common/SafeDataStream.h
 +++ b/src/common/SafeDataStream.h
-@@ -28,6 +28,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * QDataStream implementation for safe socket operation
+  * Copyright (C) 2014  Martin Bříza <mbriza@redhat.com>
+@@ -28,6 +30,7 @@ namespace SDDM {
      class SafeDataStream : public QDataStream {
      public:
          SafeDataStream(QIODevice* device);
@@ -427,10 +476,16 @@ index 721a042..e68fb80 100644
          void receive();
          void reset();
 diff --git a/src/daemon/Display.cpp b/src/daemon/Display.cpp
-index 4014e0d..1a3b62f 100644
+index 4014e0d..1d40c98 100644
 --- a/src/daemon/Display.cpp
 +++ b/src/daemon/Display.cpp
-@@ -20,6 +20,7 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2014-2015 Pier Luigi Fiorini <pierluigi.fiorini@gmail.com>
+ * Copyright (c) 2014 Martin Bříza <mbriza@redhat.com>
+@@ -20,6 +22,7 @@
  ***************************************************************************/
  
  #include "Display.h"
@@ -438,7 +493,7 @@ index 4014e0d..1a3b62f 100644
  
  #include "Configuration.h"
  #include "DaemonApp.h"
-@@ -29,6 +30,7 @@
+@@ -29,6 +32,7 @@
  #include "Seat.h"
  #include "SocketServer.h"
  #include "Greeter.h"
@@ -446,7 +501,7 @@ index 4014e0d..1a3b62f 100644
  #include "Utils.h"
  
  #include <QDebug>
-@@ -137,6 +139,12 @@ namespace SDDM {
+@@ -137,6 +141,12 @@ namespace SDDM {
          m_auth->setVerbose(true);
          connect(m_auth, &Auth::requestChanged, this, &Display::slotRequestChanged);
          connect(m_auth, &Auth::authentication, this, &Display::slotAuthenticationFinished);
@@ -459,7 +514,7 @@ index 4014e0d..1a3b62f 100644
          connect(m_auth, &Auth::sessionStarted, this, &Display::slotSessionStarted);
          connect(m_auth, &Auth::finished, this, &Display::slotHelperFinished);
          connect(m_auth, &Auth::info, this, &Display::slotAuthInfo);
-@@ -148,6 +156,9 @@ namespace SDDM {
+@@ -148,6 +158,9 @@ namespace SDDM {
  
          // connect login signal
          connect(m_socketServer, &SocketServer::login, this, &Display::login);
@@ -469,7 +524,7 @@ index 4014e0d..1a3b62f 100644
  
          // connect login result signals
          connect(this, &Display::loginFailed, m_socketServer, &SocketServer::loginFailed);
-@@ -318,7 +329,11 @@ namespace SDDM {
+@@ -318,7 +331,11 @@ namespace SDDM {
      void Display::login(QLocalSocket *socket,
                          const QString &user, const QString &password,
                          const Session &session) {
@@ -481,7 +536,7 @@ index 4014e0d..1a3b62f 100644
  
          //the SDDM user has special privileges that skip password checking so that we can load the greeter
          //block ever trying to log in as the SDDM user
-@@ -331,6 +346,94 @@ namespace SDDM {
+@@ -331,6 +348,94 @@ namespace SDDM {
          startAuth(user, password, session);
      }
  
@@ -576,7 +631,7 @@ index 4014e0d..1a3b62f 100644
      QString Display::findGreeterTheme() const {
          QString themeName = mainConfig.Theme.Current.get();
  
-@@ -379,6 +482,9 @@ namespace SDDM {
+@@ -379,6 +484,9 @@ namespace SDDM {
              return false;
          }
  
@@ -586,7 +641,7 @@ index 4014e0d..1a3b62f 100644
          m_passPhrase = password;
  
          // sanity check
-@@ -455,6 +561,8 @@ namespace SDDM {
+@@ -455,6 +563,8 @@ namespace SDDM {
          m_auth->setUser(user);
          if (m_reuseSessionId.isNull()) {
              m_auth->setSession(session.exec());
@@ -595,7 +650,7 @@ index 4014e0d..1a3b62f 100644
          }
          m_auth->insertEnvironment(env);
          m_auth->start();
-@@ -463,12 +571,19 @@ namespace SDDM {
+@@ -463,12 +573,19 @@ namespace SDDM {
      }
  
      void Display::slotAuthenticationFinished(const QString &user, bool success) {
@@ -615,7 +670,7 @@ index 4014e0d..1a3b62f 100644
              qDebug() << "Authentication for user " << user << " successful";
  
              if (!m_reuseSessionId.isNull()) {
-@@ -494,7 +609,7 @@ namespace SDDM {
+@@ -494,7 +611,7 @@ namespace SDDM {
  
              if (m_socket)
                  emit loginSucceeded(m_socket);
@@ -624,7 +679,7 @@ index 4014e0d..1a3b62f 100644
              qDebug() << "Authentication for user " << user << " failed";
              emit loginFailed(m_socket);
          }
-@@ -502,7 +617,12 @@ namespace SDDM {
+@@ -502,7 +619,12 @@ namespace SDDM {
      }
  
      void Display::slotAuthInfo(const QString &message, Auth::Info info) {
@@ -638,7 +693,7 @@ index 4014e0d..1a3b62f 100644
  
          if (!m_socket)
              return;
-@@ -511,7 +631,11 @@ namespace SDDM {
+@@ -511,7 +633,11 @@ namespace SDDM {
      }
  
      void Display::slotAuthError(const QString &message, Auth::Error error) {
@@ -651,7 +706,7 @@ index 4014e0d..1a3b62f 100644
  
          if (!m_socket)
              return;
-@@ -522,6 +646,14 @@ namespace SDDM {
+@@ -522,6 +648,14 @@ namespace SDDM {
      }
  
      void Display::slotHelperFinished(Auth::HelperExitStatus status) {
@@ -666,7 +721,7 @@ index 4014e0d..1a3b62f 100644
          // Don't restart greeter and display server unless sddm-helper exited
          // with an internal error or the user session finished successfully,
          // we want to avoid greeter from restarting when an authentication
-@@ -532,19 +664,28 @@ namespace SDDM {
+@@ -532,19 +666,28 @@ namespace SDDM {
      }
  
      void Display::slotRequestChanged() {
@@ -702,10 +757,16 @@ index 4014e0d..1a3b62f 100644
          }
      }
 diff --git a/src/daemon/Display.h b/src/daemon/Display.h
-index 98ca006..73ed174 100644
+index 98ca006..75d1a53 100644
 --- a/src/daemon/Display.h
 +++ b/src/daemon/Display.h
-@@ -24,6 +24,7 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2014-2015 Pier Luigi Fiorini <pierluigi.fiorini@gmail.com>
+ * Copyright (c) 2014 Martin Bříza <mbriza@redhat.com>
+@@ -24,6 +26,7 @@
  
  #include <QObject>
  #include <QPointer>
@@ -713,7 +774,7 @@ index 98ca006..73ed174 100644
  #include <QDir>
  
  #include "Auth.h"
-@@ -72,6 +73,9 @@ namespace SDDM {
+@@ -72,6 +75,9 @@ namespace SDDM {
          void login(QLocalSocket *socket,
                     const QString &user, const QString &password,
                     const Session &session);
@@ -723,7 +784,7 @@ index 98ca006..73ed174 100644
          bool attemptAutologin();
          void displayServerStarted();
  
-@@ -104,6 +108,18 @@ namespace SDDM {
+@@ -104,6 +110,18 @@ namespace SDDM {
          QString m_sessionName;
          QString m_reuseSessionId;
  
@@ -743,10 +804,16 @@ index 98ca006..73ed174 100644
          DisplayServer *m_displayServer { nullptr };
          Seat *m_seat { nullptr };
 diff --git a/src/daemon/SocketServer.cpp b/src/daemon/SocketServer.cpp
-index 488f9a5..f31deea 100644
+index 488f9a5..b9bca55 100644
 --- a/src/daemon/SocketServer.cpp
 +++ b/src/daemon/SocketServer.cpp
-@@ -90,6 +90,19 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2015 Pier Luigi Fiorini <pierluigi.fiorini@gmail.com>
+ * Copyright (c) 2013 Abdurrahman AVCI <abdurrahmanavci@gmail.com>
+@@ -90,6 +92,19 @@ namespace SDDM {
          qDebug() << "Socket server stopped.";
      }
  
@@ -766,7 +833,7 @@ index 488f9a5..f31deea 100644
      void SocketServer::newConnection() {
          // get pending connection
          QLocalSocket *socket = m_server->nextPendingConnection();
-@@ -112,12 +125,16 @@ namespace SDDM {
+@@ -112,12 +127,16 @@ namespace SDDM {
          // Qt's QLocalSocket::readyRead is not designed to be called at every socket.write(), 
          // so we need to use a loop to read all the signals.
          while(socket->bytesAvailable()) {
@@ -783,7 +850,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: Connect";
  
-@@ -139,12 +156,37 @@ namespace SDDM {
+@@ -139,12 +158,37 @@ namespace SDDM {
                      QString user, password, filename;
                      Session session;
                      input >> user >> password >> session;
@@ -821,7 +888,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: PowerOff";
  
-@@ -153,6 +195,7 @@ namespace SDDM {
+@@ -153,6 +197,7 @@ namespace SDDM {
                  }
                  break;
                  case GreeterMessages::Reboot: {
@@ -829,7 +896,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: Reboot";
  
-@@ -161,6 +204,7 @@ namespace SDDM {
+@@ -161,6 +206,7 @@ namespace SDDM {
                  }
                  break;
                  case GreeterMessages::Suspend: {
@@ -837,7 +904,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: Suspend";
  
-@@ -169,6 +213,7 @@ namespace SDDM {
+@@ -169,6 +215,7 @@ namespace SDDM {
                  }
                  break;
                  case GreeterMessages::Hibernate: {
@@ -845,7 +912,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: Hibernate";
  
-@@ -177,6 +222,7 @@ namespace SDDM {
+@@ -177,6 +224,7 @@ namespace SDDM {
                  }
                  break;
                  case GreeterMessages::HybridSleep: {
@@ -853,7 +920,7 @@ index 488f9a5..f31deea 100644
                      // log message
                      qDebug() << "Message received from greeter: HybridSleep";
                      // hybrid sleep
-@@ -185,7 +231,10 @@ namespace SDDM {
+@@ -185,7 +233,10 @@ namespace SDDM {
                  break;
                  default: {
                      // log message
@@ -866,10 +933,16 @@ index 488f9a5..f31deea 100644
              }
          }
 diff --git a/src/daemon/SocketServer.h b/src/daemon/SocketServer.h
-index 0552e01..97c9625 100644
+index 0552e01..4e86904 100644
 --- a/src/daemon/SocketServer.h
 +++ b/src/daemon/SocketServer.h
-@@ -47,6 +47,10 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2015 Pier Luigi Fiorini <pierluigi.fiorini@gmail.com>
+ * Copyright (c) 2013 Abdurrahman AVCI <abdurrahmanavci@gmail.com>
+@@ -47,6 +49,10 @@ namespace SDDM {
  
      public slots:
          void informationMessage(QLocalSocket *socket, const QString &message);
@@ -880,7 +953,7 @@ index 0552e01..97c9625 100644
          void loginFailed(QLocalSocket *socket);
          void loginSucceeded(QLocalSocket *socket);
  
-@@ -54,6 +58,9 @@ namespace SDDM {
+@@ -54,6 +60,9 @@ namespace SDDM {
          void login(QLocalSocket *socket,
                     const QString &user, const QString &password,
                     const Session &session);
@@ -891,10 +964,16 @@ index 0552e01..97c9625 100644
  
      private:
 diff --git a/src/greeter/GreeterProxy.cpp b/src/greeter/GreeterProxy.cpp
-index d9a8e68..d1ebec7 100644
+index d9a8e68..2a37c38 100644
 --- a/src/greeter/GreeterProxy.cpp
 +++ b/src/greeter/GreeterProxy.cpp
-@@ -33,6 +33,8 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2015 Pier Luigi Fiorini <pierluigi.fiorini@gmail.com>
+ * Copyright (c) 2013 Abdurrahman AVCI <abdurrahmanavci@gmail.com>
+@@ -33,6 +35,8 @@ namespace SDDM {
          SessionModel *sessionModel { nullptr };
          QLocalSocket *socket { nullptr };
          QString hostName;
@@ -903,7 +982,7 @@ index d9a8e68..d1ebec7 100644
          bool canPowerOff { false };
          bool canReboot { false };
          bool canSuspend { false };
-@@ -127,6 +129,27 @@ namespace SDDM {
+@@ -127,6 +131,27 @@ namespace SDDM {
          SocketWriter(d->socket) << quint32(GreeterMessages::Login) << user << password << session;
      }
  
@@ -931,7 +1010,7 @@ index d9a8e68..d1ebec7 100644
      void GreeterProxy::connected() {
          // log connection
          qDebug() << "Connected to the daemon.";
-@@ -136,6 +159,8 @@ namespace SDDM {
+@@ -136,6 +161,8 @@ namespace SDDM {
      }
  
      void GreeterProxy::disconnected() {
@@ -940,7 +1019,7 @@ index d9a8e68..d1ebec7 100644
          // log disconnection
          qDebug() << "Disconnected from the daemon.";
  
-@@ -151,6 +176,8 @@ namespace SDDM {
+@@ -151,6 +178,8 @@ namespace SDDM {
          QDataStream input(d->socket);
  
          while (input.device()->bytesAvailable()) {
@@ -949,7 +1028,7 @@ index d9a8e68..d1ebec7 100644
              // read message
              quint32 message;
              input >> message;
-@@ -163,6 +190,7 @@ namespace SDDM {
+@@ -163,6 +192,7 @@ namespace SDDM {
                      // read capabilities
                      quint32 capabilities;
                      input >> capabilities;
@@ -957,7 +1036,7 @@ index d9a8e68..d1ebec7 100644
  
                      // parse capabilities
                      d->canPowerOff = capabilities & Capability::PowerOff;
-@@ -184,13 +212,48 @@ namespace SDDM {
+@@ -184,13 +214,48 @@ namespace SDDM {
                      qDebug() << "Message received from daemon: HostName";
  
                      // read host name
@@ -1007,7 +1086,7 @@ index d9a8e68..d1ebec7 100644
                      // log message
                      qDebug() << "Message received from daemon: LoginSucceeded";
  
-@@ -199,6 +262,7 @@ namespace SDDM {
+@@ -199,6 +264,7 @@ namespace SDDM {
                  }
                  break;
                  case DaemonMessages::LoginFailed: {
@@ -1015,7 +1094,7 @@ index d9a8e68..d1ebec7 100644
                      // log message
                      qDebug() << "Message received from daemon: LoginFailed";
  
-@@ -209,8 +273,7 @@ namespace SDDM {
+@@ -209,8 +275,7 @@ namespace SDDM {
                  case DaemonMessages::InformationMessage: {
                      QString message;
                      input >> message;
@@ -1026,10 +1105,16 @@ index d9a8e68..d1ebec7 100644
                  }
                  break;
 diff --git a/src/greeter/GreeterProxy.h b/src/greeter/GreeterProxy.h
-index 5ccdbb2..29c8561 100644
+index 5ccdbb2..7388f99 100644
 --- a/src/greeter/GreeterProxy.h
 +++ b/src/greeter/GreeterProxy.h
-@@ -54,6 +54,8 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /***************************************************************************
+ * Copyright (c) 2013 Abdurrahman AVCI <abdurrahmanavci@gmail.com>
+ *
+@@ -54,6 +56,8 @@ namespace SDDM {
          bool isConnected() const;
  
          void setSessionModel(SessionModel *model);
@@ -1038,7 +1123,7 @@ index 5ccdbb2..29c8561 100644
  
      public slots:
          void powerOff();
-@@ -63,6 +65,9 @@ namespace SDDM {
+@@ -63,6 +67,9 @@ namespace SDDM {
          void hybridSleep();
  
          void login(const QString &user, const QString &password, const int sessionIndex) const;
@@ -1048,7 +1133,7 @@ index 5ccdbb2..29c8561 100644
  
      private slots:
          void connected();
-@@ -71,6 +76,11 @@ namespace SDDM {
+@@ -71,6 +78,11 @@ namespace SDDM {
          void error();
  
      signals:
@@ -1061,10 +1146,16 @@ index 5ccdbb2..29c8561 100644
          void hostNameChanged(const QString &hostName);
          void canPowerOffChanged(bool canPowerOff);
 diff --git a/src/helper/Backend.h b/src/helper/Backend.h
-index 915d09c..8104244 100644
+index 915d09c..77e911e 100644
 --- a/src/helper/Backend.h
 +++ b/src/helper/Backend.h
-@@ -42,6 +42,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Base backend class to be inherited further
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -42,6 +44,7 @@ namespace SDDM {
      public slots:
          virtual bool start(const QString &user = QString()) = 0;
          virtual bool authenticate() = 0;
@@ -1073,10 +1164,16 @@ index 915d09c..8104244 100644
          virtual bool closeSession();
  
 diff --git a/src/helper/HelperApp.cpp b/src/helper/HelperApp.cpp
-index 32da42d..fbb92b2 100644
+index 32da42d..eb23739 100644
 --- a/src/helper/HelperApp.cpp
 +++ b/src/helper/HelperApp.cpp
-@@ -36,6 +36,8 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Main authentication application class
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -36,6 +38,8 @@
  #include <iostream>
  #include <unistd.h>
  #include <sys/socket.h>
@@ -1085,7 +1182,7 @@ index 32da42d..fbb92b2 100644
  #include <sys/time.h>
  
  #if defined(Q_OS_LINUX)
-@@ -62,6 +64,12 @@ namespace SDDM {
+@@ -62,6 +66,12 @@ namespace SDDM {
  
      void HelperApp::setUp() {
          const QStringList args = QCoreApplication::arguments();
@@ -1098,7 +1195,7 @@ index 32da42d..fbb92b2 100644
          QString server;
          int pos;
  
-@@ -137,6 +145,16 @@ namespace SDDM {
+@@ -137,6 +147,16 @@ namespace SDDM {
          if (str.status() != QDataStream::Ok)
              qCritical() << "Couldn't write initial message:" << str.status();
  
@@ -1115,7 +1212,7 @@ index 32da42d..fbb92b2 100644
          if (!m_backend->start(m_user)) {
              authenticated(QString());
  
-@@ -166,6 +184,10 @@ namespace SDDM {
+@@ -166,6 +186,10 @@ namespace SDDM {
  
          m_user = m_backend->userName();
          QProcessEnvironment env = authenticated(m_user);
@@ -1126,7 +1223,7 @@ index 32da42d..fbb92b2 100644
  
          if (!m_session->path().isEmpty()) {
              env.insert(m_session->processEnvironment());
-@@ -236,7 +258,8 @@ namespace SDDM {
+@@ -236,7 +260,8 @@ namespace SDDM {
              return env;
          str.receive();
          str >> m >> env >> m_cookie;
@@ -1136,7 +1233,7 @@ index 32da42d..fbb92b2 100644
              env = QProcessEnvironment();
              m_cookie = {};
              qCritical() << "Received a wrong opcode instead of AUTHENTICATED:" << m;
-@@ -382,6 +405,8 @@ namespace SDDM {
+@@ -382,6 +407,8 @@ namespace SDDM {
  }
  
  int main(int argc, char** argv) {
@@ -1146,10 +1243,16 @@ index 32da42d..fbb92b2 100644
      return app.exec();
  }
 diff --git a/src/helper/HelperApp.h b/src/helper/HelperApp.h
-index 64ea0e1..b1e74eb 100644
+index 64ea0e1..4c8e70c 100644
 --- a/src/helper/HelperApp.h
 +++ b/src/helper/HelperApp.h
-@@ -40,6 +40,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * Main authentication application class
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -40,6 +42,7 @@ namespace SDDM {
  
          UserSession *session();
          const QString &user() const;
@@ -1157,7 +1260,7 @@ index 64ea0e1..b1e74eb 100644
          const QByteArray &cookie() const;
  
      public slots:
-@@ -62,6 +63,8 @@ namespace SDDM {
+@@ -62,6 +65,8 @@ namespace SDDM {
          UserSession *m_session { nullptr };
          QLocalSocket *m_socket { nullptr };
          QString m_user { };
@@ -1167,10 +1270,16 @@ index 64ea0e1..b1e74eb 100644
          QByteArray m_cookie { };
  
 diff --git a/src/helper/backend/PamBackend.cpp b/src/helper/backend/PamBackend.cpp
-index 8ffa24a..4f3cdd7 100644
+index 8ffa24a..e93a866 100644
 --- a/src/helper/backend/PamBackend.cpp
 +++ b/src/helper/backend/PamBackend.cpp
-@@ -23,6 +23,7 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * PAM authentication backend
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -23,6 +25,7 @@
  #include "HelperApp.h"
  #include "UserSession.h"
  #include "Auth.h"
@@ -1178,7 +1287,7 @@ index 8ffa24a..4f3cdd7 100644
  #include "VirtualTerminal.h"
  
  #include <QtCore/QString>
-@@ -32,185 +33,12 @@
+@@ -32,185 +35,12 @@
  #include <stdlib.h>
  
  namespace SDDM {
@@ -1364,7 +1473,7 @@ index 8ffa24a..4f3cdd7 100644
          delete m_pam;
      }
  
-@@ -219,7 +47,12 @@ namespace SDDM {
+@@ -219,7 +49,12 @@ namespace SDDM {
  
          QString service = QStringLiteral("sddm");
  
@@ -1378,7 +1487,7 @@ index 8ffa24a..4f3cdd7 100644
              service = QStringLiteral("sddm-greeter");
          else if (m_autologin)
              service = QStringLiteral("sddm-autologin");
-@@ -231,6 +64,19 @@ namespace SDDM {
+@@ -231,6 +66,19 @@ namespace SDDM {
          return result;
      }
  
@@ -1398,7 +1507,7 @@ index 8ffa24a..4f3cdd7 100644
      bool PamBackend::authenticate() {
          if (!m_pam->authenticate()) {
              m_app->error(m_pam->errorString(), Auth::ERROR_AUTHENTICATION);
-@@ -296,67 +142,39 @@ namespace SDDM {
+@@ -296,67 +144,39 @@ namespace SDDM {
      int PamBackend::converse(int n, const struct pam_message **msg, struct pam_response **resp) {
          qDebug() << "[PAM] Conversation with" << n << "messages";
  
@@ -1499,10 +1608,16 @@ index 8ffa24a..4f3cdd7 100644
      }
  }
 diff --git a/src/helper/backend/PamBackend.h b/src/helper/backend/PamBackend.h
-index 4aba328..adb95fe 100644
+index 4aba328..2851e81 100644
 --- a/src/helper/backend/PamBackend.h
 +++ b/src/helper/backend/PamBackend.h
-@@ -23,6 +23,7 @@
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * PAM authentication backend
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -23,6 +25,7 @@
  
  #include "Constants.h"
  #include "AuthMessages.h"
@@ -1510,7 +1625,7 @@ index 4aba328..adb95fe 100644
  #include "../Backend.h"
  
  #include <QtCore/QObject>
-@@ -32,28 +33,6 @@
+@@ -32,28 +35,6 @@
  namespace SDDM {
      class PamHandle;
      class PamBackend;
@@ -1539,7 +1654,7 @@ index 4aba328..adb95fe 100644
      class PamBackend : public Backend
      {
          Q_OBJECT
-@@ -65,14 +44,15 @@ namespace SDDM {
+@@ -65,14 +46,15 @@ namespace SDDM {
      public slots:
          virtual bool start(const QString &user = QString());
          virtual bool authenticate();
@@ -1557,10 +1672,16 @@ index 4aba328..adb95fe 100644
  }
  
 diff --git a/src/helper/backend/PamHandle.cpp b/src/helper/backend/PamHandle.cpp
-index e8e1d41..df837e9 100644
+index e8e1d41..b75f2da 100644
 --- a/src/helper/backend/PamHandle.cpp
 +++ b/src/helper/backend/PamHandle.cpp
-@@ -69,6 +69,11 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * PAM API Qt wrapper
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -69,6 +71,11 @@ namespace SDDM {
          return m_result == PAM_SUCCESS;
      }
  
@@ -1573,10 +1694,16 @@ index e8e1d41..df837e9 100644
          m_result = pam_acct_mgmt(m_handle, flags | m_silent);
          if (m_result == PAM_NEW_AUTHTOK_REQD) {
 diff --git a/src/helper/backend/PamHandle.h b/src/helper/backend/PamHandle.h
-index 330b78e..add141d 100644
+index 330b78e..eef4d3d 100644
 --- a/src/helper/backend/PamHandle.h
 +++ b/src/helper/backend/PamHandle.h
-@@ -120,6 +120,7 @@ namespace SDDM {
+@@ -1,3 +1,5 @@
++// Modified by 9Spokes on 2026-11-07 for correlated PAM conversations,
++// identity-bound PIN recovery and authentication-buffer hardening.
+ /*
+  * PAM API Qt wrapper
+  * Copyright (C) 2013 Martin Bříza <mbriza@redhat.com>
+@@ -120,6 +122,7 @@ namespace SDDM {
          * \return true on success
          */
          bool acctMgmt(int flags = 0);

@@ -1,6 +1,17 @@
 --- a/Service.qml
 +++ b/Service.qml
-@@ -47,7 +47,17 @@
+@@ -9,6 +9,10 @@
+ 
+ Item {
+   id: root
++
++  property bool strandedRecoveryInProgress: false
++  property bool companionReady: false
++  property bool pinRecoveryAvailable: false
+ 
+   property var shell: null
+   property string omarchyPath: ""
+@@ -47,7 +51,17 @@
    property int knownScreenCount: 0
    property bool previewVisible: false
    property string enteredPassword: ""
@@ -19,7 +30,25 @@
    property string failureMessage: ""
    property int failedAttempts: 0
    property string backgroundPath: ""
-@@ -192,7 +202,7 @@
+@@ -132,11 +146,14 @@
+   }
+ 
+   function recoverStrandedLock() {
+-    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
+-
++    if (!strandedLock || currentlyLocked() || !passwordPamConfigured || !companionReady || strandedRecoveryInProgress) return
++    strandedRecoveryInProgress = true
++    var recovered = false
++    try { recovered = beginLock() } finally { strandedRecoveryInProgress = false }
++    if (!recovered) return
+     strandedLock = false
++    strandedLockResolved = true
+     logEvent("lock-stranded: recovering")
+-    beginLock()
+   }
+ 
+   function refreshBackground() {
+@@ -192,7 +209,7 @@
  
    function resetAuthenticationState() {
      enteredPassword = ""
@@ -28,7 +57,7 @@
      failureMessage = ""
      failedAttempts = 0
      authenticatingPassword = false
-@@ -210,7 +220,6 @@
+@@ -210,11 +227,30 @@
      fingerprintRetryTimer.stop()
      fingerprintReachTimer.stop()
      fingerprintResumeTimer.stop()
@@ -36,7 +65,31 @@
      if (fingerprintPam.active) fingerprintPam.abort()
    }
  
-@@ -353,36 +362,192 @@
++  function refreshPasswordPam() {
++    // Never trust a previous watch event when entering a new lock.
++    passwordPamConfigured = false
++    passwordPamFile.path = ""
++    passwordPamFile.path = "/etc/pam.d/omarchy-himmelblau-lock-password"
++    passwordPamFile.text()
++  }
++
++  function refreshCompanionPrerequisites() {
++    if (companionCheck.running) return
++    companionCheckTimeout.restart()
++    companionCheck.running = true
++    if (!pinHelperCheck.running) pinHelperCheck.running = true
++  }
++
+   function beginLock() {
++    refreshPasswordPam()
++    if (!companionReady) {
++      logEvent("lock-denied: companion-prerequisites")
++      return false
++    }
+     if (!passwordPamConfigured) {
+       logEvent("lock-denied: missing-pam")
+       return false
+@@ -353,36 +389,197 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -154,6 +207,23 @@
 +
 +  function beginPinRecovery() {
 +    if (!lockRequested || authenticatingPassword || passwordPam || pinRecovery) return
++    if (!pinRecoveryAvailable) {
++      lastRecoveryResult = "failed"
++      failureMessage = "PIN recovery helper unavailable; normal sign-in remains available."
+       return
+     }
+-
+-    Qt.callLater(respondToPasswordPrompt)
+-  }
+-
+-  function respondToPasswordPrompt() {
+-    if (!authenticatingPassword || !passwordPam.active || !passwordPam.responseRequired) return
+-    passwordPam.respond(pendingPassword)
+-  }
+-
+-  function handlePasswordFailure() {
+-    if (!lockRequested) return
+-
 +    clearPasswordPrompt()
 +    passwordNotices = []
 +    passwordMessageIsError = false
@@ -182,20 +252,8 @@
 +      clearPasswordPrompt()
 +      context.resultReceived = true
 +      context.reportedSuccess = message.success
-       return
-     }
--
--    Qt.callLater(respondToPasswordPrompt)
--  }
--
--  function respondToPasswordPrompt() {
--    if (!authenticatingPassword || !passwordPam.active || !passwordPam.responseRequired) return
--    passwordPam.respond(pendingPassword)
--  }
--
--  function handlePasswordFailure() {
--    if (!lockRequested) return
--
++      return
++    }
 +    if ((message.type !== "prompt" && message.type !== "info" && message.type !== "error") || typeof message.text !== "string" || message.text.length > 8192) {
 +      stopPinRecovery("failed")
 +      return
@@ -252,7 +310,7 @@
      runWake()
    }
  
-@@ -514,6 +679,13 @@
+@@ -514,6 +711,13 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -266,7 +324,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +736,34 @@
+@@ -564,25 +768,34 @@
      }
    }
  
@@ -320,7 +378,93 @@
      }
    }
  
-@@ -899,6 +1080,8 @@
+@@ -710,7 +923,7 @@
+   Process {
+     id: posterProc
+     property string sourcePath: ""
+-    command: ["bash", Quickshell.env("OMARCHY_PATH") + "/shell/plugins/lock/poster.sh", sourcePath]
++    command: ["/usr/bin/bash", decodeURIComponent(String(Qt.resolvedUrl("poster.sh")).replace("file://", "")), sourcePath]
+     stdout: StdioCollector { id: posterOutput; waitForEnd: true }
+     onExited: function(exitCode) {
+       if (sourcePath !== root.backgroundPath) {
+@@ -846,18 +1059,59 @@
+   }
+ 
+   FileView {
+-    path: "/etc/pam.d/omarchy-lock-password"
++    id: passwordPamFile
++    path: "/etc/pam.d/omarchy-himmelblau-lock-password"
++    preload: false
++    blockAllReads: true
+     watchChanges: true
+     printErrors: false
+-    onLoaded: root.passwordPamConfigured = true
++    onLoaded: root.passwordPamConfigured = text() === "#%PAM-1.0\nauth       required                    pam_faillock.so preauth silent deny=10 unlock_time=120\nauth       [success=1 default=ignore] pam_localuser.so\nauth       [success=3 ignore=ignore default=bad] pam_himmelblau.so ignore_unknown_user\n-auth      [success=2 default=ignore]  pam_systemd_home.so\nauth       [success=1 default=bad]     pam_unix.so try_first_pass nullok\nauth       [default=die]               pam_faillock.so authfail deny=10 unlock_time=120\nauth       optional                    pam_permit.so\nauth       required                    pam_env.so\nauth       required                    pam_faillock.so authsucc\naccount    include                     system-local-login\n"
+     onLoadFailed: root.passwordPamConfigured = false
+-    onFileChanged: reload()
++    onFileChanged: root.refreshPasswordPam()
++  }
++
++  Process {
++    id: companionCheck
++    command: ["/usr/bin/omarchy-himmelblau", "locker-preflight"]
++    stdout: SplitParser { onRead: function(data) {} }
++    stderr: SplitParser { onRead: function(data) {} }
++    onExited: function(exitCode) {
++      companionCheckTimeout.stop()
++      root.companionReady = exitCode === 0
++    }
++  }
++
++  Timer {
++    id: companionCheckTimeout
++    interval: 5000
++    onTriggered: {
++      root.companionReady = false
++      if (companionCheck.running) companionCheck.signal(9)
++    }
++  }
++
++  Timer {
++    interval: 5000
++    running: !root.currentlyLocked()
++    repeat: true
++    onTriggered: root.refreshCompanionPrerequisites()
++  }
++
++  Process {
++    id: pinHelperCheck
++    command: ["/usr/bin/test", "-x", "/usr/lib/omarchy-himmelblau/pin-change"]
++    onExited: function(exitCode) { root.pinRecoveryAvailable = exitCode === 0 }
+   }
+ 
+   // No lock before PAM is known good. An answer from before then may be stale --
+   // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
++  onCompanionReadyChanged: {
++    if (companionReady) recoverStrandedLock()
++  }
++
+   onPasswordPamConfiguredChanged: {
+     if (!passwordPamConfigured) return
++    if (strandedLock) { recoverStrandedLock(); return }
+ 
+     strandedLock = false
+     strandedLockResolved = false
+@@ -866,6 +1120,8 @@
+   }
+ 
+   Component.onCompleted: {
++    refreshPasswordPam()
++    refreshCompanionPrerequisites()
+     knownScreenCount = realScreenCount()
+     refreshBackground()
+     refreshFingerprintStatus()
+@@ -896,9 +1152,13 @@
+         secure: sessionLock.secure,
+         realScreens: root.realScreenCount(),
+         passwordPam: root.passwordPamConfigured,
++        companionReady: root.companionReady,
++        recoveryAvailable: root.pinRecoveryAvailable,
          fingerprint: root.fingerprintConfigured,
          fingerprintUnavailable: root.fingerprintUnavailable,
          authenticating: root.authenticating,

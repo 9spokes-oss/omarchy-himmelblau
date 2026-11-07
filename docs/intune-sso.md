@@ -68,6 +68,6 @@ applications when the browser/extension supports an explicit consented all-sites
 This increases the extension's site access; it does not remove MFA or Conditional Access.
 Version `1.13.0` documents exact-site managed policies only. Do **not** deploy
 `wellKnownApps: {"*": true}` with that version: its reconciliation can remove its own
-all-sites grant. An upstream change is being prepared; until a supported release is
+all-sites grant. An [upstream change](https://github.com/siemens/linux-entra-sso/pull/192) is open as a draft; until a supported release is
 available, use explicit application-host grants. Browser approval cannot be supplied
 by this companion package, and no browser profile databases are edited.

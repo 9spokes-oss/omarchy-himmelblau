@@ -12,8 +12,9 @@
   "lock-conversation": {
     "filename": "Service.qml",
     "before": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
-    "after": "a2cc2f80a47f09f0e8d06da418739e441d3654c6c14f8677b244ab79475a9e26",
-    "legacy_after": "ac245258d55ec4027783b2b653779dc627aa68b2a1f1559994e908d9b94b957c"
+    "after": "c058d2b233840dcb40ba17a6c7d6e0103ef136a309822bfd74d485d6c8f158ee",
+    "legacy_after": "ac245258d55ec4027783b2b653779dc627aa68b2a1f1559994e908d9b94b957c",
+    "previous_after": "a2cc2f80a47f09f0e8d06da418739e441d3654c6c14f8677b244ab79475a9e26"
   },
   "lock-view": {
     "filename": "LockView.qml",
@@ -25,5 +26,27 @@
     "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
     "after": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e",
     "legacy_after": "c6b6228525e51a29eac4ed944d79342a952f4bafeecde40c644313b4697ceb80"
+  },
+  "fixed-plugin": {
+    "id": "9spokes.himmelblau-lock",
+    "version": "0.5.1",
+    "upstream": {
+      "Service.qml": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
+      "LockView.qml": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
+      "FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
+      "poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
+      "manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
+    },
+    "files": {
+      "manifest.json": "dfa26811c2a902d532e98dc6880cda3f70512bb6cf7c5e3d719f510c98c12799",
+      "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
+      "plugin/generate.py": "3c05c561145f5681e491aff687798e7871c34ce3ae67b8fc86fe631233e18144",
+      "plugin/Service.qml": "c058d2b233840dcb40ba17a6c7d6e0103ef136a309822bfd74d485d6c8f158ee",
+      "plugin/LockView.qml": "c545760032375064d400a11b030b48f1f85a94f371d3d1d97548b4d8e13be3a4",
+      "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
+      "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
+      "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
+      "plugin/provenance.json": "60ce65b43efa137cb336f4542ce738b46aa8a36bd4420ca5d91e25076e5e548f"
+    }
   }
 }
