@@ -695,10 +695,13 @@ private slots:
         QCOMPARE(display.auth.cancels, 1);
         QCOMPARE(display.loginFailure, 1);
 
-        // The stopped helper's exit does not restart the display and greeter.
+        // The stopped helper's exit does not restart the display and greeter,
+        // and a late authentication result does not report a second failure.
+        display.slotAuthenticationFinished(QStringLiteral("canonical"), false);
         display.auth.active = false;
         display.slotHelperFinished(Auth::HELPER_OTHER_ERROR);
         QCOMPARE(display.stops, 0);
+        QCOMPARE(display.loginFailure, 1);
         DisplayFixture uncancelled;
         uncancelled.slotHelperFinished(Auth::HELPER_OTHER_ERROR);
         QCOMPARE(uncancelled.stops, 1);
