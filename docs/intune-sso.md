@@ -63,11 +63,68 @@ and enable **Background SSO** for that hostname, then approve the browser permis
 Test normal Exit/reopen without opening the popup or toggling accounts first.
 See the [upstream application permission documentation](https://github.com/siemens/linux-entra-sso#single-page-applications).
 
-The managed-device preference for this integration is background SSO on all HTTPS
-applications when the browser/extension supports an explicit consented all-sites grant.
-This increases the extension's site access; it does not remove MFA or Conditional Access.
-Version `1.13.0` documents exact-site managed policies only. Do **not** deploy
-`wellKnownApps: {"*": true}` with that version: its reconciliation can remove its own
-all-sites grant. An [upstream change](https://github.com/siemens/linux-entra-sso/pull/192) is open as a draft; until a supported release is
-available, use explicit application-host grants. Browser approval cannot be supplied
-by this companion package, and no browser profile databases are edited.
+The deployment preference is an explicit list of M365 application hosts, extended for
+the organization's actual SaaS applications when needed. The extension's
+[privacy documentation](https://github.com/siemens/linux-entra-sso/blob/main/PRIVACY.md)
+distinguishes the login-provider permission used for normal Entra navigation from
+the application-host permissions needed for background SPA refresh. This does not
+guarantee that every navigation avoids MFA or Conditional Access requirements. The
+My Apps restart result above is the observed lab evidence, not a traced explanation
+of every request involved.
+
+[`examples/chromium-m365-sso.json`](../examples/chromium-m365-sso.json) supplies exact
+current and legacy entry hosts for Teams, Outlook, the M365 portal, Office web apps,
+Forms, Copilot and My Apps. It is a starter application list, not Microsoft's network
+endpoint inventory. Add the tenant's verified SharePoint and OneDrive hostnames
+(for example, `tenant.sharepoint.com` and `tenant-my.sharepoint.com`) and any other
+application's actual hostname before installation. Do not derive the tenant prefix
+from an email domain without verifying it. Microsoft's [endpoint list](https://learn.microsoft.com/en-us/microsoft-365/enterprise/urls-and-ip-address-ranges)
+and [web-app documentation](https://learn.microsoft.com/en-us/microsoft-365-apps/privacy/web-cookies)
+identify the current and legacy entry hosts used here.
+
+Use `tools/m365-sso-policy.py --sharepoint-host tenant.sharepoint.com
+--onedrive-host tenant-my.sharepoint.com` to generate the complete JSON. The two
+verified tenant hostnames are explicit inputs; different prefixes are accepted for
+renamed or multi-geo environments. Repeat `--app-host app.example.com` for other
+applications. Input validation requires exact ASCII DNS names and never performs
+network discovery or infers tenant ownership from a hostname.
+
+By default the script prints JSON and changes nothing. Add `--install` and run with
+`sudo /usr/bin/python3 -I` for the fixed file
+`/etc/chromium/policies/managed/90-omarchy-himmelblau-m365.json`. The installer checks
+trusted nonsymlink paths, writes a new root-owned `0644` file, accepts identical
+existing content, and refuses different target content or conflicting managed
+`wellKnownApps` values. It does not silently replace existing policy.
+
+Review existing `/etc/chromium/policies/managed/*.json` files for conflicting
+`3rdparty.extensions.jlnfnnolkbjieggibinobhkjdfbpcohn` settings. Install the reviewed
+JSON as a separate root-owned, mode `0644` policy file; do not overwrite an existing
+policy blindly. Linux Chromium maps settings directly under that extension ID,
+as documented by [Chromium](https://www.chromium.org/administrators/configuring-policy-for-extensions/#linux).
+The companion does not install this optional example automatically.
+
+True `wellKnownApps` entries request these permissions; they are not an exclusive
+browser permission allowlist. Existing exact-site grants omitted from this map can
+remain enabled. Review browser permissions separately when narrowing prior access;
+this script does not audit or remove them.
+
+In the intended profile, open `chrome://policy`, reload policies, and verify the
+extension's `wellKnownApps` value. Open the extension popup and apply its pending
+policy update, then approve the displayed exact-site permissions. Managed policy
+prefills the request; it does not bypass browser consent. Test My Apps, Teams,
+Outlook and the tenant's SharePoint separately, including normal Exit/reopen without
+toggling accounts. Stop and record any credential challenge rather than assuming SSO.
+
+Version `1.13.0` supports this exact-site policy without an extension fork. Do **not**
+deploy `wellKnownApps: {"*": true}` with that version: its reconciliation can remove
+its own all-sites grant. The [all-HTTPS proposal](https://github.com/siemens/linux-entra-sso/pull/192)
+was closed in favor of validating the existing policy mechanism. No browser
+profile databases, cookies, tokens or PRTs are edited or inspected.
+
+The generator passed 12 focused tests and independent reconciliation against the
+unmodified extension `1.13.0`: an existing My Apps permission produced 18 additions
+and no removals; simulating all 19 grants left no pending changes. In the VM, the
+generated policy installed as root-owned `0644`, an identical second installation
+succeeded, and the other policy files and desktop processes remained unchanged.
+Browser approval and live app acceptance for the full M365 preset remain pending;
+the earlier successful My Apps restart test covered its individual site grant.

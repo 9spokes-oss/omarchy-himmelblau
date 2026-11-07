@@ -1,0 +1,27 @@
+{
+  "3rdparty": {
+    "extensions": {
+      "jlnfnnolkbjieggibinobhkjdfbpcohn": {
+        "wellKnownApps": {
+          "myapps.microsoft.com": true,
+          "myapplications.microsoft.com": true,
+          "teams.microsoft.com": true,
+          "teams.cloud.microsoft": true,
+          "outlook.office.com": true,
+          "outlook.office365.com": true,
+          "outlook.cloud.microsoft": true,
+          "m365.cloud.microsoft": true,
+          "www.microsoft365.com": true,
+          "www.office.com": true,
+          "word.cloud.microsoft": true,
+          "excel.cloud.microsoft": true,
+          "powerpoint.cloud.microsoft": true,
+          "onenote.cloud.microsoft": true,
+          "forms.office.com": true,
+          "forms.cloud.microsoft": true,
+          "copilot.cloud.microsoft": true
+        }
+      }
+    }
+  }
+}

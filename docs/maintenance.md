@@ -1,5 +1,34 @@
 # Maintenance and validation
 
+## Plugin 0.5.2 acceptance
+
+On 2026-11-07, the plugin at source commit
+`6988919168b3f13c159805fa1d200cdd6982edb3` was installed with native `plugin add`:
+the trust prompt was accepted and the enable prompt declined. Matching companion
+`0.5.2-1` and native SDDM `0.21.0-3` packages were already installed and checked.
+Explicit `activate-plugin --migrate` and the supported unlocked shell restart passed.
+Only the fixed plugin remained enabled; the prior clone and its files were retained.
+
+The new shell reported PAM, companion and recovery prerequisites ready and subsequently
+held a secure lock. The user confirmed current-PIN unlock returned to the same desktop
+with the existing terminal open. Compositor and terminal process identities were
+preserved across migration, and the original automatic idle-lock setting was restored.
+
+This acceptance does not establish a new PIN/MFA recovery cycle after the security
+hardening or a fresh session through the newly installed SDDM daemon. Earlier
+milestones exercised those flows; their version-specific results remain separate.
+Releases and marketplace submission are currently draft/withdrawn while polishing.
+
+Before the next native package publication, remove the added hard `RLIMIT_CORE=0`
+limit from the normal-login helper path: child desktop sessions can inherit it.
+Retain helper dump protection, keep the PIN-only helpers' limits separate, and test
+child-limit inheritance under a new package identity. This affects crash-dump
+configuration, not authentication correctness; piped core collectors can ignore
+this limit. Existing `0.5.2` assets and the running desktop are not changed by this
+follow-up.
+
+## Validation procedure
+
 This integration changes authentication-sensitive system configuration and a user-owned lock plugin. Keep a local recovery account and an independent console available throughout setup and testing. Backups and rollback protect only the files owned or changed by this integration; preserve other local customizations and review conflicts.
 
 Validate the layers independently:

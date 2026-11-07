@@ -1,5 +1,9 @@
 # Omarchy Himmelblau
 
+**Draft / work in progress.** Marketplace submission is withdrawn and release
+downloads are unpublished while the integration is polished. The instructions below
+are for development and controlled testing, not a supported deployment.
+
 Experimental Microsoft Entra ID login, screen unlock and PIN recovery for Omarchy,
 using [Himmelblau](https://himmelblau-idm.org/). The integration provides an Omarchy
 lock clone, a conversation-capable SDDM build and an explicit system setup command.
@@ -22,6 +26,22 @@ These are results from one dedicated QEMU/KVM lab and tenant, not support guaran
 for every MFA method, distribution, Conditional Access rule or future update. Offline
 sign-in and hardware-backed protection are not established. See the detailed
 [SDDM](docs/sddm.md) and [Intune/SSO](docs/intune-sso.md) evidence.
+
+Plugin `0.5.2` also passed explicit migration, shell restart,
+and a user-confirmed current-PIN lock/unlock while preserving the desktop and terminal.
+See the [version-specific acceptance record](docs/maintenance.md#plugin-052-acceptance).
+
+To prefill M365 Background SSO permissions for your company, run this from a trusted
+checkout using its actual SharePoint and OneDrive hostnames (they need not match your
+email domain):
+
+```sh
+sudo /usr/bin/python3 -I tools/m365-sso-policy.py --sharepoint-host example.sharepoint.com --onedrive-host example-my.sharepoint.com --install
+```
+
+Omit `sudo` and `--install` to preview JSON first; add `--app-host app.example.com`
+for other applications. Then reload `chrome://policy` and approve the extension's
+pending permission request. See [configuration and validation](docs/intune-sso.md#background-sso-permissions).
 
 ## Packages and setup
 
