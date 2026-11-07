@@ -43,7 +43,7 @@ class ReleaseTest(unittest.TestCase):
                         entry.mode = mode
                         entry.size = len(data)
                         archive.addfile(entry, io.BytesIO(data))
-                    add('.PKGINFO', b'pkgname = sddm-himmelblau\npkgver = 0.21.0-2\n', 0o644)
+                    add('.PKGINFO', b'pkgname = sddm-himmelblau\npkgver = 0.21.0-3\n', 0o644)
                     for path in paths:
                         add(path, b'fixture-executable', 0o755)
                     if complete:

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.5.1'
+VERSION = '0.5.2'
 ASSETS = Path('/usr/share/omarchy-himmelblau')
 COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -121,14 +121,14 @@ def atomic(path, data, mode):
 
 
 def supported_source_hash(name, data):
-    info = json.loads((ASSETS / 'manifest.json').read_text())[name]
+    info = json.loads((ASSETS / 'patches.json').read_text())[name]
     if digest(data) not in (info['before'], info['after']):
         raise Error(f'Unsupported upstream source for {name}; refusing drift')
     return info['after']
 
 
 def patch_source(name, data):
-    info = json.loads((ASSETS / 'manifest.json').read_text())[name]
+    info = json.loads((ASSETS / 'patches.json').read_text())[name]
     actual = digest(data)
     if actual == info['after']:
         return data  # Known patched source: adopt, never pretend it was pristine.
@@ -581,7 +581,7 @@ def policy(enable):
 
 def stock_pam():
     data = read(STOCK_PAM)
-    info = json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']
+    info = json.loads((ASSETS / 'patches.json').read_text())['lock-pam']
     if data is None or digest(data) != info['before']:
         raise Error('Stock Omarchy PAM is modified/unsupported; restore a reviewed pristine source before setup or repair')
     return data
@@ -603,7 +603,7 @@ def native_payload_contract():
     manifest = json.loads(read(NATIVE_PAYLOAD))
     if not isinstance(manifest, dict):
         raise Error('Invalid native payload manifest')
-    if (manifest.get('package') != 'sddm-himmelblau' or manifest.get('version') != '0.21.0-2'
+    if (manifest.get('package') != 'sddm-himmelblau' or manifest.get('version') != '0.21.0-3'
             or not isinstance(manifest.get('artifact_sha256'), str)
             or not re.fullmatch(r'[0-9a-f]{64}', manifest['artifact_sha256'])
             or not isinstance(manifest.get('source_commit'), str)
@@ -661,8 +661,8 @@ def native_sddm_contract():
         result = subprocess.run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], check=True,
                                 capture_output=True, text=True, env=COMMAND_ENV, cwd='/')
     except (OSError, subprocess.CalledProcessError):
-        raise Error('Reviewed native sddm-himmelblau 0.21.0-2 package required') from None
-    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-2':
+        raise Error('Reviewed native sddm-himmelblau 0.21.0-3 package required') from None
+    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-3':
         raise Error('Unsupported native SDDM package version; review required')
     if read(SDDM_PIN_PAM) != SDDM_PIN_PAM_CONTENT:
         raise Error('Native SDDM PIN service missing/drifted; reinstall the native package explicitly')
@@ -691,7 +691,7 @@ def root_issues(state, *, transaction=None):
         stock_pam()
         native_sddm_contract()
         supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
-        info = json.loads((ASSETS / 'manifest.json').read_text())['sddm-conversation']
+        info = json.loads((ASSETS / 'patches.json').read_text())['sddm-conversation']
         if digest(read(COPY_THEME / 'Main.qml') or b'') != info['after']:
             raise Error('SDDM conversation theme requires explicit root repair')
     except Error as error:
@@ -710,7 +710,7 @@ def root_issues(state, *, transaction=None):
     if read(PIN_PAM) != PIN_PAM_CONTENT:
         issues.append('PIN replacement PAM service missing/drifted; explicit repair required')
     pam = read(PAM)
-    expected_pam = json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']['after']
+    expected_pam = json.loads((ASSETS / 'patches.json').read_text())['lock-pam']['after']
     if pam is None or digest(pam) != expected_pam:
         issues.append(f'Lock PAM drift: {PAM}')
     for name, path in [('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
@@ -745,7 +745,7 @@ def repair():
     configuration_scope(state['domain'], state['user'], policy_mode(state))
     require_complete_configuration(state['domain'], state['user'], policy_mode(state))
     desired_pam = patch_source('lock-pam', stock_pam())
-    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    manifest = json.loads((ASSETS / 'patches.json').read_text())
     theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
     theme_path = COPY_THEME / 'Main.qml'
     theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
@@ -1122,7 +1122,7 @@ def legacy_user_status(quiet=False):
     if state.get('phase') != 'ready':
         raise Error('Partial native clone setup; keep unlocked, inspect clone, disable it explicitly, and recover before retrying')
     recorded = dict(state['upstream_files'])
-    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    manifest = json.loads((ASSETS / 'patches.json').read_text())
     if recorded.get('Service.qml') == manifest['lock-conversation'].get('previous_after'):
         recorded['Service.qml'] = manifest['lock-conversation']['after']
     if upstream_hashes() != recorded:
@@ -1138,7 +1138,7 @@ def legacy_user_status(quiet=False):
         raise Error('PIN replacement service missing/drifted; explicit root repair required')
     for name, path in [('lock-pam', PAM), ('lock-conversation', LOCK), ('lock-view', LOCK.parent / 'LockView.qml')]:
         actual = read(path)
-        info = json.loads((ASSETS / 'manifest.json').read_text())[name]
+        info = json.loads((ASSETS / 'patches.json').read_text())[name]
         if name == 'lock-pam':
             if actual is None or digest(actual) != info['after']:
                 raise Error('Dedicated lock PAM missing/drifted; review then run sudo omarchy-himmelblau repair explicitly')
@@ -1172,7 +1172,7 @@ def lock_implementations(plugins):
 
 def fixed_plugin_files():
     account, home = canonical_user()
-    info = json.loads((ASSETS / 'manifest.json').read_text())['fixed-plugin']
+    info = json.loads((ASSETS / 'patches.json').read_text())['fixed-plugin']
     directory = home / '.config/omarchy/plugins' / info['id']
     user_path_guard(home, directory)
     expected = info['files']
@@ -1200,7 +1200,7 @@ def fixed_plugin_files():
 
 def lock_prerequisites():
     stock_pam()
-    info = json.loads((ASSETS / 'manifest.json').read_text())
+    info = json.loads((ASSETS / 'patches.json').read_text())
     data = read(PAM)
     if data is None or digest(data) != info['lock-pam']['after']:
         raise Error('Dedicated lock PAM missing or drifted; explicit root setup/repair required')
@@ -1279,7 +1279,7 @@ def activate_plugin(migrate=False):
             raise Error('Managed legacy lock is enabled; explicit --migrate is required')
         user, clone, statefile, hook = user_paths()
         legacy_user_status(quiet=True)
-        sources = json.loads((ASSETS / 'manifest.json').read_text())
+        sources = json.loads((ASSETS / 'patches.json').read_text())
         if digest(read(clone / 'Service.qml') or b'') not in (sources['lock-conversation']['after'], sources['lock-conversation'].get('previous_after')):
             raise Error('Unsupported legacy lock source; migration refused')
         if digest(read(clone / 'LockView.qml') or b'') != sources['lock-view']['after']:
@@ -1389,7 +1389,7 @@ def replace_clone(clone, statefile, state, files, hook, hook_data=None):
 
 def upgrade_user(user, clone, statefile, hook):
     stock_pam()
-    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    manifest = json.loads((ASSETS / 'patches.json').read_text())
     if digest(read(PAM) or b'') != manifest['lock-pam']['after']:
         raise Error('Dedicated authentication PAM service drift; upgrade refused')
     state = json.loads(read(statefile))
@@ -1397,7 +1397,7 @@ def upgrade_user(user, clone, statefile, hook):
         raise Error('Only an unchanged managed 0.1.0 clone can use this upgrade path')
     if clone_hashes(clone) != state['clone_files'] or digest(read(hook) or b'') != state['hook_hash']:
         raise Error('Managed clone/hook drift; upgrade refused')
-    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    manifest = json.loads((ASSETS / 'patches.json').read_text())
     service = read(clone / 'Service.qml')
     view = read(clone / 'LockView.qml')
     if digest(service or b'') != manifest['lock-conversation']['legacy_after'] or digest(view or b'') != manifest['lock-view']['before']:
@@ -1438,7 +1438,7 @@ def enable_user(upgrade=False):
         raise Error('Native clone already exists without managed state; refusing to overwrite')
     if read(hook) is not None:
         raise Error('Post-update hook already exists without managed state')
-    info = json.loads((ASSETS / 'manifest.json').read_text())
+    info = json.loads((ASSETS / 'patches.json').read_text())
     stock_pam()
     pam = read(PAM)
     if pam is None or digest(pam) != info['lock-pam']['after']:

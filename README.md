@@ -25,7 +25,7 @@ sign-in and hardware-backed protection are not established. See the detailed
 
 ## Packages and setup
 
-The `0.5.1` companion requires `sddm-himmelblau=0.21.0-2`. This is a reviewed native
+The `0.5.2` companion requires `sddm-himmelblau=0.21.0-3`. This is a reviewed native
 backport, not a theme-only change or an official upstream SDDM release. Build both
 packages from a clean committed source export using [the release procedure](docs/releasing.md).
 Do not run the template PKGBUILDs directly or build packages as root.
@@ -52,11 +52,20 @@ Do not clear caches or rejoin an existing device to work around a setup failure.
 ## Install the Omarchy plugin
 
 After installing and configuring the matching companion packages, run as the target
-user while the desktop is unlocked. Native `plugin add` is intentionally used **without
-`--enable`** so dependency and conflict checks happen before activation:
+user while the desktop is unlocked. Run native `plugin add` **without `--enable`**,
+review its trust prompt, and **answer No when asked to enable the plugin**. Omitting
+`--enable` alone does not suppress that interactive prompt. Do not use `--yes` to
+bypass the trust prompts.
 
 ```sh
 omarchy plugin add https://github.com/9spokes-oss/omarchy-himmelblau.git
+omarchy plugin list --json
+```
+
+Confirm the `9spokes.himmelblau-lock` entry has `enabled: false` before proceeding.
+Then use the companion activation flow so dependency and conflict checks run first:
+
+```sh
 omarchy-himmelblau activate-plugin
 omarchy-restart-shell
 omarchy-himmelblau plugin-status

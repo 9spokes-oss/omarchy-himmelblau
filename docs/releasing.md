@@ -18,7 +18,7 @@ checksum-pinned companion source archive. After independently inspecting that bu
 
 ```sh
 python3 /path/to/checkout/tools/finish-release.py /path/outside-checkout/release \
-  /path/outside-checkout/release/native/sddm-himmelblau-0.21.0-2-x86_64.pkg.tar.zst
+  /path/outside-checkout/release/native/sddm-himmelblau-0.21.0-3-x86_64.pkg.tar.zst
 cd /path/outside-checkout/release/companion
 makepkg --noconfirm
 ```

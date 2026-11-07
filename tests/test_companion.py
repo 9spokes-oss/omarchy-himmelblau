@@ -60,7 +60,7 @@ class CompanionTest(unittest.TestCase):
             if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
                 return SimpleNamespace(stdout='[]')
             if argv == ['/usr/bin/pacman', '-Q', 'sddm-himmelblau']:
-                return SimpleNamespace(stdout='sddm-himmelblau 0.21.0-2\n')
+                return SimpleNamespace(stdout='sddm-himmelblau 0.21.0-3\n')
             return native_run(argv, **kw)
         commands = patch.object(m.subprocess, 'run', native_command)
         commands.start(); self.addCleanup(commands.stop)
@@ -89,7 +89,7 @@ class CompanionTest(unittest.TestCase):
             path.parent.mkdir(exist_ok=True)
             path.write_bytes(b'synthetic native payload'); path.chmod(0o755)
             native_files[str(path)] = m.digest(path.read_bytes())
-        m.NATIVE_PAYLOAD.write_text(json.dumps({'package':'sddm-himmelblau', 'version':'0.21.0-2',
+        m.NATIVE_PAYLOAD.write_text(json.dumps({'package':'sddm-himmelblau', 'version':'0.21.0-3',
             'artifact_sha256':'a'*64, 'source_commit':'b'*40, 'files':native_files}))
         m.NATIVE_PAYLOAD.chmod(0o644)
         m.SDDM_PIN_PAM.parent.mkdir(parents=True)
@@ -671,7 +671,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.STOCK_PAM.read_bytes(), self.before[m.STOCK_PAM])
         self.assertIn(b'pam_himmelblau.so', m.PAM.read_bytes())
         self.assertIn(b'config: \"omarchy-himmelblau-lock-password\"', m.patch_source('lock-conversation', self.before[m.LOCK]))
-        self.assertEqual(m.digest((m.COPY_THEME / 'Main.qml').read_bytes()), json.loads((m.ASSETS / 'manifest.json').read_text())['sddm-conversation']['after'])
+        self.assertEqual(m.digest((m.COPY_THEME / 'Main.qml').read_bytes()), json.loads((m.ASSETS / 'patches.json').read_text())['sddm-conversation']['after'])
         self.assertNotIn(b'local recovery:', (m.COPY_THEME / 'Main.qml').read_bytes())
         self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
         self.assertEqual(m.STATE.parent.stat().st_mode & 0o777, 0o700)
@@ -726,7 +726,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(main.read_bytes(), legacy)
         m.repair()
         upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], '0.5.1')
+        self.assertEqual(upgraded['version'], '0.5.2')
         self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
         for previous, current in zip(old_state['files'], upgraded['files']):
             self.assertEqual({k:v for k,v in previous.items() if k != 'after'}, {k:v for k,v in current.items() if k != 'after'})
@@ -738,7 +738,7 @@ class CompanionTest(unittest.TestCase):
         main, legacy, old = self.legacy_root()
         state = json.loads(old); state['version'] = '0.1.0'; m.save_state(state)
         m.repair()
-        self.assertEqual(m.load_state()['version'], '0.5.1')
+        self.assertEqual(m.load_state()['version'], '0.5.2')
         self.assertNotEqual(main.read_bytes(), legacy)
 
     def test_01_root_label_without_02_pin_state_refuses_upgrade(self):
@@ -1188,7 +1188,7 @@ class CompanionTest(unittest.TestCase):
         with patch.object(m,'unlocked') as unlocked,patch.object(m,'verify_native_clone'):
             m.upgrade_user('alice',clone,statefile,hook)
             unlocked.assert_called_once()
-        self.assertEqual(json.loads(statefile.read_text())['version'],'0.5.1')
+        self.assertEqual(json.loads(statefile.read_text())['version'],'0.5.2')
         self.assertEqual((clone/'Service.qml').read_bytes(),m.patch_source('lock-conversation',m.LOCK.read_bytes()))
         self.assertEqual((clone/'LockView.qml').read_bytes(),m.patch_source('lock-view',(m.LOCK.parent/'LockView.qml').read_bytes()))
         self.assertEqual(clone.stat().st_uid,os.getuid())

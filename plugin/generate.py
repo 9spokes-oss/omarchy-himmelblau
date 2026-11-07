@@ -19,7 +19,7 @@ ORIGINAL = {
 
 
 def generated():
-    manifest = json.loads((ROOT / 'assets/manifest.json').read_text())
+    manifest = json.loads((ROOT / 'assets/patches.json').read_text())
     output = {}
     for filename, expected in ORIGINAL.items():
         source = (ROOT / 'tests/fixtures' / filename).read_bytes()
@@ -64,9 +64,9 @@ def main():
             path.write_bytes(data)
             path.chmod(0o644 if path.suffix != '.sh' else 0o755)
     fixed_files = ['manifest.json', 'plugin/UPSTREAM-LICENSE', 'plugin/generate.py', *output]
-    manifest_path = ROOT / 'assets/manifest.json'
+    manifest_path = ROOT / 'assets/patches.json'
     manifest = json.loads(manifest_path.read_text())
-    fixed = {'id':'9spokes.himmelblau-lock', 'version':'0.5.1',
+    fixed = {'id':'9spokes.himmelblau-lock', 'version':'0.5.2',
              'upstream':{('manifest.json' if name == 'lock-manifest.json' else name): value for name,value in ORIGINAL.items()},
              'files':{name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in fixed_files}}
     if args.check:

@@ -32,7 +32,7 @@ with tarfile.open(fileobj=io.BytesIO(data)) as archive:
     if len(set(canonical)) != len(members):
         raise SystemExit('Duplicate archive entries')
     info = archive.extractfile('.PKGINFO').read().decode()
-    if not re.search(r'^pkgname = sddm-himmelblau$', info, re.M) or not re.search(r'^pkgver = 0.21.0-2$', info, re.M):
+    if not re.search(r'^pkgname = sddm-himmelblau$', info, re.M) or not re.search(r'^pkgver = 0.21.0-3$', info, re.M):
         raise SystemExit('Unexpected native package identity')
     for member in members:
         path = '/' + member.name.removeprefix('./')
@@ -52,7 +52,7 @@ if not required.issubset(files):
 for prefix in ('/usr/lib/qt/qml/SddmComponents/', '/usr/lib/qt6/qml/SddmComponents/'):
     if prefix + 'qmldir' not in files or not any(path.startswith(prefix) and path.endswith('.qml') for path in files):
         raise SystemExit('Native package is missing a complete QML component tree: ' + prefix)
-manifest = {'package': 'sddm-himmelblau', 'version': '0.21.0-2',
+manifest = {'package': 'sddm-himmelblau', 'version': '0.21.0-3',
             'artifact_sha256': hashlib.sha256(package.read_bytes()).hexdigest(),
             'source_commit': record['commit'], 'files': dict(sorted(files.items()))}
 payload = (json.dumps(manifest, indent=2) + '\n').encode()

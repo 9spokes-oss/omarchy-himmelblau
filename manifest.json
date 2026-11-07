@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "9spokes.himmelblau-lock",
   "name": "Himmelblau Lock",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "author": "9Spokes OSS",
   "description": "Omarchy lock with full Himmelblau PAM conversations and explicit PIN recovery; requires companion system setup.",
   "license": "MIT",
