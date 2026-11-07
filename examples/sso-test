@@ -1,0 +1,9 @@
+#!/bin/sh
+# Dedicated-profile SSO launcher for an Omarchy desktop user; reuses existing data.
+set -eu
+case "${1:-extensions}" in
+  extensions) url='chrome://extensions' ;;
+  apps) url='https://myapps.microsoft.com' ;;
+  *) printf '%s\n' 'Usage: sso-test [extensions|apps]' >&2; exit 2 ;;
+esac
+exec chromium --user-data-dir="$HOME/.local/share/omarchy-himmelblau/sso-proof" --no-first-run "$url"

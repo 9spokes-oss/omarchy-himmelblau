@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 DEVELOPMENT_ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 ASSETS = DEVELOPMENT_ASSETS if DEVELOPMENT_ASSETS.is_dir() else Path('/usr/share/omarchy-himmelblau')
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -107,10 +107,10 @@ def identity(domain, user):
     return domain, user.lower()
 
 
-def validate_scope(data, domain, user):
+def validate_scope(data, domain, user, apply_policy=False):
     # Himmelblau unions pam_allow_groups from ALL sections, not only global.
     wanted = {'domain': domain, 'pam_allow_groups': user,
-              'apply_policy': 'false', 'use_etc_skel': 'true'}
+              'apply_policy': str(apply_policy).lower(), 'use_etc_skel': 'true'}
     for line in (data or b'').decode().splitlines():
         match = re.match(r'^\s*([a-zA-Z_]+)\s*=\s*(.*?)\s*$', line)
         if not match:
@@ -150,7 +150,7 @@ def read_generated_config():
     return read(CACHE_TARGET / SERVER_CONFIG.name)
 
 
-def configuration_scope(domain, user):
+def configuration_scope(domain, user, apply_policy=False):
     current = read(CONFIG)
     parent = CONFIG.parent
     if (not parent.is_dir() or parent.stat().st_uid != os.geteuid()
@@ -169,16 +169,16 @@ def configuration_scope(domain, user):
             raise Error(f'Himmelblau configuration drop-ins require manual review: {directory}')
     server = read_generated_config()
     if server is not None:
-        validate_scope(server, domain, user)
-    validate_scope(read(CONFIG), domain, user)
+        validate_scope(server, domain, user, apply_policy)
+    validate_scope(read(CONFIG), domain, user, apply_policy)
 
 
-def managed_config(data, domain, user):
+def managed_config(data, domain, user, apply_policy=False):
     """Preserve existing text/settings; refuse conflicting explicit managed keys."""
-    validate_scope(data, domain, user)
+    validate_scope(data, domain, user, apply_policy)
     text = (data or b'').decode()
     wanted = {'domain': domain, 'pam_allow_groups': user,
-              'apply_policy': 'false', 'use_etc_skel': 'true'}
+              'apply_policy': str(apply_policy).lower(), 'use_etc_skel': 'true'}
     lines = text.splitlines(keepends=True)
     section = None
     global_seen = False
@@ -304,6 +304,7 @@ def checked_theme_directories(entries):
 
 def setup(domain, user, admin=False):
     domain, user = identity(domain, user)
+    no_pending_recovery()
     if read(STATE) is not None:
         state = load_state()
         if (state['domain'], state['user'], state['admin']) != (domain, user, admin):
@@ -363,7 +364,7 @@ def setup(domain, user, admin=False):
             subprocess.run(['visudo', '-cf', candidate.name], check=True, capture_output=True)
         add(SUDOERS, content, 0o440)
     # All source/configuration preflight finished before touching guest files.
-    state = {'version': VERSION, 'domain': domain, 'user': user, 'admin': admin,
+    state = {'version': VERSION, 'domain': domain, 'user': user, 'admin': admin, 'apply_policy': False,
              'files': [{k: v for k, v in entry.items() if k != 'data'} for entry in changes]}
     save_state(state)
     try:
@@ -383,6 +384,72 @@ def setup(domain, user, admin=False):
     print('In an unlocked graphical user session, run enable-user, then log out/in before lock testing.')
 
 
+def policy_mode(state):
+    mode = state.get('apply_policy', False)  # Legacy setup states opted out.
+    if type(mode) is not bool:
+        raise Error('Invalid managed policy mode in state')
+    return mode
+
+
+def policy(enable):
+    """Explicit local configuration only; no service or tenant operations."""
+    state = load_state()
+    old_state = read(STATE)
+    backup = STATE.parent / 'policy-backup.json'
+    no_pending_recovery()
+    issues = root_issues(state)
+    if issues:
+        raise Error('\n'.join(issues))
+    if policy_mode(state) == enable:
+        print('Requested local policy mode already selected; no changes')
+        return
+    # Generated configuration loads last. Never rewrite it or ignore conflicts.
+    validate_scope(read_generated_config(), state['domain'], state['user'], enable)
+    before = read(CONFIG)
+    lines = before.decode().splitlines(keepends=True)
+    section = None
+    replaced = 0
+    for index, line in enumerate(lines):
+        if match := re.match(r'^\s*\[([^]]+)\]\s*(?:[#;].*)?$', line.strip()):
+            section = match[1].lower()
+        elif section == 'global' and (match := re.match(r'^(\s*apply_policy\s*=\s*)(true|false)(.*)$', line, re.I)):
+            lines[index] = match[1] + str(enable).lower() + match[3] + line[match.end():]
+            replaced += 1
+    if replaced != 1:
+        raise Error('Expected exactly one managed global apply_policy key')
+    after = ''.join(lines).encode()
+    # Also reject scoped overrides in other sections before changing anything.
+    managed_config(after, state['domain'], state['user'], enable)
+    entry = next((item for item in state['files'] if Path(item['path']) == CONFIG), None)
+    if entry is None:
+        entry = planned(CONFIG, after, 0o644)
+        state['files'].append({key: value for key, value in entry.items() if key != 'data'})
+    else:
+        entry['after'] = digest(after)  # Preserve the original setup rollback bytes.
+    state['apply_policy'] = enable
+    state['version'] = VERSION
+    journal = {'state': base64.b64encode(old_state).decode(),
+               'config': base64.b64encode(before).decode(), 'mode': 0o644}
+    atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+    try:
+        atomic(CONFIG, after, 0o644)
+        save_state(state)
+        issues = root_issues(state, transaction=backup)
+        if issues:
+            raise Error('\n'.join(issues))
+    except Exception:
+        try:
+            atomic(CONFIG, before, 0o644)
+            atomic(STATE, old_state, 0o600)
+        except Exception:
+            raise Error(f'Policy rollback incomplete; recoverable originals retained at {backup}') from None
+        backup.unlink()
+        raise Error('Policy change failed; previous configuration and state restored') from None
+    backup.unlink()
+    print(f'Local apply_policy={str(enable).lower()} selected. No service restart or tenant operation performed.')
+    print('This setting does not establish compliance or undo any enrollment or previously applied policy.')
+
+
 def stock_pam():
     data = read(STOCK_PAM)
     info = json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']
@@ -391,9 +458,9 @@ def stock_pam():
     return data
 
 
-def require_complete_configuration(domain, user):
+def require_complete_configuration(domain, user, apply_policy=False):
     current = read(CONFIG)
-    if managed_config(current, domain, user) != current:
+    if managed_config(current, domain, user, apply_policy) != current:
         raise Error('Managed Himmelblau configuration keys are missing; refusing effective-scope assumptions')
 
 
@@ -413,11 +480,19 @@ def native_sddm_contract():
         raise Error('Unsafe native SDDM PIN service ownership/mode')
 
 
-def root_issues(state):
+def no_pending_recovery(transaction=None):
+    for operation in ('repair', 'policy'):
+        journal = STATE.parent / f'{operation}-backup.json'
+        if read(journal) is not None and journal != transaction:
+            raise Error(f'Pending {operation} recovery backup; inspect manually: {journal}')
+
+
+def root_issues(state, *, transaction=None):
     issues = []
     try:
-        configuration_scope(state['domain'], state['user'])
-        require_complete_configuration(state['domain'], state['user'])
+        no_pending_recovery(transaction)
+        configuration_scope(state['domain'], state['user'], policy_mode(state))
+        require_complete_configuration(state['domain'], state['user'], policy_mode(state))
         stock_pam()
         native_sddm_contract()
         patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
@@ -466,11 +541,10 @@ def repair():
     state = load_state()
     old_state = read(STATE)
     backup = STATE.parent / 'repair-backup.json'
-    if read(backup) is not None:
-        raise Error(f'Pending repair recovery backup; inspect manually: {backup}')
+    no_pending_recovery()
     native_sddm_contract()
-    configuration_scope(state['domain'], state['user'])
-    require_complete_configuration(state['domain'], state['user'])
+    configuration_scope(state['domain'], state['user'], policy_mode(state))
+    require_complete_configuration(state['domain'], state['user'], policy_mode(state))
     desired_pam = patch_source('lock-pam', stock_pam())
     manifest = json.loads((ASSETS / 'manifest.json').read_text())
     theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
@@ -535,7 +609,9 @@ def repair():
         for path, data, mode in repairs:
             atomic(path, data, mode)
         save_state(state)
-        doctor()
+        issues = root_issues(state, transaction=backup)
+        if issues:
+            raise Error('\n'.join(issues))
     except Exception:
         try:
             for entry in reversed(originals):
@@ -557,6 +633,7 @@ def repair():
 
 def rollback():
     state = load_state()
+    no_pending_recovery()
     # Validate every target first: never partly restore over unrecognized edits.
     if COPY_THEME.is_dir():
         expected = {entry['path'] for entry in state['files']}
@@ -850,6 +927,10 @@ def main(argv=None):
     setup_parser.add_argument('--admin', action='store_true', help='Opt in the resolved NSS UID to authenticated sudo')
     for command in ('doctor', 'status', 'repair', 'rollback'):
         sub.add_parser(command)
+    policy_parser = sub.add_parser('policy', help='Explicit local policy opt-in/out; no enrollment or service actions')
+    policy_choice = policy_parser.add_mutually_exclusive_group(required=True)
+    policy_choice.add_argument('--enable', dest='policy_enabled', action='store_true')
+    policy_choice.add_argument('--disable', dest='policy_enabled', action='store_false')
     user_parser = sub.add_parser('enable-user')
     user_parser.add_argument('--upgrade', action='store_true', help='Upgrade an unchanged managed 0.1.0 clone atomically')
     args = parser.parse_args(argv)
@@ -861,6 +942,8 @@ def main(argv=None):
         root_required()
         if args.command == 'setup':
             setup(args.domain, args.user, args.admin)
+        elif args.command == 'policy':
+            policy(args.policy_enabled)
         elif args.command == 'repair':
             repair()
         elif args.command == 'rollback':

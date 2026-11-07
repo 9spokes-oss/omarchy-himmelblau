@@ -33,4 +33,6 @@ install: build/pin-change
 	install -Dm644 README.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/README.md
 	install -Dm644 docs/maintenance.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/maintenance.md
 	install -Dm644 docs/sddm.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/sddm.md
+	install -Dm644 docs/intune-sso.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/intune-sso.md
+	install -Dm755 examples/sso-test $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/examples/sso-test
 	install -Dm644 assets/menu-extension.jsonc $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/menu-extension.jsonc

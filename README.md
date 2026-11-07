@@ -16,6 +16,8 @@ The integration package itself does not join a device or configure authenticatio
 
 Version `0.3.0` requires `sddm-himmelblau=0.21.0-1`. This separate package replaces stock SDDM binaries and includes the fixed PIN-change PAM service. It is a reviewed release backport, not an upstream SDDM release or a theme-only extension. The companion selects its copied theme through explicit setup/repair; display-manager restart is an operator action.
 
+Version `0.4.0` adds an explicit, state-backed Intune policy opt-in/out command. Existing setups remain opted out until requested. The VM enrolled in Intune with its original Entra identity, and fresh-profile Chromium SSO initially succeeded without credentials. Reopening after enrollment prompted for authentication; that result remains under investigation. Intune reports it as noncompliant because no compliance policy is assigned; encryption remains absent. See [Intune and browser SSO](docs/intune-sso.md) for acceptance evidence, the policy boundary and known compliance-measurement limitations.
+
 ## Prerequisites
 
 - An Omarchy installation with a local recovery account and console access.

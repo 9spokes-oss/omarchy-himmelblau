@@ -70,6 +70,161 @@ class CompanionTest(unittest.TestCase):
     def setup(self, admin=False):
         m.setup('example.com', 'alice@example.com', admin)
 
+    def test_policy_legacy_default_and_explicit_toggle_preserve_original(self):
+        before = m.CONFIG.read_bytes()
+        m.setup('example.com', 'alice@example.com')
+        state = m.load_state(); state.pop('apply_policy'); state['version'] = '0.3.0'; m.save_state(state)
+        m.doctor()
+        original = next(item.copy() for item in state['files'] if Path(item['path']) == m.CONFIG)
+        original_run = m.subprocess.run
+        def read_only_command(argv, **kwargs):
+            self.assertIn(argv[0], ('patch', 'pacman'))
+            return original_run(argv, **kwargs)
+        with patch.object(m.subprocess, 'run', side_effect=read_only_command):
+            m.policy(True)
+            m.doctor()
+            m.repair()
+            m.policy(False)
+            m.doctor()
+        changed = next(item for item in m.load_state()['files'] if Path(item['path']) == m.CONFIG)
+        self.assertEqual(changed['before'], original['before'])
+        self.assertFalse(m.load_state()['apply_policy'])
+        self.assertIn(b'connection_timeout = 17', m.CONFIG.read_bytes())
+        self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(m.STATE.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(m.STATE.parent.stat().st_mode & 0o777, 0o700)
+        m.rollback()
+        self.assertEqual(m.CONFIG.read_bytes(), before)
+
+    def test_policy_adopted_config_records_original_for_rollback(self):
+        desired = m.managed_config(m.CONFIG.read_bytes(), 'example.com', 'alice@example.com')
+        m.CONFIG.write_bytes(desired)
+        m.setup('example.com', 'alice@example.com')
+        self.assertFalse(any(Path(item['path']) == m.CONFIG for item in m.load_state()['files']))
+        m.policy(True)
+        m.doctor()
+        m.rollback()
+        self.assertEqual(m.CONFIG.read_bytes(), desired)
+
+    def test_policy_preserves_comment_format_and_noop_writes_nothing(self):
+        m.CONFIG.write_bytes(m.managed_config(m.CONFIG.read_bytes(), 'example.com', 'alice@example.com')
+                             .replace(b'apply_policy = false', b'  APPLY_POLICY = FALSE  # operator note'))
+        m.setup('example.com', 'alice@example.com')
+        m.policy(True)
+        self.assertIn(b'  APPLY_POLICY = true  # operator note\n', m.CONFIG.read_bytes())
+        before = m.STATE.read_bytes()
+        with patch.object(m, 'atomic', side_effect=AssertionError('Unexpected no-op write')):
+            m.policy(True)
+        self.assertEqual(m.STATE.read_bytes(), before)
+
+    def test_policy_state_mode_is_strict_and_drift_is_not_adopted(self):
+        m.setup('example.com', 'alice@example.com')
+        old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
+        m.CONFIG.write_bytes(old_config.replace(b'apply_policy = false', b'apply_policy = true'))
+        for action in (m.doctor, m.repair, lambda: m.policy(True)):
+            with self.assertRaises(m.Error): action()
+        self.assertEqual(m.STATE.read_bytes(), old_state)
+        m.CONFIG.write_bytes(old_config)
+        state = m.load_state(); state['apply_policy'] = 'false'; m.save_state(state)
+        with self.assertRaises(m.Error): m.doctor()
+
+    def test_policy_refuses_conflicting_hierarchy_before_mutation(self):
+        m.setup('example.com', 'alice@example.com')
+        old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
+        for content in ('[global]\napply_policy = false\n', '[example.com]\napply_policy = false\n'):
+            m.SERVER_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            m.SERVER_CONFIG.write_text(content)
+            with self.assertRaises(m.Error): m.policy(True)
+            self.assertEqual(m.CONFIG.read_bytes(), old_config)
+            self.assertEqual(m.STATE.read_bytes(), old_state)
+            m.SERVER_CONFIG.unlink()
+        m.CONFIG.write_bytes(old_config + b'\n[other]\napply_policy = false\n')
+        with self.assertRaises(m.Error): m.policy(True)
+        self.assertEqual(m.STATE.read_bytes(), old_state)
+        m.CONFIG.write_bytes(old_config)
+        directory = Path(str(m.CONFIG) + '.d'); directory.mkdir()
+        (directory / '50-operator.conf').write_text('[global]\napply_policy = true\n')
+        with self.assertRaises(m.Error): m.policy(True)
+        self.assertEqual(m.CONFIG.read_bytes(), old_config)
+
+    def test_policy_transaction_restores_config_and_state_on_each_write_failure(self):
+        m.setup('example.com', 'alice@example.com')
+        original = m.atomic
+        for target in (m.CONFIG, m.STATE):
+            old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
+            failed = False
+            def fail_once(path, data, mode):
+                nonlocal failed
+                if Path(path) == target and not failed:
+                    failed = True
+                    raise OSError('synthetic failure')
+                return original(path, data, mode)
+            with patch.object(m, 'atomic', fail_once):
+                with self.assertRaises(m.Error): m.policy(True)
+            self.assertTrue(failed)
+            self.assertEqual(m.CONFIG.read_bytes(), old_config)
+            self.assertEqual(m.STATE.read_bytes(), old_state)
+            self.assertFalse((m.STATE.parent / 'policy-backup.json').exists())
+
+    def test_policy_failed_restoration_retains_private_recovery_journal(self):
+        m.setup('example.com', 'alice@example.com')
+        old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
+        original = m.atomic
+        def failure(path, data, mode):
+            if Path(path) == m.STATE: raise OSError('synthetic persistent state failure')
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', failure):
+            with self.assertRaisesRegex(m.Error, 'recoverable originals retained'): m.policy(True)
+        journal = m.STATE.parent / 'policy-backup.json'
+        saved = json.loads(journal.read_text())
+        self.assertEqual(m.base64.b64decode(saved['config']), old_config)
+        self.assertEqual(m.base64.b64decode(saved['state']), old_state)
+        self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.policy(True)
+
+    def test_pending_recovery_journals_block_health_and_mutators(self):
+        m.setup('example.com', 'alice@example.com')
+        for operation in ('policy', 'repair'):
+            journal = m.STATE.parent / f'{operation}-backup.json'
+            journal.write_text('{}'); journal.chmod(0o600)
+            old_state = m.STATE.read_bytes(); old_config = m.CONFIG.read_bytes()
+            def root_status():
+                state = m.load_state()
+                with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'load_state', return_value=state):
+                    m.main(['status'])
+            actions = (m.doctor, m.repair, m.rollback, lambda: m.policy(True),
+                       lambda: m.setup('example.com', 'alice@example.com'), root_status)
+            for action in actions:
+                with self.subTest(operation=operation, action=action):
+                    with self.assertRaisesRegex(m.Error, f'Pending {operation} recovery'):
+                        action()
+                    self.assertEqual(m.STATE.read_bytes(), old_state)
+                    self.assertEqual(m.CONFIG.read_bytes(), old_config)
+            self.assertIn(f'Pending {operation} recovery', '\n'.join(m.root_issues(m.load_state())))
+            journal.unlink()
+
+    def test_final_policy_journal_unlink_failure_is_not_reported_healthy(self):
+        m.setup('example.com', 'alice@example.com')
+        journal = m.STATE.parent / 'policy-backup.json'
+        original = Path.unlink
+        def fail_final_unlink(path, *args, **kwargs):
+            if path == journal: raise OSError('synthetic journal unlink failure')
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', fail_final_unlink):
+            with self.assertRaisesRegex(OSError, 'journal unlink failure'): m.policy(True)
+        self.assertTrue(m.load_state()['apply_policy'])
+        self.assertTrue(journal.exists())
+        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.doctor()
+        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.repair()
+
+    def test_policy_cli_requires_explicit_choice_and_root(self):
+        for args in (['policy'], ['policy', '--enable', '--disable']):
+            with patch('sys.stderr', new_callable=io.StringIO):
+                with self.assertRaises(SystemExit): m.main(args)
+        with patch.object(m.os, 'geteuid', return_value=1000), patch.object(m, 'policy') as action:
+            with self.assertRaises(m.Error): m.main(['policy', '--enable'])
+            action.assert_not_called()
+
     def test_setup_preserves_unrelated_settings_and_rollback(self):
         self.setup()
         self.assertIn(b'connection_timeout = 17', m.CONFIG.read_bytes())
@@ -127,7 +282,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(main.read_bytes(), legacy)
         m.repair()
         upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], '0.3.0')
+        self.assertEqual(upgraded['version'], '0.4.0')
         self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
         for previous, current in zip(old_state['files'], upgraded['files']):
             self.assertEqual({k:v for k,v in previous.items() if k != 'after'}, {k:v for k,v in current.items() if k != 'after'})
@@ -139,7 +294,7 @@ class CompanionTest(unittest.TestCase):
         main, legacy, old = self.legacy_root()
         state = json.loads(old); state['version'] = '0.1.0'; m.save_state(state)
         m.repair()
-        self.assertEqual(m.load_state()['version'], '0.3.0')
+        self.assertEqual(m.load_state()['version'], '0.4.0')
         self.assertNotEqual(main.read_bytes(), legacy)
 
     def test_01_root_label_without_02_pin_state_refuses_upgrade(self):
@@ -586,7 +741,7 @@ class CompanionTest(unittest.TestCase):
         with patch.object(m,'unlocked') as unlocked,patch.object(m,'verify_native_clone'):
             m.upgrade_user('alice',clone,statefile,hook)
             unlocked.assert_called_once()
-        self.assertEqual(json.loads(statefile.read_text())['version'],'0.3.0')
+        self.assertEqual(json.loads(statefile.read_text())['version'],'0.4.0')
         self.assertEqual((clone/'Service.qml').read_bytes(),m.patch_source('lock-conversation',m.LOCK.read_bytes()))
         self.assertEqual((clone/'LockView.qml').read_bytes(),m.patch_source('lock-view',(m.LOCK.parent/'LockView.qml').read_bytes()))
         self.assertEqual(clone.stat().st_uid,os.getuid())
