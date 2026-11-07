@@ -2,7 +2,7 @@
 # Build/check from the reviewed companion checkout; never run as root.
 pkgname=sddm-himmelblau
 pkgver=0.21.0
-pkgrel=3
+pkgrel=4
 pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'

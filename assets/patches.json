@@ -21,7 +21,7 @@
   },
   "fixed-plugin": {
     "id": "9spokes.himmelblau-lock",
-    "version": "0.5.2",
+    "version": "0.5.3",
     "upstream": {
       "Service.qml": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
       "LockView.qml": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
@@ -30,7 +30,7 @@
       "manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
     },
     "files": {
-      "manifest.json": "e3fcd54a832dbdc532bedebf5af515324f89d026857e9f5501f45a70a538717a",
+      "manifest.json": "a273ce2fe38bd19348267e40e3e9a4ebdc6169b62777f631a551991c709f817f",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
       "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
       "plugin/Service.qml": "ace2f869c6e7b52a28c2e51dbd7946055788fbf0aa828d9b45f597b5477c1a1f",

@@ -14,9 +14,9 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.5.2'
+VERSION = '0.5.3'
 # The one sddm-himmelblau release this companion supports (tests/test_versions.py).
-NATIVE_VERSION = '0.21.0-3'
+NATIVE_VERSION = '0.21.0-4'
 ASSETS = Path('/usr/share/omarchy-himmelblau')
 COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
