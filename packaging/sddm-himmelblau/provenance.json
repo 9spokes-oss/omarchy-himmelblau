@@ -1,0 +1,26 @@
+{
+  "baseline_commit": "63780fcd79f1dbf81a30eef48c28c699ab15aded",
+  "baseline_tag": "v0.21.0",
+  "baseline_archive_sha256": "f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf",
+  "arch_packaging_commit": "d31bfcbb0a8d2a8ca7ee4fd01d5d8dacdb1de729",
+  "arch_cmake_commit": "228778c2b4b7e26db1e1d69fe484ed75c5791c3a",
+  "arch_patch_sha256": "278ed4b121e7697b8c1e6a6a5bbb38e76e5246d7e58f26accb5f9ad1bbb7cc6a",
+  "native_patch_sha256": "b380097c244d92f89f507934b9cded81801fcea6570813129732e7e482fccaf4",
+  "result_files": {
+    "src/auth/Auth.cpp": "d3143240d5ec7442420e582f5808fc2229e3db90fc25dad03ad25693787ea86d",
+    "src/auth/Auth.h": "5416a4d3d9fe41495f1886691384f22421fd2044e446b001049337237675248a",
+    "src/auth/AuthMessages.h": "49bf91910542d8185dfbfb933b4e9091f92450acad3c9843f2918705e6d13041",
+    "src/common/Messages.h": "0e453488532f05937e0f1e5c08199ad1293f505b9c4f0c844aeefcef8da6e03d",
+    "src/daemon/Display.cpp": "1711b33ba79f611f79cbab2bf1a4cf50a26896d5e2a9574df45b9a822ae78ba0",
+    "src/daemon/Display.h": "26b6223e90c0ecf96f519b62d995c1ad12df92c66b0f07af719edb496c000e1f",
+    "src/daemon/SocketServer.cpp": "2764d4e7f7e0e264b3f42f7e3db6c0d83f4f562f64f0a6059855e0453460e1c0",
+    "src/daemon/SocketServer.h": "67b20ea2a9afbc61098fc9e70f4799219cb799f8248ad45e9d8113944efb2dad",
+    "src/greeter/GreeterProxy.cpp": "0f97262792364af96b22c6908460f8173c1a4ff5f3b578f8bc85f090c1bd699c",
+    "src/greeter/GreeterProxy.h": "714e21410fb31a7f5056cbf25e32a2a5e2618a9e20f17972c1b4e5f1fb4e5e4c",
+    "src/helper/Backend.h": "87c1ec2fb5011634d7048e3217267b032348a31ffec8e39e1aebc9eb678ca7b1",
+    "src/helper/HelperApp.cpp": "a1198e0812cb242de7ce7a9ee1051def6fb8ca206ed568c1a89f9441cda60f7a",
+    "src/helper/HelperApp.h": "06f589c644b350453e8960eb7effde2efdd56fbfb7d532f20e7dcdbc4b3da0d6",
+    "src/helper/backend/PamBackend.cpp": "edc4ffd996e621c44b07743a2838e6cc91bb1b0adfd85fdc33c9cece9a1958dd",
+    "src/helper/backend/PamBackend.h": "536805dd5f12137ccc504db5d22c43fd3856e7910000ba9419ca8e13d2a1d0e1"
+  }
+}

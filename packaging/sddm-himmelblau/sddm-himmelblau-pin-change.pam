@@ -1,0 +1,2 @@
+# Native SDDM PIN replacement; a successful change never starts a session.
+password required pam_himmelblau.so

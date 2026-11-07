@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 DEVELOPMENT_ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 ASSETS = DEVELOPMENT_ASSETS if DEVELOPMENT_ASSETS.is_dir() else Path('/usr/share/omarchy-himmelblau')
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
@@ -29,6 +29,8 @@ OVERRIDE = Path('/etc/sddm.conf.d/99-z-himmelblau.conf')
 SUDOERS = Path('/etc/sudoers.d/90-himmelblau-user')
 PIN_PAM = Path('/etc/pam.d/omarchy-himmelblau-pin-change')
 PIN_PAM_CONTENT = b'# Dedicated current-user PIN replacement; no session unlock.\npassword required pam_himmelblau.so\n'
+SDDM_PIN_PAM = Path('/etc/pam.d/sddm-himmelblau-pin-change')
+SDDM_PIN_PAM_CONTENT = b'# Native SDDM PIN replacement; a successful change never starts a session.\npassword required pam_himmelblau.so\n'
 LOCAL_PASSWD = Path('/etc/passwd')
 CONFIG_LAYERS = (Path('/usr/lib/himmelblau/himmelblau.conf'), Path('/run/himmelblau/himmelblau.conf'))
 SERVER_CONFIG = Path('/var/cache/himmelblaud/himmelblau.conf')
@@ -288,6 +290,11 @@ def theme_directories(entries):
 
 def checked_theme_directories(entries):
     directories = theme_directories(entries)
+    expected = {Path(entry['path']) for entry in entries if Path(entry['path']).is_relative_to(COPY_THEME)}
+    if COPY_THEME.is_dir():
+        for path in COPY_THEME.rglob('*'):
+            if path.is_symlink() or (path.is_dir() and path not in directories) or (not path.is_dir() and path not in expected):
+                raise Error(f'Unexpected companion theme entry: {path}')
     for directory in directories:
         safe(directory / '.guard')
         if not directory.is_dir() or directory.stat().st_uid != os.geteuid():
@@ -304,6 +311,7 @@ def setup(domain, user, admin=False):
         doctor()
         print('Already set up; no changes')
         return
+    native_sddm_contract()
     configuration_scope(domain, user)
     changes = []
     def add(path, data, mode=0o644):
@@ -338,7 +346,7 @@ def setup(domain, user, admin=False):
             continue
         content = read(source)
         if source.name == 'Main.qml':
-            content = patch_source('sddm-username', content)
+            content = patch_source('sddm-conversation', content)
         add(COPY_THEME / source.relative_to(THEME), content)
     if not any(p.name == 'Main.qml' for p in theme_files):
         raise Error('Original theme Main.qml missing')
@@ -389,12 +397,33 @@ def require_complete_configuration(domain, user):
         raise Error('Managed Himmelblau configuration keys are missing; refusing effective-scope assumptions')
 
 
+def native_sddm_contract():
+    # This verifies installed package/service metadata, never the running daemon.
+    try:
+        result = subprocess.run(['pacman', '-Q', 'sddm-himmelblau'], check=True,
+                                capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError):
+        raise Error('Reviewed native sddm-himmelblau 0.21.0-1 package required') from None
+    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-1':
+        raise Error('Unsupported native SDDM package version; review required')
+    if read(SDDM_PIN_PAM) != SDDM_PIN_PAM_CONTENT:
+        raise Error('Native SDDM PIN service missing/drifted; reinstall the native package explicitly')
+    metadata = SDDM_PIN_PAM.stat()
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644:
+        raise Error('Unsafe native SDDM PIN service ownership/mode')
+
+
 def root_issues(state):
     issues = []
     try:
         configuration_scope(state['domain'], state['user'])
         require_complete_configuration(state['domain'], state['user'])
         stock_pam()
+        native_sddm_contract()
+        patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
+        info = json.loads((ASSETS / 'manifest.json').read_text())['sddm-conversation']
+        if digest(read(COPY_THEME / 'Main.qml') or b'') != info['after']:
+            raise Error('SDDM conversation theme requires explicit root repair')
     except Error as error:
         issues.append(str(error))
     for entry in state['files']:
@@ -430,53 +459,100 @@ def doctor():
     issues = root_issues(state)
     if issues:
         raise Error('\n'.join(issues))
-    print('Managed root files and supported upstream source match. This is not an authentication or session test.')
+    print('Managed root files and supported upstream source match. Running daemon capability negotiation, authentication and sessions are not tested.')
 
 
 def repair():
     state = load_state()
+    old_state = read(STATE)
+    backup = STATE.parent / 'repair-backup.json'
+    if read(backup) is not None:
+        raise Error(f'Pending repair recovery backup; inspect manually: {backup}')
+    native_sddm_contract()
     configuration_scope(state['domain'], state['user'])
     require_complete_configuration(state['domain'], state['user'])
     desired_pam = patch_source('lock-pam', stock_pam())
+    manifest = json.loads((ASSETS / 'manifest.json').read_text())
+    theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
+    theme_path = COPY_THEME / 'Main.qml'
+    theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
+    if theme_entry is None:
+        raise Error('Missing managed SDDM theme state')
+    legacy = theme_entry['after'] == manifest['sddm-conversation']['legacy_after']
+    if legacy:
+        version = state.get('version')
+        # 0.2 repair installed its PIN service without updating 0.1 root labels.
+        recorded_pin = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
+        if version not in ('0.1.0', '0.2.0') or (version == '0.1.0' and
+                (recorded_pin is None or recorded_pin['after'] != digest(PIN_PAM_CONTENT)
+                 or read(PIN_PAM) != PIN_PAM_CONTENT)):
+            raise Error('Legacy SDDM theme requires matching managed 0.2 history')
+    if not legacy and theme_entry['after'] != manifest['sddm-conversation']['after']:
+        raise Error('Unsupported managed SDDM theme state')
+    repairs = []
     pin_entry = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
     if pin_entry is None:
         if read(PIN_PAM) is not None:
             raise Error('Unmanaged PIN replacement service conflicts with upgrade')
         entry = planned(PIN_PAM, PIN_PAM_CONTENT, 0o644)
         state['files'].append({k: v for k, v in entry.items() if k != 'data'})
-    repairs = []
-    # Preflight every managed file before reapplying any regenerated PAM file.
+    # Full file/source/configuration preflight precedes journal or managed writes.
     for entry in state['files']:
         path = Path(entry['path'])
         data = read(path)
-        if data is not None and digest(data) == entry['after']:
-            if stat.S_IMODE(path.stat().st_mode) != entry['mode'] or path.stat().st_uid != os.geteuid():
+        if data is not None:
+            metadata = path.stat()
+            if stat.S_IMODE(metadata.st_mode) != entry['mode'] or metadata.st_uid != os.geteuid():
                 raise Error(f'Repair refuses permission drift: {path}')
+        if data is not None and digest(data) == entry['after']:
+            if path == theme_path and legacy:
+                repairs.append((path, theme, entry['mode']))
             continue
         if path == PIN_PAM and data is None:
             repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
             continue
-        if path == PAM and (data is None or digest(data) == json.loads((ASSETS / 'manifest.json').read_text())['lock-pam']['before']):
+        if path == PAM and (data is None or digest(data) == manifest['lock-pam']['before']):
             if digest(desired_pam) == entry['after']:
                 repairs.append((path, desired_pam, entry['mode']))
                 continue
         raise Error(f'Repair refuses unsupported managed drift: {path}')
-    source = read(LOCK)
-    if source is None:
-        raise Error('Missing lock source')
-    patch_source('lock-conversation', source)
+    patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
-    # Save backup metadata before creating the new dedicated PIN service.
-    if pin_entry is None:
-        save_state(state)
-    for directory in directories:
-        if stat.S_IMODE(directory.stat().st_mode) != 0o755:
+    # Preserve original rollback metadata; only the managed after-hash changes.
+    theme_entry['after'] = digest(theme)
+    state['version'] = VERSION
+    originals = [{'path': str(path), 'data': base64.b64encode(read(path)).decode() if read(path) is not None else None,
+                  'mode': stat.S_IMODE(path.stat().st_mode) if path.exists() else mode}
+                 for path, data, mode in repairs]
+    directory_modes = [(directory, stat.S_IMODE(directory.stat().st_mode)) for directory in directories]
+    journal = {'state': base64.b64encode(old_state).decode(), 'files': originals,
+               'directories': {str(path): mode for path, mode in directory_modes}}
+    atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+    try:
+        for directory in directories:
             directory.chmod(0o755)
-    for path, data, mode in repairs:
-        atomic(path, data, mode)
-    doctor()
-    print('No session reload performed. Re-run enable-user as the graphical user to check its clone.')
+        for path, data, mode in repairs:
+            atomic(path, data, mode)
+        save_state(state)
+        doctor()
+    except Exception:
+        try:
+            for entry in reversed(originals):
+                path = Path(entry['path'])
+                if entry['data'] is None:
+                    safe(path).unlink(missing_ok=True)
+                else:
+                    atomic(path, base64.b64decode(entry['data']), entry['mode'])
+            for directory, mode in directory_modes:
+                directory.chmod(mode)
+            atomic(STATE, old_state, 0o600)
+        except Exception:
+            raise Error(f'Repair rollback incomplete; recoverable originals retained at {backup}') from None
+        backup.unlink()
+        raise Error('Repair failed; previous files and state restored') from None
+    backup.unlink()
+    print('Root repair complete. No daemon restart or session reload performed; existing user clones remain unchanged.')
 
 
 def rollback():

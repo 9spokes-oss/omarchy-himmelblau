@@ -19,5 +19,11 @@
     "filename": "LockView.qml",
     "before": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
     "after": "c545760032375064d400a11b030b48f1f85a94f371d3d1d97548b4d8e13be3a4"
+  },
+  "sddm-conversation": {
+    "filename": "Main.qml",
+    "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
+    "after": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e",
+    "legacy_after": "c6b6228525e51a29eac4ed944d79342a952f4bafeecde40c644313b4697ceb80"
   }
 }

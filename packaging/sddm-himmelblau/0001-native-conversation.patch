@@ -1,0 +1,1318 @@
+diff --git a/src/auth/Auth.cpp b/src/auth/Auth.cpp
+index 6c9b5c6..612369f 100644
+--- a/src/auth/Auth.cpp
++++ b/src/auth/Auth.cpp
+@@ -67,6 +67,11 @@ namespace SDDM {
+         QString user { };
+         QByteArray cookie { };
+         bool autologin { false };
++        bool pinRecovery { false };
++        bool cancelled { false };
++        bool authResultSeen { false };
++        bool authenticationSucceeded { false };
++        bool tokenResultSeen { false };
+         bool greeter { false };
+         QProcessEnvironment environment { };
+         qint64 id { 0 };
+@@ -145,11 +150,18 @@ namespace SDDM {
+ 
+ 
+     void Auth::Private::setSocket(QLocalSocket *socket) {
++        if (this->socket && this->socket != socket) {
++            this->socket->disconnect(this);
++            this->socket->deleteLater();
++        }
+         this->socket = socket;
+-        connect(socket, &QLocalSocket::readyRead, this, &Auth::Private::dataPending);
++        connect(socket, &QLocalSocket::readyRead, this, [this, socket] {
++            if (socket == this->socket) dataPending();
++        });
+     }
+ 
+     void Auth::Private::dataPending() {
++        if (!socket) return;
+         Auth *auth = qobject_cast<Auth*>(parent());
+         Msg m = MSG_UNKNOWN;
+         SafeDataStream str(socket);
+@@ -174,15 +186,26 @@ namespace SDDM {
+                 case REQUEST: {
+                     Request r;
+                     str >> r;
+-                    request->setRequest(&r);
++                    if (!cancelled) request->setRequest(&r);
+                     break;
+                 }
+                 case AUTHENTICATED: {
+                     QString user;
+                     str >> user;
++                    if (cancelled || pinRecovery || authResultSeen || str.status() != QDataStream::Ok) {
++                        socket->disconnectFromServer();
++                        break;
++                    }
++                    authResultSeen = true;
+                     if (!user.isEmpty()) {
+                         auth->setUser(user);
+                         Q_EMIT auth->authentication(user, true);
++                        // Display may reject/cancel while handling authentication.
++                        if (cancelled || pinRecovery) {
++                            socket->disconnectFromServer();
++                            break;
++                        }
++                        authenticationSucceeded = true;
+                         str.reset();
+                         str << AUTHENTICATED << environment << cookie;
+                         str.send();
+@@ -192,9 +215,25 @@ namespace SDDM {
+                     }
+                     break;
+                 }
++                case TOKEN_CHANGED: {
++                    bool success = false;
++                    str >> success;
++                    if (cancelled || !pinRecovery || tokenResultSeen || str.status() != QDataStream::Ok) {
++                        socket->disconnectFromServer();
++                        break;
++                    }
++                    tokenResultSeen = true;
++                    Q_EMIT auth->tokenChanged(success);
++                    break;
++                }
+                 case SESSION_STATUS: {
+-                    bool status;
++                    if (cancelled || pinRecovery || !authenticationSucceeded) {
++                        socket->disconnectFromServer();
++                        return;
++                    }
++                    bool status = false;
+                     str >> status;
++                    if (str.status() != QDataStream::Ok) { socket->disconnectFromServer(); return; }
+                     Q_EMIT auth->sessionStarted(status);
+                     str.reset();
+                     str << SESSION_STATUS;
+@@ -202,6 +241,7 @@ namespace SDDM {
+                     break;
+                 }
+                 case DISPLAY_SERVER_STARTED: {
++                    if (cancelled || pinRecovery) { socket->disconnectFromServer(); return; }
+                     QString displayName;
+                     str >> displayName;
+                     Q_EMIT auth->displayServerReady(displayName);
+@@ -230,20 +270,23 @@ namespace SDDM {
+         else
+             qWarning("Auth: sddm-helper exited with %d", exitCode);
+ 
++        if (socket && socket->bytesAvailable() > 0) dataPending();
+         Q_EMIT qobject_cast<Auth*>(parent())->finished((Auth::HelperExitStatus)exitCode);
+     }
+ 
+     void Auth::Private::childError(QProcess::ProcessError error) {
+-        Q_UNUSED(error);
+         Q_EMIT qobject_cast<Auth*>(parent())->error(child->errorString(), ERROR_INTERNAL);
++        if (error == QProcess::FailedToStart)
++            Q_EMIT qobject_cast<Auth*>(parent())->finished(HELPER_OTHER_ERROR);
+     }
+ 
+     void Auth::Private::requestFinished() {
++        if (cancelled || !socket) return;
+         SafeDataStream str(socket);
+         Request r = request->request();
++        request->setRequest();
+         str << REQUEST << r;
+         str.send();
+-        request->setRequest();
+     }
+ 
+ 
+@@ -262,6 +305,9 @@ namespace SDDM {
+     }
+ 
+     Auth::~Auth() {
++        // Owners may already have cleared their Auth pointer before deleteLater.
++        // stop() clears requests and can process child events while destroying us.
++        blockSignals(true);
+         stop();
+         delete d;
+     }
+@@ -367,11 +413,34 @@ namespace SDDM {
+         }
+     }
+ 
++    bool Auth::pinRecovery() const { return d->pinRecovery; }
++    bool Auth::isCancelled() const { return d->cancelled; }
++    void Auth::setPinRecovery(bool enabled) {
++        if (!isActive()) d->pinRecovery = enabled;
++    }
++
+     void Auth::start() {
++        if (isActive()) return;
++        // A fresh helper identity prevents an old socket from attaching to a new attempt.
++        SocketServer::instance()->helpers.remove(d->id);
++        d->id = Private::lastId++;
++        SocketServer::instance()->helpers[d->id] = d;
++        if (d->socket) {
++            d->socket->disconnect(d);
++            d->socket->deleteLater();
++            d->socket = nullptr;
++        }
++        d->request->setRequest();
++        d->cancelled = false;
++        d->authResultSeen = false;
++        d->authenticationSucceeded = false;
++        d->tokenResultSeen = false;
+         QStringList args;
+         args << QStringLiteral("--socket") << SocketServer::instance()->fullServerName();
+         args << QStringLiteral("--id") << QString::number(d->id);
+-        if (!d->sessionPath.isEmpty())
++        if (d->pinRecovery)
++            args << QStringLiteral("--change-pin");
++        else if (!d->sessionPath.isEmpty())
+             args << QStringLiteral("--start") << d->sessionPath;
+         if (!d->user.isEmpty())
+             args << QStringLiteral("--user") << d->user;
+@@ -385,6 +454,9 @@ namespace SDDM {
+     }
+ 
+     void Auth::stop() {
++        // waitForFinished runs a nested event loop: invalidate before entering it.
++        d->cancelled = true;
++        d->request->setRequest();
+         if (d->child->state() == QProcess::NotRunning) {
+             return;
+         }
+diff --git a/src/auth/Auth.h b/src/auth/Auth.h
+index c78da55..6f2d624 100644
+--- a/src/auth/Auth.h
++++ b/src/auth/Auth.h
+@@ -92,6 +92,9 @@ namespace SDDM {
+ 
+         static void registerTypes();
+ 
++        bool pinRecovery() const;
++        void setPinRecovery(bool enabled);
++        bool isCancelled() const;
+         bool autologin() const;
+         bool isGreeter() const;
+         bool verbose() const;
+@@ -193,6 +196,7 @@ namespace SDDM {
+         * @param success true if succeeded
+         */
+         void authentication(QString user, bool success);
++        void tokenChanged(bool success);
+ 
+         /**
+         * Emitted when session starting phase finishes
+diff --git a/src/auth/AuthMessages.h b/src/auth/AuthMessages.h
+index 6aea748..72f332a 100644
+--- a/src/auth/AuthMessages.h
++++ b/src/auth/AuthMessages.h
+@@ -98,6 +98,7 @@ namespace SDDM {
+         AUTHENTICATED,
+         SESSION_STATUS,
+         DISPLAY_SERVER_STARTED,
++        TOKEN_CHANGED,
+         MSG_LAST,
+     };
+ 
+diff --git a/src/common/Messages.h b/src/common/Messages.h
+index f79a9db..35bc952 100644
+--- a/src/common/Messages.h
++++ b/src/common/Messages.h
+@@ -30,7 +30,10 @@ namespace SDDM {
+         Reboot,
+         Suspend,
+         Hibernate,
+-        HybridSleep
++        HybridSleep,
++        BeginConversation,
++        ConversationResponse,
++        CancelConversation
+     };
+ 
+     enum class DaemonMessages {
+@@ -39,8 +42,15 @@ namespace SDDM {
+         LoginSucceeded,
+         LoginFailed,
+         InformationMessage,
++        ConversationVersion,
++        ConversationPrompt,
++        ConversationMessage,
++        ConversationFinished,
++        ConversationAuthorized,
+     };
+ 
++    enum ConversationResult { ConversationFailed = 0, ConversationCancelled = 1, ConversationLogin = 2, ConversationPinChanged = 3 };
++
+     enum Capability {
+         None = 0x0000,
+         PowerOff = 0x0001,
+diff --git a/src/daemon/Display.cpp b/src/daemon/Display.cpp
+index 4014e0d..51bb311 100644
+--- a/src/daemon/Display.cpp
++++ b/src/daemon/Display.cpp
+@@ -29,6 +29,7 @@
+ #include "Seat.h"
+ #include "SocketServer.h"
+ #include "Greeter.h"
++#include "Messages.h"
+ #include "Utils.h"
+ 
+ #include <QDebug>
+@@ -137,6 +138,12 @@ namespace SDDM {
+         m_auth->setVerbose(true);
+         connect(m_auth, &Auth::requestChanged, this, &Display::slotRequestChanged);
+         connect(m_auth, &Auth::authentication, this, &Display::slotAuthenticationFinished);
++        connect(m_auth, &Auth::tokenChanged, this, [this](bool success) {
++            if (m_conversationId && m_recoveryConversation && !m_cancelledConversation && !m_auth->isCancelled()) {
++                m_tokenResultSeen = true;
++                m_tokenResult = success;
++            }
++        });
+         connect(m_auth, &Auth::sessionStarted, this, &Display::slotSessionStarted);
+         connect(m_auth, &Auth::finished, this, &Display::slotHelperFinished);
+         connect(m_auth, &Auth::info, this, &Display::slotAuthInfo);
+@@ -148,6 +155,9 @@ namespace SDDM {
+ 
+         // connect login signal
+         connect(m_socketServer, &SocketServer::login, this, &Display::login);
++        connect(m_socketServer, &SocketServer::conversationBegin, this, &Display::beginConversation);
++        connect(m_socketServer, &SocketServer::conversationResponse, this, &Display::respondConversation);
++        connect(m_socketServer, &SocketServer::conversationCancel, this, &Display::cancelConversation);
+ 
+         // connect login result signals
+         connect(this, &Display::loginFailed, m_socketServer, &SocketServer::loginFailed);
+@@ -318,7 +328,11 @@ namespace SDDM {
+     void Display::login(QLocalSocket *socket,
+                         const QString &user, const QString &password,
+                         const Session &session) {
++        if (m_auth->isActive() || m_conversationId || user.isEmpty() || user.size() > 256
++            || user.startsWith(QLatin1Char('-')) || user.contains(QChar(0))) { emit loginFailed(socket); return; }
+         m_socket = socket;
++        m_legacyInitialRequest = true;
++        m_sessionAuthorized = false;
+ 
+         //the SDDM user has special privileges that skip password checking so that we can load the greeter
+         //block ever trying to log in as the SDDM user
+@@ -331,6 +345,94 @@ namespace SDDM {
+         startAuth(user, password, session);
+     }
+ 
++    void Display::beginConversation(QLocalSocket *socket, quint32 attempt, const QString &user, const Session &session, bool recovery) {
++        if (!socket || !attempt || attempt <= m_seenAttempts.value(socket, 0)) return;
++        if (!m_seenAttempts.contains(socket)) {
++            connect(socket, &QObject::destroyed, this, [this, socket] { m_seenAttempts.remove(socket); });
++            connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
++                if (socket == m_conversationSocket) cancelConversation(socket, m_conversationId);
++            });
++        }
++        m_seenAttempts[socket] = attempt;
++        // Never overlap helpers, including a helper still exiting after cancellation.
++        if (m_auth->isActive() || m_conversationId || user.isEmpty() || user.size() > 256
++            || user.startsWith(QLatin1Char('-')) || user.contains(QChar(0)) || user == QLatin1String("sddm")) {
++            m_socketServer->conversationFinished(socket, attempt, ConversationFailed);
++            return;
++        }
++        if (recovery) {
++            const QByteArray name = user.toUtf8();
++            const struct passwd *account = getpwnam(name.constData());
++            if (user == QLatin1String("root") || (account && account->pw_uid == 0)) {
++                m_socketServer->conversationFinished(socket, attempt, ConversationFailed);
++                return;
++            }
++        }
++        m_conversationId = attempt;
++        m_conversationSocket = socket;
++        m_socket = socket;
++        m_promptId = 0;
++        m_waitingPrompt = false;
++        m_recoveryConversation = recovery;
++        m_cancelledConversation = false;
++        m_tokenResultSeen = false;
++        m_tokenResult = false;
++        m_sessionAuthorized = false;
++        m_legacyInitialRequest = false;
++        m_passPhrase.fill(QChar(0)); m_passPhrase.clear();
++        if (recovery) {
++            m_auth->setAutologin(false);
++            m_auth->setGreeter(false);
++            m_auth->setSession(QString());
++            m_auth->setDisplayServerCommand(QString());
++            m_auth->setCookie(QByteArray());
++            m_auth->setUser(user);
++            m_auth->setPinRecovery(true);
++            m_auth->start();
++        } else if (!startAuth(user, QString(), session)) {
++            finishConversation(ConversationFailed);
++        }
++    }
++
++    void Display::respondConversation(QLocalSocket *socket, quint32 attempt, quint32 prompt, const QString &response) {
++        if (!m_conversationId || socket != m_conversationSocket || attempt != m_conversationId
++            || prompt != m_promptId || !m_waitingPrompt || m_cancelledConversation
++            || m_auth->isCancelled() || !m_auth->isActive() || response.size() > 4096) return;
++        const auto prompts = m_auth->request()->prompts();
++        if (prompts.size() != 1) return;
++        m_waitingPrompt = false; // consume before callbacks can request another prompt
++        prompts[0]->setResponse(response.toUtf8());
++        m_auth->request()->done();
++    }
++
++    void Display::cancelConversation(QLocalSocket *socket, quint32 attempt) {
++        if (!attempt || attempt != m_conversationId || socket != m_conversationSocket) return;
++        if (m_sessionAuthorized) {
++            m_socketServer->conversationAuthorized(socket, attempt);
++            const auto prompts = m_auth->request()->prompts();
++            if (m_waitingPrompt && prompts.size() == 1)
++                m_socketServer->conversationPrompt(socket, attempt, m_promptId, prompts[0]->message(), prompts[0]->hidden());
++            return;
++        }
++        m_cancelledConversation = true;
++        m_waitingPrompt = false;
++        m_passPhrase.fill(QChar(0)); m_passPhrase.clear();
++        if (m_auth->isActive()) m_auth->stop();
++        else finishConversation(ConversationCancelled);
++    }
++
++    void Display::finishConversation(quint32 result) {
++        const quint32 attempt = m_conversationId;
++        QPointer<QLocalSocket> socket = m_conversationSocket;
++        m_conversationId = 0;
++        m_promptId = 0;
++        m_waitingPrompt = false;
++        m_conversationSocket = nullptr;
++        m_socket = nullptr;
++        m_passPhrase.fill(QChar(0)); m_passPhrase.clear();
++        if (socket && attempt) m_socketServer->conversationFinished(socket, attempt, result);
++    }
++
+     QString Display::findGreeterTheme() const {
+         QString themeName = mainConfig.Theme.Current.get();
+ 
+@@ -379,6 +481,9 @@ namespace SDDM {
+             return false;
+         }
+ 
++        m_auth->setPinRecovery(false);
++        if (!m_conversationId) m_cancelledConversation = false;
++        m_sessionAuthorized = false;
+         m_passPhrase = password;
+ 
+         // sanity check
+@@ -455,6 +560,8 @@ namespace SDDM {
+         m_auth->setUser(user);
+         if (m_reuseSessionId.isNull()) {
+             m_auth->setSession(session.exec());
++        } else {
++            m_auth->setSession(QString());
+         }
+         m_auth->insertEnvironment(env);
+         m_auth->start();
+@@ -463,12 +570,19 @@ namespace SDDM {
+     }
+ 
+     void Display::slotAuthenticationFinished(const QString &user, bool success) {
++        // No cancelled/reset authentication can authorize, activate or unlock a session.
++        if (m_auth->isCancelled() || m_cancelledConversation || m_auth->pinRecovery()) return;
+         if (m_auth->autologin() && !success) {
+             handleAutologinFailure();
+             return;
+         }
+ 
+         if (success) {
++            // From this point greeter cancellation is no longer a session-control API.
++            m_sessionAuthorized = true;
++            if (m_conversationId) m_socketServer->conversationAuthorized(m_conversationSocket, m_conversationId);
++            m_waitingPrompt = false;
++            m_passPhrase.fill(QChar(0)); m_passPhrase.clear();
+             qDebug() << "Authentication for user " << user << " successful";
+ 
+             if (!m_reuseSessionId.isNull()) {
+@@ -494,7 +608,7 @@ namespace SDDM {
+ 
+             if (m_socket)
+                 emit loginSucceeded(m_socket);
+-        } else if (m_socket) {
++        } else if (m_socket && !m_conversationId) {
+             qDebug() << "Authentication for user " << user << " failed";
+             emit loginFailed(m_socket);
+         }
+@@ -502,7 +616,12 @@ namespace SDDM {
+     }
+ 
+     void Display::slotAuthInfo(const QString &message, Auth::Info info) {
+-        qWarning() << "Authentication information:" << info << message;
++        Q_UNUSED(info);
++        if (m_conversationId) {
++            if (!m_cancelledConversation && !m_auth->isCancelled())
++                m_socketServer->conversationMessage(m_conversationSocket, m_conversationId, message, false);
++            return;
++        }
+ 
+         if (!m_socket)
+             return;
+@@ -511,7 +630,11 @@ namespace SDDM {
+     }
+ 
+     void Display::slotAuthError(const QString &message, Auth::Error error) {
+-        qWarning() << "Authentication error:" << error << message;
++        if (m_conversationId) {
++            if (!m_cancelledConversation && !m_auth->isCancelled())
++                m_socketServer->conversationMessage(m_conversationSocket, m_conversationId, message, true);
++            return;
++        }
+ 
+         if (!m_socket)
+             return;
+@@ -522,6 +645,14 @@ namespace SDDM {
+     }
+ 
+     void Display::slotHelperFinished(Auth::HelperExitStatus status) {
++        if (m_conversationId) {
++            const bool cancelled = m_cancelledConversation || m_auth->isCancelled();
++            const bool recovery = m_recoveryConversation;
++            const bool changed = recovery && !cancelled && m_tokenResultSeen && m_tokenResult && status == Auth::HELPER_SUCCESS;
++            const bool reused = !recovery && !cancelled && m_sessionAuthorized && status == Auth::HELPER_SUCCESS;
++            finishConversation(cancelled ? ConversationCancelled : changed ? ConversationPinChanged : reused ? ConversationLogin : ConversationFailed);
++            if (recovery || cancelled) return;
++        }
+         // Don't restart greeter and display server unless sddm-helper exited
+         // with an internal error or the user session finished successfully,
+         // we want to avoid greeter from restarting when an authentication
+@@ -532,19 +663,28 @@ namespace SDDM {
+     }
+ 
+     void Display::slotRequestChanged() {
+-        if (m_auth->request()->prompts().length() == 1) {
+-            m_auth->request()->prompts()[0]->setResponse(qPrintable(m_passPhrase));
+-            m_auth->request()->done();
+-        } else if (m_auth->request()->prompts().length() == 2) {
+-            m_auth->request()->prompts()[0]->setResponse(qPrintable(m_auth->user()));
+-            m_auth->request()->prompts()[1]->setResponse(qPrintable(m_passPhrase));
++        if (m_auth->isCancelled() || m_cancelledConversation) return;
++        const auto prompts = m_auth->request()->prompts();
++        if (prompts.size() != 1) return;
++        if (m_legacyInitialRequest && prompts[0]->hidden()) {
++            m_legacyInitialRequest = false;
++            prompts[0]->setResponse(m_passPhrase.toUtf8());
++            m_passPhrase.fill(QChar(0)); m_passPhrase.clear();
+             m_auth->request()->done();
++            return;
++        }
++        if (m_conversationId && m_conversationSocket && !m_waitingPrompt && m_promptId != 0xffffffffu) {
++            ++m_promptId;
++            m_waitingPrompt = true;
++            m_socketServer->conversationPrompt(m_conversationSocket, m_conversationId, m_promptId, prompts[0]->message(), prompts[0]->hidden());
+         }
+     }
+ 
+     void Display::slotSessionStarted(bool success) {
+         qDebug() << "Session started" << success;
++        if (m_auth->isCancelled() || m_auth->pinRecovery() || m_cancelledConversation) return;
+         if (success) {
++            if (m_conversationId) finishConversation(ConversationLogin);
+             QTimer::singleShot(5000, m_greeter, &Greeter::stop);
+         }
+     }
+diff --git a/src/daemon/Display.h b/src/daemon/Display.h
+index 98ca006..73ed174 100644
+--- a/src/daemon/Display.h
++++ b/src/daemon/Display.h
+@@ -24,6 +24,7 @@
+ 
+ #include <QObject>
+ #include <QPointer>
++#include <QHash>
+ #include <QDir>
+ 
+ #include "Auth.h"
+@@ -72,6 +73,9 @@ namespace SDDM {
+         void login(QLocalSocket *socket,
+                    const QString &user, const QString &password,
+                    const Session &session);
++        void beginConversation(QLocalSocket *socket, quint32 attempt, const QString &user, const Session &session, bool recovery);
++        void respondConversation(QLocalSocket *socket, quint32 attempt, quint32 prompt, const QString &response);
++        void cancelConversation(QLocalSocket *socket, quint32 attempt);
+         bool attemptAutologin();
+         void displayServerStarted();
+ 
+@@ -104,6 +108,18 @@ namespace SDDM {
+         QString m_sessionName;
+         QString m_reuseSessionId;
+ 
++        quint32 m_conversationId {0};
++        quint32 m_promptId {0};
++        bool m_waitingPrompt {false};
++        bool m_recoveryConversation {false};
++        bool m_cancelledConversation {false};
++        bool m_tokenResultSeen {false};
++        bool m_tokenResult {false};
++        bool m_sessionAuthorized {false};
++        bool m_legacyInitialRequest {false};
++        QPointer<QLocalSocket> m_conversationSocket;
++        QHash<QLocalSocket *, quint32> m_seenAttempts;
++        void finishConversation(quint32 result);
+         Auth *m_auth { nullptr };
+         DisplayServer *m_displayServer { nullptr };
+         Seat *m_seat { nullptr };
+diff --git a/src/daemon/SocketServer.cpp b/src/daemon/SocketServer.cpp
+index 488f9a5..f31deea 100644
+--- a/src/daemon/SocketServer.cpp
++++ b/src/daemon/SocketServer.cpp
+@@ -90,6 +90,19 @@ namespace SDDM {
+         qDebug() << "Socket server stopped.";
+     }
+ 
++    void SocketServer::conversationAuthorized(QLocalSocket *socket, quint32 attempt) {
++        if (socket) SocketWriter(socket) << quint32(DaemonMessages::ConversationAuthorized) << attempt;
++    }
++    void SocketServer::conversationPrompt(QLocalSocket *socket, quint32 attempt, quint32 prompt, const QString &message, bool hidden) {
++        if (socket) SocketWriter(socket) << quint32(DaemonMessages::ConversationPrompt) << attempt << prompt << message << quint32(hidden);
++    }
++    void SocketServer::conversationMessage(QLocalSocket *socket, quint32 attempt, const QString &message, bool error) {
++        if (socket) SocketWriter(socket) << quint32(DaemonMessages::ConversationMessage) << attempt << message << quint32(error);
++    }
++    void SocketServer::conversationFinished(QLocalSocket *socket, quint32 attempt, quint32 result) {
++        if (socket) SocketWriter(socket) << quint32(DaemonMessages::ConversationFinished) << attempt << result;
++    }
++
+     void SocketServer::newConnection() {
+         // get pending connection
+         QLocalSocket *socket = m_server->nextPendingConnection();
+@@ -112,12 +125,16 @@ namespace SDDM {
+         // Qt's QLocalSocket::readyRead is not designed to be called at every socket.write(), 
+         // so we need to use a loop to read all the signals.
+         while(socket->bytesAvailable()) {
++            if (socket->bytesAvailable() < 4) return;
++            input.startTransaction();
+             // read message
+             quint32 message;
+             input >> message;
+ 
+             switch (GreeterMessages(message)) {
+                 case GreeterMessages::Connect: {
++                    if (!input.commitTransaction()) return;
++                    SocketWriter(socket) << quint32(DaemonMessages::ConversationVersion) << quint32(1);
+                     // log message
+                     qDebug() << "Message received from greeter: Connect";
+ 
+@@ -139,12 +156,37 @@ namespace SDDM {
+                     QString user, password, filename;
+                     Session session;
+                     input >> user >> password >> session;
++                    if (!input.commitTransaction()) return;
+ 
+                     // emit signal
+                     emit login(socket, user, password, session);
+                 }
+                 break;
++                case GreeterMessages::BeginConversation: {
++                    quint32 attempt = 0, recovery = 0; QString user; Session session;
++                    input >> attempt >> user >> session >> recovery;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok && recovery <= 1)
++                        emit conversationBegin(socket, attempt, user, session, recovery == 1);
++                    break;
++                }
++                case GreeterMessages::ConversationResponse: {
++                    quint32 attempt = 0, prompt = 0; QString response;
++                    input >> attempt >> prompt >> response;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok && response.size() <= 4096)
++                        emit conversationResponse(socket, attempt, prompt, response);
++                    response.fill(QChar(0));
++                    break;
++                }
++                case GreeterMessages::CancelConversation: {
++                    quint32 attempt = 0; input >> attempt;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok) emit conversationCancel(socket, attempt);
++                    break;
++                }
+                 case GreeterMessages::PowerOff: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from greeter: PowerOff";
+ 
+@@ -153,6 +195,7 @@ namespace SDDM {
+                 }
+                 break;
+                 case GreeterMessages::Reboot: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from greeter: Reboot";
+ 
+@@ -161,6 +204,7 @@ namespace SDDM {
+                 }
+                 break;
+                 case GreeterMessages::Suspend: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from greeter: Suspend";
+ 
+@@ -169,6 +213,7 @@ namespace SDDM {
+                 }
+                 break;
+                 case GreeterMessages::Hibernate: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from greeter: Hibernate";
+ 
+@@ -177,6 +222,7 @@ namespace SDDM {
+                 }
+                 break;
+                 case GreeterMessages::HybridSleep: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from greeter: HybridSleep";
+                     // hybrid sleep
+@@ -185,7 +231,10 @@ namespace SDDM {
+                 break;
+                 default: {
+                     // log message
+-                    qWarning() << "Unknown message" << message;
++                    input.abortTransaction();
++                    qWarning() << "Unknown socket message" << message;
++                    socket->disconnectFromServer();
++                    return;
+                 }
+             }
+         }
+diff --git a/src/daemon/SocketServer.h b/src/daemon/SocketServer.h
+index 0552e01..97c9625 100644
+--- a/src/daemon/SocketServer.h
++++ b/src/daemon/SocketServer.h
+@@ -47,6 +47,10 @@ namespace SDDM {
+ 
+     public slots:
+         void informationMessage(QLocalSocket *socket, const QString &message);
++        void conversationAuthorized(QLocalSocket *socket, quint32 attempt);
++        void conversationPrompt(QLocalSocket *socket, quint32 attempt, quint32 prompt, const QString &message, bool hidden);
++        void conversationMessage(QLocalSocket *socket, quint32 attempt, const QString &message, bool error);
++        void conversationFinished(QLocalSocket *socket, quint32 attempt, quint32 result);
+         void loginFailed(QLocalSocket *socket);
+         void loginSucceeded(QLocalSocket *socket);
+ 
+@@ -54,6 +58,9 @@ namespace SDDM {
+         void login(QLocalSocket *socket,
+                    const QString &user, const QString &password,
+                    const Session &session);
++        void conversationBegin(QLocalSocket *socket, quint32 attempt, const QString &user, const Session &session, bool recovery);
++        void conversationResponse(QLocalSocket *socket, quint32 attempt, quint32 prompt, const QString &response);
++        void conversationCancel(QLocalSocket *socket, quint32 attempt);
+         void connected();
+ 
+     private:
+diff --git a/src/greeter/GreeterProxy.cpp b/src/greeter/GreeterProxy.cpp
+index d9a8e68..d1ebec7 100644
+--- a/src/greeter/GreeterProxy.cpp
++++ b/src/greeter/GreeterProxy.cpp
+@@ -33,6 +33,8 @@ namespace SDDM {
+         SessionModel *sessionModel { nullptr };
+         QLocalSocket *socket { nullptr };
+         QString hostName;
++        quint32 conversationVersion {0};
++        quint32 nextConversation {0};
+         bool canPowerOff { false };
+         bool canReboot { false };
+         bool canSuspend { false };
+@@ -127,6 +129,27 @@ namespace SDDM {
+         SocketWriter(d->socket) << quint32(GreeterMessages::Login) << user << password << session;
+     }
+ 
++    quint32 GreeterProxy::conversationVersion() const { return d->conversationVersion; }
++    quint32 GreeterProxy::beginConversation(const QString &user, int sessionIndex, bool recovery) {
++        if (d->conversationVersion != 1 || !d->sessionModel || user.isEmpty() || user.size() > 256
++            || user.startsWith(QLatin1Char('-')) || user.contains(QChar(0)) || d->nextConversation == 0xffffffffu) return 0;
++        const QModelIndex index = d->sessionModel->index(sessionIndex, 0);
++        if (!index.isValid() && !recovery) return 0;
++        const auto type = static_cast<Session::Type>(d->sessionModel->data(index, SessionModel::TypeRole).toInt());
++        const auto name = d->sessionModel->data(index, SessionModel::FileRole).toString();
++        const quint32 attempt = ++d->nextConversation;
++        SocketWriter(d->socket) << quint32(GreeterMessages::BeginConversation) << attempt << user << Session(type, name) << quint32(recovery);
++        return attempt;
++    }
++    void GreeterProxy::respondConversation(quint32 attempt, quint32 prompt, const QString &response) {
++        if (d->conversationVersion == 1 && attempt && prompt && response.size() <= 4096)
++            SocketWriter(d->socket) << quint32(GreeterMessages::ConversationResponse) << attempt << prompt << response;
++    }
++    void GreeterProxy::cancelConversation(quint32 attempt) {
++        if (d->conversationVersion == 1 && attempt)
++            SocketWriter(d->socket) << quint32(GreeterMessages::CancelConversation) << attempt;
++    }
++
+     void GreeterProxy::connected() {
+         // log connection
+         qDebug() << "Connected to the daemon.";
+@@ -136,6 +159,8 @@ namespace SDDM {
+     }
+ 
+     void GreeterProxy::disconnected() {
++        d->conversationVersion = 0;
++        emit conversationVersionChanged();
+         // log disconnection
+         qDebug() << "Disconnected from the daemon.";
+ 
+@@ -151,6 +176,8 @@ namespace SDDM {
+         QDataStream input(d->socket);
+ 
+         while (input.device()->bytesAvailable()) {
++            if (d->socket->bytesAvailable() < 4) return;
++            input.startTransaction();
+             // read message
+             quint32 message;
+             input >> message;
+@@ -163,6 +190,7 @@ namespace SDDM {
+                     // read capabilities
+                     quint32 capabilities;
+                     input >> capabilities;
++                    if (!input.commitTransaction()) return;
+ 
+                     // parse capabilities
+                     d->canPowerOff = capabilities & Capability::PowerOff;
+@@ -184,13 +212,48 @@ namespace SDDM {
+                     qDebug() << "Message received from daemon: HostName";
+ 
+                     // read host name
+-                    input >> d->hostName;
++                    QString hostName;
++                    input >> hostName;
++                    if (!input.commitTransaction()) return;
++                    d->hostName = hostName;
+ 
+                     // emit signal
+                     emit hostNameChanged(d->hostName);
+                 }
+                 break;
++                case DaemonMessages::ConversationVersion: {
++                    quint32 version = 0; input >> version;
++                    if (!input.commitTransaction()) return;
++                    d->conversationVersion = version; emit conversationVersionChanged(); break;
++                }
++                case DaemonMessages::ConversationAuthorized: {
++                    quint32 attempt = 0; input >> attempt;
++                    if (!input.commitTransaction()) return;
++                    emit conversationAuthorized(attempt);
++                    break;
++                }
++                case DaemonMessages::ConversationPrompt: {
++                    quint32 attempt = 0, prompt = 0, hidden = 0; QString text;
++                    input >> attempt >> prompt >> text >> hidden;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok && hidden <= 1) emit conversationPrompt(attempt, prompt, text, hidden == 1);
++                    break;
++                }
++                case DaemonMessages::ConversationMessage: {
++                    quint32 attempt = 0, error = 0; QString text;
++                    input >> attempt >> text >> error;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok && error <= 1) emit conversationMessage(attempt, text, error == 1);
++                    break;
++                }
++                case DaemonMessages::ConversationFinished: {
++                    quint32 attempt = 0, result = 0; input >> attempt >> result;
++                    if (!input.commitTransaction()) return;
++                    if (input.status() == QDataStream::Ok) emit conversationFinished(attempt, result);
++                    break;
++                }
+                 case DaemonMessages::LoginSucceeded: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from daemon: LoginSucceeded";
+ 
+@@ -199,6 +262,7 @@ namespace SDDM {
+                 }
+                 break;
+                 case DaemonMessages::LoginFailed: {
++                    if (!input.commitTransaction()) return;
+                     // log message
+                     qDebug() << "Message received from daemon: LoginFailed";
+ 
+@@ -209,8 +273,7 @@ namespace SDDM {
+                 case DaemonMessages::InformationMessage: {
+                     QString message;
+                     input >> message;
+-
+-                    qDebug() << "Information Message received from daemon: " << message;
++                    if (!input.commitTransaction()) return;
+                     emit informationMessage(message);
+                 }
+                 break;
+diff --git a/src/greeter/GreeterProxy.h b/src/greeter/GreeterProxy.h
+index 5ccdbb2..29c8561 100644
+--- a/src/greeter/GreeterProxy.h
++++ b/src/greeter/GreeterProxy.h
+@@ -54,6 +54,8 @@ namespace SDDM {
+         bool isConnected() const;
+ 
+         void setSessionModel(SessionModel *model);
++        Q_PROPERTY(quint32 conversationVersion READ conversationVersion NOTIFY conversationVersionChanged)
++        quint32 conversationVersion() const;
+ 
+     public slots:
+         void powerOff();
+@@ -63,6 +65,9 @@ namespace SDDM {
+         void hybridSleep();
+ 
+         void login(const QString &user, const QString &password, const int sessionIndex) const;
++        quint32 beginConversation(const QString &user, int sessionIndex, bool recovery);
++        void respondConversation(quint32 attempt, quint32 prompt, const QString &response);
++        void cancelConversation(quint32 attempt);
+ 
+     private slots:
+         void connected();
+@@ -71,6 +76,11 @@ namespace SDDM {
+         void error();
+ 
+     signals:
++        void conversationVersionChanged();
++        void conversationAuthorized(quint32 attempt);
++        void conversationPrompt(quint32 attempt, quint32 prompt, const QString &message, bool hidden);
++        void conversationMessage(quint32 attempt, const QString &message, bool error);
++        void conversationFinished(quint32 attempt, quint32 result);
+         void informationMessage(const QString &message);
+         void hostNameChanged(const QString &hostName);
+         void canPowerOffChanged(bool canPowerOff);
+diff --git a/src/helper/Backend.h b/src/helper/Backend.h
+index 915d09c..8104244 100644
+--- a/src/helper/Backend.h
++++ b/src/helper/Backend.h
+@@ -42,6 +42,7 @@ namespace SDDM {
+     public slots:
+         virtual bool start(const QString &user = QString()) = 0;
+         virtual bool authenticate() = 0;
++        virtual bool changePassword() { return false; }
+         virtual bool openSession();
+         virtual bool closeSession();
+ 
+diff --git a/src/helper/HelperApp.cpp b/src/helper/HelperApp.cpp
+index 32da42d..bbed92e 100644
+--- a/src/helper/HelperApp.cpp
++++ b/src/helper/HelperApp.cpp
+@@ -62,6 +62,12 @@ namespace SDDM {
+ 
+     void HelperApp::setUp() {
+         const QStringList args = QCoreApplication::arguments();
++        m_pinRecovery = args.contains(QStringLiteral("--change-pin"));
++        if (m_pinRecovery && (args.contains(QStringLiteral("--start")) || args.contains(QStringLiteral("--autologin"))
++            || args.contains(QStringLiteral("--greeter")) || args.contains(QStringLiteral("--display-server")))) {
++            exit(Auth::HELPER_OTHER_ERROR);
++            return;
++        }
+         QString server;
+         int pos;
+ 
+@@ -137,6 +143,16 @@ namespace SDDM {
+         if (str.status() != QDataStream::Ok)
+             qCritical() << "Couldn't write initial message:" << str.status();
+ 
++        if (m_pinRecovery) {
++            const bool success = m_backend->start(m_user) && m_backend->changePassword();
++            SafeDataStream result(m_socket);
++            result << Msg::TOKEN_CHANGED << success;
++            result.send();
++            m_socket->waitForBytesWritten(1000);
++            exit(success ? Auth::HELPER_SUCCESS : Auth::HELPER_AUTH_ERROR);
++            return;
++        }
++
+         if (!m_backend->start(m_user)) {
+             authenticated(QString());
+ 
+@@ -166,6 +182,10 @@ namespace SDDM {
+ 
+         m_user = m_backend->userName();
+         QProcessEnvironment env = authenticated(m_user);
++        if (!m_sessionAuthorized) {
++            exit(Auth::HELPER_AUTH_ERROR);
++            return;
++        }
+ 
+         if (!m_session->path().isEmpty()) {
+             env.insert(m_session->processEnvironment());
+@@ -236,7 +256,8 @@ namespace SDDM {
+             return env;
+         str.receive();
+         str >> m >> env >> m_cookie;
+-        if (m != AUTHENTICATED) {
++        m_sessionAuthorized = str.status() == QDataStream::Ok && m == AUTHENTICATED;
++        if (!m_sessionAuthorized) {
+             env = QProcessEnvironment();
+             m_cookie = {};
+             qCritical() << "Received a wrong opcode instead of AUTHENTICATED:" << m;
+diff --git a/src/helper/HelperApp.h b/src/helper/HelperApp.h
+index 64ea0e1..b1e74eb 100644
+--- a/src/helper/HelperApp.h
++++ b/src/helper/HelperApp.h
+@@ -40,6 +40,7 @@ namespace SDDM {
+ 
+         UserSession *session();
+         const QString &user() const;
++        bool pinRecovery() const { return m_pinRecovery; }
+         const QByteArray &cookie() const;
+ 
+     public slots:
+@@ -62,6 +63,8 @@ namespace SDDM {
+         UserSession *m_session { nullptr };
+         QLocalSocket *m_socket { nullptr };
+         QString m_user { };
++        bool m_pinRecovery { false };
++        bool m_sessionAuthorized { false };
+         // TODO: get rid of this in a nice clean way along the way with moving to user session X server
+         QByteArray m_cookie { };
+ 
+diff --git a/src/helper/backend/PamBackend.cpp b/src/helper/backend/PamBackend.cpp
+index 8ffa24a..5a7d160 100644
+--- a/src/helper/backend/PamBackend.cpp
++++ b/src/helper/backend/PamBackend.cpp
+@@ -32,185 +32,12 @@
+ #include <stdlib.h>
+ 
+ namespace SDDM {
+-    static Request loginRequest {
+-        {   { AuthPrompt::LOGIN_USER, QStringLiteral("login:"), false },
+-            { AuthPrompt::LOGIN_PASSWORD, QStringLiteral("Password: "), true }
+-        }
+-    };
+-
+-    static Request changePassRequest {
+-        {   { AuthPrompt::CHANGE_CURRENT, QStringLiteral("(current) UNIX password: "), true },
+-            { AuthPrompt::CHANGE_NEW, QStringLiteral("New password: "), true },
+-            { AuthPrompt::CHANGE_REPEAT, QStringLiteral("Retype new password: "), true }
+-        }
+-    };
+-
+-    static Request changePassNoOldRequest {
+-        {   { AuthPrompt::CHANGE_NEW, QStringLiteral("New password: "), true },
+-            { AuthPrompt::CHANGE_REPEAT, QStringLiteral("Retype new password: "), true }
+-        }
+-    };
+-
+-    static Request invalidRequest { {} };
+-
+-    static Prompt invalidPrompt {};
+-
+-    PamData::PamData() { }
+-
+-    AuthPrompt::Type PamData::detectPrompt(const struct pam_message* msg) const {
+-        if (msg->msg_style == PAM_PROMPT_ECHO_OFF) {
+-            QString message = QString::fromLocal8Bit(msg->msg);
+-            if ((QRegularExpression(QStringLiteral("\\bpassword\\b"), QRegularExpression::CaseInsensitiveOption)).match(message).hasMatch()) {
+-                if ((QRegularExpression(QStringLiteral("\\b(re-?(enter|type)|again|confirm|repeat)\\b"), QRegularExpression::CaseInsensitiveOption)).match(message).hasMatch()) {
+-                    return AuthPrompt::CHANGE_REPEAT;
+-                }
+-                else if ((QRegularExpression(QStringLiteral("\\bnew\\b"), QRegularExpression::CaseInsensitiveOption)).match(message).hasMatch()) {
+-                    return AuthPrompt::CHANGE_NEW;
+-                }
+-                else if ((QRegularExpression(QStringLiteral("\\b(old|current)\\b"), QRegularExpression::CaseInsensitiveOption)).match(message).hasMatch()) {
+-                    return AuthPrompt::CHANGE_CURRENT;
+-                }
+-                else {
+-                    return AuthPrompt::LOGIN_PASSWORD;
+-                }
+-            }
+-        }
+-        else {
+-            return AuthPrompt::LOGIN_USER;
+-        }
+-
+-        return AuthPrompt::UNKNOWN;
+-    }
+-
+-    const Prompt& PamData::findPrompt(const struct pam_message* msg) const {
+-        AuthPrompt::Type type = detectPrompt(msg);
+-
+-        for (const Prompt &p : m_currentRequest.prompts) {
+-            if (type == p.type && p.message == QString::fromLocal8Bit(msg->msg))
+-                return p;
+-        }
+-
+-        return invalidPrompt;
+-    }
+-
+-    Prompt& PamData::findPrompt(const struct pam_message* msg) {
+-        AuthPrompt::Type type = detectPrompt(msg);
+-
+-        for (Prompt &p : m_currentRequest.prompts) {
+-            if (type == AuthPrompt::UNKNOWN && QString::fromLocal8Bit(msg->msg) == p.message)
+-                return p;
+-            if (type == p.type)
+-                return p;
+-        }
+-
+-        return invalidPrompt;
+-    }
+-
+-    /*
+-    * Expects an empty prompt list if the previous request has been processed
+-    */
+-    bool PamData::insertPrompt(const struct pam_message* msg, bool predict) {
+-        Prompt &p = findPrompt(msg);
+-
+-        // first, check if we already have stored this propmpt
+-        if (p.valid()) {
+-            // we have a response already - do nothing
+-            if (m_sent)
+-                return false;
+-            // we don't have a response yet - replace the message and prepare to send it
+-            p.message = QString::fromLocal8Bit(msg->msg);
+-            return true;
+-        }
+-        // this prompt is not stored but we have some prompts
+-        else if (m_currentRequest.prompts.length() != 0) {
+-            // check if we have already sent this - if we did, get rid of the answers
+-            if (m_sent) {
+-                m_currentRequest.clear();
+-                m_sent = false;
+-            }
+-        }
+-
+-        // we'll predict what will come next
+-        if (predict) {
+-            AuthPrompt::Type type = detectPrompt(msg);
+-            switch (type) {
+-                case AuthPrompt::LOGIN_USER:
+-                    m_currentRequest = Request(loginRequest);
+-                    return true;
+-                case AuthPrompt::CHANGE_CURRENT:
+-                    m_currentRequest = Request(changePassRequest);
+-                    return true;
+-                case AuthPrompt::CHANGE_NEW:
+-                    m_currentRequest = Request(changePassNoOldRequest);
+-                    return true;
+-                default:
+-                    break;
+-            }
+-        }
+-
+-        // or just add whatever comes exactly as it comes
+-        m_currentRequest.prompts.append(Prompt(detectPrompt(msg), QString::fromLocal8Bit(msg->msg), msg->msg_style == PAM_PROMPT_ECHO_OFF));
+-
+-        return true;
+-    }
+-
+-    Auth::Info PamData::handleInfo(const struct pam_message* msg, bool predict) {
+-        if ((QRegularExpression(QStringLiteral("^Changing password for [^ ]+$"))).match(QString::fromLocal8Bit(msg->msg)).hasMatch()) {
+-            if (predict)
+-                m_currentRequest = Request(changePassRequest);
+-            return Auth::INFO_PASS_CHANGE_REQUIRED;
+-        }
+-        return Auth::INFO_UNKNOWN;
+-    }
+-
+-    /*
+-    * Destroys the prompt with that response
+-    */
+-    QByteArray PamData::getResponse(const struct pam_message* msg) {
+-        QByteArray response = findPrompt(msg).response;
+-        m_currentRequest.prompts.removeOne(findPrompt(msg));
+-        if (m_currentRequest.prompts.length() == 0)
+-            m_sent = false;
+-        return response;
+-    }
+-
+-    const Request& PamData::getRequest() const {
+-        if (!m_sent)
+-            return m_currentRequest;
+-        else
+-            return invalidRequest;
+-    }
+-
+-    void PamData::completeRequest(const Request& request) {
+-        if (request.prompts.length() != m_currentRequest.prompts.length()) {
+-            qWarning() << "[PAM] Different request/response list length, ignoring";
+-            return;
+-        }
+-
+-        for (int i = 0; i < request.prompts.length(); i++) {
+-            if (request.prompts[i].type != m_currentRequest.prompts[i].type
+-                || request.prompts[i].message != m_currentRequest.prompts[i].message
+-                || request.prompts[i].hidden != m_currentRequest.prompts[i].hidden) {
+-                qWarning() << "[PAM] Order or type of the messages doesn't match, ignoring";
+-                return;
+-            }
+-        }
+-
+-        m_currentRequest = request;
+-        m_sent = true;
+-    }
+-
+-
+-
+-
+     PamBackend::PamBackend(HelperApp *parent)
+             : Backend(parent)
+-            , m_data(new PamData())
+             , m_pam(new PamHandle(this)) {
+     }
+ 
+     PamBackend::~PamBackend() {
+-        delete m_data;
+         delete m_pam;
+     }
+ 
+@@ -219,7 +46,9 @@ namespace SDDM {
+ 
+         QString service = QStringLiteral("sddm");
+ 
+-        if (user == QStringLiteral("sddm") && m_greeter)
++        if (m_app->pinRecovery())
++            service = QStringLiteral("sddm-himmelblau-pin-change");
++        else if (user == QStringLiteral("sddm") && m_greeter)
+             service = QStringLiteral("sddm-greeter");
+         else if (m_autologin)
+             service = QStringLiteral("sddm-autologin");
+@@ -231,6 +60,10 @@ namespace SDDM {
+         return result;
+     }
+ 
++    bool PamBackend::changePassword() {
++        return m_app->pinRecovery() && m_pam->chAuthTok(0);
++    }
++
+     bool PamBackend::authenticate() {
+         if (!m_pam->authenticate()) {
+             m_app->error(m_pam->errorString(), Auth::ERROR_AUTHENTICATION);
+@@ -296,67 +129,36 @@ namespace SDDM {
+     int PamBackend::converse(int n, const struct pam_message **msg, struct pam_response **resp) {
+         qDebug() << "[PAM] Conversation with" << n << "messages";
+ 
+-        bool newRequest = false;
+-
+-        if (n <= 0 || n > PAM_MAX_NUM_MSG)
+-            return PAM_CONV_ERR;
+-
+-        for (int i = 0; i < n; i++) {
+-            switch(msg[i]->msg_style) {
+-                case PAM_PROMPT_ECHO_OFF:
+-                case PAM_PROMPT_ECHO_ON:
+-                    newRequest = m_data->insertPrompt(msg[i], n == 1);
+-                    break;
+-                case PAM_ERROR_MSG:
+-                    m_app->error(QString::fromLocal8Bit(msg[i]->msg), Auth::ERROR_AUTHENTICATION);
+-                    break;
+-                case PAM_TEXT_INFO:
+-                    // if there's only the info message, let's predict the prompts too
+-                    m_app->info(QString::fromLocal8Bit(msg[i]->msg), m_data->handleInfo(msg[i], n == 1));
+-                    break;
+-                default:
+-                    break;
+-            }
+-        }
+-
+-        if (newRequest) {
+-            Request sent = m_data->getRequest();
+-            Request received;
+-
+-            if (sent.valid()) {
+-                received = m_app->request(sent);
+-
+-                if (!received.valid())
+-                    return PAM_CONV_ERR;
+-
+-                m_data->completeRequest(received);
+-            }
++        if (n <= 0 || n > PAM_MAX_NUM_MSG || !resp || !msg) return PAM_CONV_ERR;
++        *resp = static_cast<pam_response *>(calloc(n, sizeof(pam_response)));
++        if (!*resp) return PAM_BUF_ERR;
++        for (int i = 0; i < n; ++i) {
++            if (!msg[i] || !msg[i]->msg || strlen(msg[i]->msg) > 8192) goto failed;
++            if (msg[i]->msg_style == PAM_TEXT_INFO) {
++                m_app->info(QString::fromLocal8Bit(msg[i]->msg), Auth::INFO_NONE);
++            } else if (msg[i]->msg_style == PAM_ERROR_MSG) {
++                m_app->error(QString::fromLocal8Bit(msg[i]->msg), Auth::ERROR_AUTHENTICATION);
++            } else if (msg[i]->msg_style == PAM_PROMPT_ECHO_OFF || msg[i]->msg_style == PAM_PROMPT_ECHO_ON) {
++                Request sent({Prompt(AuthPrompt::UNKNOWN, QString::fromLocal8Bit(msg[i]->msg), msg[i]->msg_style == PAM_PROMPT_ECHO_OFF)});
++                Request received = m_app->request(sent);
++                if (!received.valid() || received.prompts.length() != 1
++                    || received.prompts[0].message != sent.prompts[0].message
++                    || received.prompts[0].hidden != sent.prompts[0].hidden
++                    || received.prompts[0].response.length() > 16384) goto failed;
++                const QByteArray &response = received.prompts[0].response;
++                (*resp)[i].resp = static_cast<char *>(malloc(response.length() + 1));
++                if (!(*resp)[i].resp) goto failed;
++                memcpy((*resp)[i].resp, response.constData(), response.length());
++                (*resp)[i].resp[response.length()] = '\0';
++            } else goto failed;
+         }
+-
+-        *resp = (struct pam_response *) calloc(n, sizeof(struct pam_response));
+-        if (!*resp) {
+-            return PAM_BUF_ERR;
+-        }
+-
+-        for (int i = 0; i < n; i++) {
+-            QByteArray response = m_data->getResponse(msg[i]);
+-
+-            resp[i]->resp = (char *) malloc(response.length() + 1);
+-            // on error, get rid of everything
+-            if (!resp[i]->resp) {
+-                for (int j = 0; j < i; j++) {
+-                    free(resp[j]->resp);
+-                    resp[j]->resp = nullptr;
+-                }
+-                free(*resp);
+-                *resp = nullptr;
+-                return PAM_BUF_ERR;
+-            }
+-
+-            memcpy(resp[i]->resp, response.constData(), response.length());
+-            resp[i]->resp[response.length()] = '\0';
+-        }
+-
+         return PAM_SUCCESS;
++failed:
++        for (int i = 0; i < n; ++i) if ((*resp)[i].resp) {
++            memset((*resp)[i].resp, 0, strlen((*resp)[i].resp));
++            free((*resp)[i].resp);
++        }
++        free(*resp); *resp = nullptr;
++        return PAM_CONV_ERR;
+     }
+ }
+diff --git a/src/helper/backend/PamBackend.h b/src/helper/backend/PamBackend.h
+index 4aba328..630c82b 100644
+--- a/src/helper/backend/PamBackend.h
++++ b/src/helper/backend/PamBackend.h
+@@ -32,28 +32,6 @@
+ namespace SDDM {
+     class PamHandle;
+     class PamBackend;
+-    class PamData {
+-    public:
+-        PamData();
+-
+-        bool insertPrompt(const struct pam_message *msg, bool predict = true);
+-        Auth::Info handleInfo(const struct pam_message *msg, bool predict);
+-
+-        const Request& getRequest() const;
+-        void completeRequest(const Request& request);
+-
+-        QByteArray getResponse(const struct pam_message *msg);
+-
+-    private:
+-        AuthPrompt::Type detectPrompt(const struct pam_message *msg) const;
+-
+-        const Prompt& findPrompt(const struct pam_message *msg) const;
+-        Prompt& findPrompt(const struct pam_message *msg);
+-
+-        bool m_sent { false };
+-        Request m_currentRequest { };
+-    };
+-
+     class PamBackend : public Backend
+     {
+         Q_OBJECT
+@@ -65,13 +43,13 @@ namespace SDDM {
+     public slots:
+         virtual bool start(const QString &user = QString());
+         virtual bool authenticate();
++        bool changePassword() override;
+         virtual bool openSession();
+         virtual bool closeSession();
+ 
+         virtual QString userName();
+ 
+     private:
+-        PamData *m_data { nullptr };
+         PamHandle *m_pam { nullptr };
+     };
+ }

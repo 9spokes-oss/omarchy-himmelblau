@@ -10,11 +10,16 @@ The `0.1.0-3` package has been built and installed in that guest. System setup a
 
 Version `0.2.0-1` adds interactive lock-screen PAM conversations and an unprivileged PIN-change helper. It was built and installed in the same guest without ending the graphical session or its existing terminal. Thirty Python tests and the conversation regression passed independently. Real on-screen authentication and PIN-change cancellation both left the desktop securely locked; a real-libpam abort at the first PIN prompt also passed. The user completed the prompted PIN-recovery flow, confirmed that it stayed locked after reporting success, and then unlocked the same desktop with the new PIN. Independent metadata checks observed recovery success while securely locked, followed by successful unlock, with the original session, compositor and terminal process IDs and start times unchanged. Normal idle locking was restored. This validates the exercised account/tenant flow, not every possible MFA method or policy.
 
+Version `0.3.0-1` adds a coordinated native SDDM build and conversation theme for login and work-PIN recovery. Independent Qt6/Qt5 builds, 38 Python tests, both JavaScript conversation suites and two native test executables passed. VM acceptance covered local recovery login, current work-PIN login, and cancellation of login and PIN recovery. The user completed the SDDM PIN-recovery/MFA flow; metadata confirmed that success left the same greeter running without a work desktop. A separate login with the new PIN and subsequent screen unlock both worked. Root/user checks passed, and the account's identity, home mapping and existing authentication policy were unchanged. This validates the exercised account/tenant flow. See [SDDM integration and validation](docs/sddm.md).
+
 The integration package itself does not join a device or configure authentication on installation. Installing its Himmelblau dependency can change local authentication configuration, as described below. Setup, login and optional user-level activation are separate actions. The first successful Himmelblau authentication can create an Entra device object. Review tenant device-registration permissions and Conditional Access before testing, and record the object for later lifecycle management.
+
+Version `0.3.0` requires `sddm-himmelblau=0.21.0-1`. This separate package replaces stock SDDM binaries and includes the fixed PIN-change PAM service. It is a reviewed release backport, not an upstream SDDM release or a theme-only extension. The companion selects its copied theme through explicit setup/repair; display-manager restart is an operator action.
 
 ## Prerequisites
 
 - An Omarchy installation with a local recovery account and console access.
+- The matching native SDDM package for version `0.3.0`, built from `packaging/sddm-himmelblau` with the dependencies declared in that recipe. Keep the previous SDDM and companion packages for coordinated rollback.
 - Himmelblau installed separately. Its [upstream Arch build recipe](https://github.com/himmelblau-idm/himmelblau/blob/4.0.8/platform/arch/PKGBUILD) builds from the 4.0.8 source checkout; the upstream package is not distributed here.
 - An Entra account and tenant policy that permit the intended authentication and device enrollment flow. Do not change tenant policy just to make a test pass.
 
@@ -24,13 +29,14 @@ Himmelblau's main configuration is read by its daemon and PAM module; do not sto
 
 ## Operations
 
-Build the package as an unprivileged user from a checkout with the required Arch packaging tools installed:
+Build the native SDDM and companion packages as an unprivileged user from a reviewed checkout with the required Arch build dependencies installed:
 
 ```sh
-(cd packaging && makepkg)
+(cd packaging/sddm-himmelblau && makepkg)
+(cd packaging && makepkg --nodeps)
 ```
 
-Review the resulting package and dependency transaction before installing it with `pacman`. Installing or upgrading the separate Himmelblau dependency can run its own hooks.
+The companion's `--nodeps` allows building before the matching native SDDM package is installed; it does not supply missing build prerequisites. Review both resulting packages and install them together in one `pacman` transaction. For a display-manager replacement, use an independent recovery console and the transition/rollback procedure in [the SDDM guide](docs/sddm.md). Installing or upgrading the separate Himmelblau dependency can run its own hooks.
 
 Run the local checks from the checkout with:
 
@@ -82,7 +88,7 @@ The upgrade checks the entire clone and upstream snapshot, stages the replacemen
 
 ## Security and maintenance
 
-Quickshell's lock PAM interface performs authentication without the PAM account phase. Himmelblau's account-phase allowlist therefore cannot be assumed to run at screen unlock. A lock session belongs to the already logged-in user; test both local recovery and work PIN unlock after changes. Lock-screen recovery does not add multi-step conversation support to the separate SDDM login theme.
+Quickshell's lock PAM interface performs authentication without the PAM account phase. Himmelblau's account-phase allowlist therefore cannot be assumed to run at screen unlock. A lock session belongs to the already logged-in user; test both local recovery and work PIN unlock after changes. Normal SDDM login retains its separate PAM account and session checks. SDDM PIN-change success requires a separate normal login and cannot itself create a session.
 
 The integration derives its dedicated `/etc/pam.d/omarchy-himmelblau-lock-password` service from a supported stock lock PAM configuration. It leaves `/etc/pam.d/omarchy-lock-password` untouched; the guarded user clone uses the dedicated service. An existing modified stock service is refused for manual review. Checks verify both the stock source and the integration's managed files; repair refuses unrecognized drift.
 
@@ -90,8 +96,8 @@ The Omarchy lock clone is user-owned and does not automatically inherit upstream
 
 An optional menu example is installed at `/usr/share/doc/omarchy-himmelblau/menu-extension.jsonc`. Add its entries to the existing user-owned menu JSONC object only after reviewing it; the installer does not modify that file.
 
-An upstream Omarchy contribution could expose a supported authentication-provider and conversation interface, preserve local PAM recovery, and improve SDDM multi-user login. These are potential follow-ups, not features claimed here.
+The native SDDM package is pinned to the reviewed protocol and source. Review upstream security fixes and rebuild the coordinated packages deliberately; do not assume stock SDDM updates will maintain this private protocol. The theme checks the daemon-negotiated protocol capability and fails closed on an incompatible running daemon.
 
 ## Licenses
 
-New project code is available under [MIT](LICENSE). See [third-party notices](THIRD-PARTY-NOTICES.md) for Omarchy attribution. Himmelblau is separately licensed and distributed.
+Companion code and the adapted Omarchy theme are available under [MIT](LICENSE). Native SDDM modifications retain their upstream GPL/LGPL file licenses. See [third-party notices](THIRD-PARTY-NOTICES.md) for attribution and license texts. Himmelblau is separately licensed and distributed.

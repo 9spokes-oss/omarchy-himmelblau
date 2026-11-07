@@ -1,0 +1,323 @@
+--- a/Main.qml
++++ b/Main.qml
+@@ -7,8 +7,21 @@
+   height: 480
+   color: "#1a1b26"
+ 
+-  property string currentUser: userModel.lastUser
++  property string currentUser: username.text.trim()
+   property bool loginFailed: false
++  property int activeAttempt: 0
++  property int activePrompt: 0
++  property int lastPrompt: 0
++  property int lastSentPrompt: 0
++  property bool responseHidden: true
++  property bool recovering: false
++  property bool cancelling: false
++  property bool authorized: false
++  property bool sessionStarted: false
++  property bool noticeError: false
++  property string promptText: ""
++  property var notices: []
++  readonly property bool conversationAvailable: typeof sddm.conversationVersion !== "undefined" && sddm.conversationVersion === 1
+   property int sessionIndex: {
+     for (var i = 0; i < sessionModel.rowCount(); i++) {
+       var name = (sessionModel.data(sessionModel.index(i, 0), Qt.DisplayRole) || "").toString()
+@@ -18,21 +31,111 @@
+     return sessionModel.lastIndex
+   }
+ 
++  function startConversation(recovery) {
++    if (!conversationAvailable || activeAttempt || sessionStarted || currentUser.length === 0) return
++    password.text = ""
++    promptText = ""
++    notices = []
++    noticeError = false
++    loginFailed = false
++    activePrompt = 0
++    lastPrompt = 0
++    lastSentPrompt = 0
++    recovering = recovery
++    cancelling = false
++    authorized = false
++    activeAttempt = sddm.beginConversation(currentUser, sessionIndex, recovery)
++    if (!activeAttempt) { notices = ["Unable to start sign-in. Check the display manager."]; noticeError = true }
++    password.forceActiveFocus()
++  }
++
++  function submitResponse() {
++    if (!activeAttempt) { startConversation(false); return }
++    if (!activePrompt || cancelling || sessionStarted) return
++    var prompt = activePrompt
++    var response = password.text
++    activePrompt = 0
++    lastSentPrompt = prompt
++    password.text = ""
++    promptText = ""
++    sddm.respondConversation(activeAttempt, prompt, response)
++  }
++
++  function cancelConversation() {
++    if (!activeAttempt || cancelling || authorized) return
++    cancelling = true
++    activePrompt = 0
++    password.text = ""
++    promptText = "Cancelling…"
++    sddm.cancelConversation(activeAttempt)
++  }
++
++  function keyAction(event) {
++    if (event.key === Qt.Key_Escape) {
++      cancelConversation()
++      event.accepted = true
++    } else if (event.modifiers & Qt.ControlModifier && event.key === Qt.Key_R) {
++      startConversation(true)
++      event.accepted = true
++    } else return false
++    return true
++  }
++
+   Connections {
+     target: sddm
+-    function onLoginFailed() {
+-      root.loginFailed = true
++    ignoreUnknownSignals: true
++    function onConversationPrompt(attempt, prompt, message, hidden) {
++      if (attempt !== root.activeAttempt || root.cancelling || prompt < root.lastPrompt || prompt <= root.lastSentPrompt) return
++      root.activePrompt = prompt
++      root.lastPrompt = prompt
++      root.responseHidden = hidden
++      root.promptText = message
+       password.text = ""
+-      password.focus = true
+-    }
+-    function onLoginSucceeded() {
+-      root.loginFailed = false
++      password.forceActiveFocus()
++    }
++    function onConversationMessage(attempt, message, error) {
++      if (attempt !== root.activeAttempt || root.cancelling) return
++      var messages = root.notices.slice()
++      if (messages.length === 0 || messages[messages.length - 1] !== message) {
++        if (messages.length < 8) messages.push(message)
++        else messages[7] = message
++        root.notices = messages
++      }
++      root.noticeError = error
++    }
++    function onConversationAuthorized(attempt) {
++      if (attempt !== root.activeAttempt) return
++      root.authorized = true
++      root.cancelling = false
++      root.promptText = "Starting session…"
++    }
++    function onConversationFinished(attempt, result) {
++      if (attempt !== root.activeAttempt) return
++      password.text = ""
++      root.activeAttempt = 0
++      root.activePrompt = 0
++      root.promptText = ""
++      root.cancelling = false
++      root.loginFailed = result === 0
++      root.noticeError = result === 0
++      if (result === 3 && root.recovering) root.notices = ["PIN updated; sign in with the new PIN."]
++      else if (result === 2 && !root.recovering) { root.sessionStarted = true; root.notices = ["Starting session…"] }
++      else if (result === 1) root.notices = [root.recovering ? "PIN change cancelled; it may already have completed. Sign in to check." : "Sign-in cancelled."]
++      else root.notices = [root.recovering ? "PIN change failed; sign in to check or retry." : "Sign-in failed. Try again."]
++    }
++    function onSocketDisconnected() {
++      password.text = ""
++      root.activeAttempt = 0
++      root.activePrompt = 0
++      root.promptText = ""
++      root.notices = ["Display manager disconnected."]
++      root.noticeError = true
+     }
+   }
+ 
+   Column {
+     anchors.centerIn: parent
+-    spacing: 40
++    spacing: 20
+ 
+     Image {
+       id: logo
+@@ -43,6 +146,90 @@
+       anchors.horizontalCenter: parent.horizontalCenter
+     }
+ 
++    Column {
++      anchors.horizontalCenter: parent.horizontalCenter
++      spacing: 8
++
++      Text {
++        text: "Username / UPN"
++        color: "#c0caf5"
++        font.family: "JetBrainsMono Nerd Font"
++        font.pixelSize: 16
++      }
++
++      Rectangle {
++        width: Math.min(520, root.width * 0.8)
++        height: 48
++        color: "#24283b"
++        border.color: username.activeFocus ? "#7aa2f7" : "#565f89"
++        radius: 4
++
++        TextInput {
++          id: username
++          enabled: root.conversationAvailable && root.activeAttempt === 0 && !root.sessionStarted
++          anchors.fill: parent
++          anchors.margins: 12
++          text: userModel.lastUser
++          color: "#c0caf5"
++          font.family: "JetBrainsMono Nerd Font"
++          font.pixelSize: 18
++          verticalAlignment: TextInput.AlignVCenter
++          selectByMouse: true
++          clip: true
++          KeyNavigation.tab: password
++          onTextChanged: {
++            password.text = ""
++            root.loginFailed = false
++          }
++          Keys.onPressed: {
++            if (root.keyAction(event)) return
++            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
++              password.forceActiveFocus()
++              event.accepted = true
++            }
++          }
++        }
++      }
++    }
++
++    Flickable {
++      anchors.horizontalCenter: parent.horizontalCenter
++      width: Math.min(720, root.width * 0.9)
++      height: Math.min(infoText.implicitHeight, root.height * 0.18)
++      contentHeight: infoText.height
++      clip: true
++      Text {
++        id: infoText
++        width: parent.width
++        text: root.conversationAvailable ? root.notices.join("\n\n") : "This theme requires the patched SDDM conversation daemon and greeter."
++        textFormat: Text.PlainText
++        wrapMode: Text.Wrap
++        color: root.noticeError || !root.conversationAvailable ? "#f7768e" : "#c0caf5"
++        font.family: "JetBrainsMono Nerd Font"
++        font.pixelSize: 18
++        horizontalAlignment: Text.AlignHCenter
++      }
++    }
++
++    Flickable {
++      anchors.horizontalCenter: parent.horizontalCenter
++      width: Math.min(720, root.width * 0.9)
++      height: Math.min(promptLabel.implicitHeight, root.height * 0.18)
++      contentHeight: promptLabel.height
++      clip: true
++      Text {
++        id: promptLabel
++        width: parent.width
++        text: root.promptText
++        textFormat: Text.PlainText
++        wrapMode: Text.Wrap
++        color: "#c0caf5"
++        font.family: "JetBrainsMono Nerd Font"
++        font.pixelSize: 20
++        horizontalAlignment: Text.AlignHCenter
++      }
++    }
++
+     Row {
+       anchors.horizontalCenter: parent.horizontalCenter
+       spacing: 15
+@@ -72,7 +259,7 @@
+           spacing: 5
+ 
+           Repeater {
+-            model: Math.min(password.text.length, 21)
++            model: root.responseHidden ? Math.min(password.text.length, 21) : 0
+ 
+             Image {
+               source: "bullet.png"
+@@ -82,28 +269,43 @@
+           }
+         }
+ 
++        Text {
++          anchors.centerIn: parent
++          visible: password.text.length === 0
++          text: root.activePrompt ? (root.responseHidden ? "Type secret response" : "Type response") : root.sessionStarted ? "Starting session…" : root.cancelling ? "Cancelling…" : root.activeAttempt ? "Waiting…" : "Press Enter to sign in"
++          textFormat: Text.PlainText
++          color: "#c0caf5"
++          font.family: "JetBrainsMono Nerd Font"
++          font.pixelSize: 16
++        }
++
+         TextInput {
+           id: password
+           anchors.fill: parent
+           anchors.leftMargin: 20
+           anchors.rightMargin: 20
+           verticalAlignment: TextInput.AlignVCenter
+-          echoMode: TextInput.Password
++          enabled: root.conversationAvailable && !root.sessionStarted
++          readOnly: root.activePrompt === 0 || root.cancelling
++          maximumLength: 4096
++          echoMode: root.responseHidden ? TextInput.Password : TextInput.Normal
+           font.family: "JetBrainsMono Nerd Font"
+           font.pixelSize: 24
+-          font.letterSpacing: 5
++          font.letterSpacing: root.responseHidden ? 5 : 0
+           passwordCharacter: "\u2022"
+-          color: "transparent"
+-          selectionColor: "transparent"
+-          selectedTextColor: "transparent"
++          color: root.responseHidden ? "transparent" : "#c0caf5"
++          selectionColor: root.responseHidden ? "transparent" : "#33467c"
++          selectedTextColor: root.responseHidden ? "transparent" : "#c0caf5"
+           cursorDelegate: Item {}
+           focus: true
++          KeyNavigation.backtab: username
+ 
+           onTextChanged: root.loginFailed = false
+ 
+           Keys.onPressed: {
++            if (root.keyAction(event)) return
+             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+-              sddm.login(root.currentUser, password.text, root.sessionIndex)
++              root.submitResponse()
+               event.accepted = true
+             }
+           }
+@@ -111,6 +313,28 @@
+       }
+     }
+ 
++    Row {
++      anchors.horizontalCenter: parent.horizontalCenter
++      spacing: 36
++      Text {
++        text: "Cancel (Esc)"
++        textFormat: Text.PlainText
++        color: "#c0caf5"
++        font.family: "JetBrainsMono Nerd Font"
++        font.pixelSize: 18
++        visible: root.activeAttempt !== 0 && !root.authorized
++        MouseArea { anchors.fill: parent; enabled: !root.cancelling; onClicked: root.cancelConversation() }
++      }
++      Text {
++        text: "Reset work PIN (Ctrl+R)"
++        textFormat: Text.PlainText
++        color: "#c0caf5"
++        font.family: "JetBrainsMono Nerd Font"
++        font.pixelSize: 18
++        visible: root.activeAttempt === 0 && !root.sessionStarted
++        MouseArea { anchors.fill: parent; enabled: root.conversationAvailable; onClicked: root.startConversation(true) }
++      }
++    }
+   }
+ 
+   Component.onCompleted: password.forceActiveFocus()

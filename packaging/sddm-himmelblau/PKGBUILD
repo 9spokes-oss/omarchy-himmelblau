@@ -1,0 +1,71 @@
+# Experimental native backport on the installed Arch SDDM release.
+# Build/check from the reviewed companion checkout; never run as root.
+pkgname=sddm-himmelblau
+pkgver=0.21.0
+pkgrel=1
+pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
+arch=('x86_64')
+url='https://github.com/9spokes-oss/omarchy-himmelblau'
+license=('GPL-2.0-or-later' 'LGPL-2.1-or-later')
+depends=('bash' 'glibc' 'libgcc' 'libstdc++' 'libxau' 'libxcb' 'pam'
+         'qt6-base' 'qt6-declarative' 'systemd-libs' 'ttf-font' 'xorg-server' 'xorg-xauth'
+         'himmelblau>=4.0.8')
+makedepends=('cmake' 'extra-cmake-modules' 'python-docutils' 'qt5-base'
+             'qt5-declarative' 'qt5-tools' 'qt6-tools')
+checkdepends=('python')
+optdepends=('qt5-declarative: for using Qt5 themes')
+provides=('display-manager' "sddm=$pkgver")
+conflicts=('sddm')
+backup=('usr/share/sddm/scripts/Xsetup' 'usr/share/sddm/scripts/Xstop'
+        'etc/pam.d/sddm' 'etc/pam.d/sddm-autologin' 'etc/pam.d/sddm-greeter'
+        'etc/pam.d/sddm-himmelblau-pin-change')
+source=("sddm-$pkgver.tar.gz::https://codeload.github.com/sddm/sddm/tar.gz/refs/tags/v$pkgver"
+        '0000-arch-cmake4.patch' '0001-native-conversation.patch'
+        'sddm-himmelblau-pin-change.pam' 'LGPL-2.1.txt')
+# Updated by the reviewed patch/provenance export; no SKIP checksums.
+sha256sums=('f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'
+             '278ed4b121e7697b8c1e6a6a5bbb38e76e5246d7e58f26accb5f9ad1bbb7cc6a'
+             'b380097c244d92f89f507934b9cded81801fcea6570813129732e7e482fccaf4'
+             '85e521362821a9440eb891269398e018bcd6c3e8460ee52ff511b2fbfe46850f'
+             'dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551')
+_repo="${OMARCHY_HIMMELBLAU_SRC:-${startdir%/packaging/sddm-himmelblau}}"
+
+prepare() {
+  cd "sddm-$pkgver"
+  patch --batch --fuzz=0 -p1 < "$srcdir/0000-arch-cmake4.patch"
+  patch --batch --fuzz=0 -p1 < "$srcdir/0001-native-conversation.patch"
+}
+
+build() {
+  cmake -B build -S "sddm-$pkgver" \
+    -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBEXECDIR=/usr/lib/sddm \
+    -DBUILD_WITH_QT6=ON -DDBUS_CONFIG_DIR=/usr/share/dbus-1/system.d \
+    -DDBUS_CONFIG_FILENAME=sddm_org.freedesktop.DisplayManager.conf \
+    -DBUILD_MAN_PAGES=ON -DUID_MAX=60513
+  cmake --build build --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+  cmake -B build5 -S "sddm-$pkgver" -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build5/src/greeter --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+  cmake --build build5/components --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-2}"
+}
+
+check() {
+  # Test source lives beside this recipe in the reviewed companion checkout.
+  test -f "$_repo/tests/native-sddm/run.py" || { error 'Build from the full companion checkout to run native proofs'; return 1; }
+  python3 "$_repo/tests/native-sddm/run.py" --source "$srcdir/sddm-$pkgver" \
+    --sddm-build "$srcdir/build" --build-directory "$srcdir/native-proofs"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  DESTDIR="$pkgdir" cmake --install build5/src/greeter
+  DESTDIR="$pkgdir" cmake --install build5/components
+  install -dm755 "$pkgdir/usr/lib/sddm/sddm.conf.d"
+  "$pkgdir/usr/bin/sddm" --example-config > "$pkgdir/usr/lib/sddm/sddm.conf.d/default.conf"
+  sed -r 's|DefaultPath=.*|DefaultPath=/usr/local/sbin:/usr/local/bin:/usr/bin|g' \
+    -i "$pkgdir/usr/lib/sddm/sddm.conf.d/default.conf"
+  sed -e '/^InputMethod/s/qtvirtualkeyboard//' -i "$pkgdir/usr/lib/sddm/sddm.conf.d/default.conf"
+  install -Dm644 "$srcdir/sddm-himmelblau-pin-change.pam" "$pkgdir/etc/pam.d/sddm-himmelblau-pin-change"
+  install -Dm644 "$srcdir/sddm-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/GPL-2.0.txt"
+  install -Dm644 "$srcdir/LGPL-2.1.txt" "$pkgdir/usr/share/licenses/$pkgname/LGPL-2.1.txt"
+  # No install script, service restart, authentication or enrollment action.
+}

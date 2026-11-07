@@ -1,12 +1,12 @@
 # Maintainer: 9Spokes OSS
 pkgname=omarchy-himmelblau
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau installation'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
 license=('MIT')
-depends=('himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
+depends=('sddm-himmelblau=0.21.0-1' 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
 makedepends=('make')
 # Build from a reviewed checkout; no install hooks or network/source substitution.
 source=()
