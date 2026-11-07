@@ -8,7 +8,7 @@ Version `0.4.0` adds explicit local policy opt-in/out. Enrollment, the server's 
 - The device is **Not compliant**. Its Default Device Compliance Policy reports **Has a compliance policy assigned: Not compliant**, **Is active: Compliant**, and **Enrolled user exists: Compliant**. No Linux compliance policies or scripts were configured. The tenant-wide no-policy setting was observed as Compliant, but the device's actual per-setting result takes precedence; the discrepancy is unresolved. No tenant policy was changed to produce a compliant result.
 - Intune reports **Encrypted: No**, matching the unencrypted Btrfs root. The VM also uses software key protection and lacks Secure Boot and a vTPM. These are recorded gaps, not the reported cause of the default-policy failure. Several hardware inventory fields remain unavailable or zero, so enrollment does not establish complete inventory support.
 - As the work user, `aad-tool compliance-check` returned exit status `1`. That status alone is ambiguous; the portal independently establishes enrollment, check-in and the specific compliance result above.
-- Chromium `155.0.8059.84-1` with Linux Entra SSO `1.13.0` initially signed in to My Apps without credentials in a profile verified absent before the test. Reopening after enrollment prompted for authentication after account selection; the cause remains under investigation. This does not establish retained SSO across browser reopening. Sign-in metadata confirms the initial My Apps success and later extension/broker Graph successes from the same device, but no matching post-reopen My Apps failure has been established. No tokens, cookies, PRTs or authentication traffic were inspected.
+- Chromium `155.0.8059.84-1` with Linux Entra SSO `1.13.0` initially signed in to My Apps without credentials in a profile verified absent before the test. A second fresh profile after Intune enrollment also worked initially but requested authentication after normal browser exit/reopen. Enabling **Background SSO for `myapps.microsoft.com`** fixed that tested restart: the user confirmed reopening without credentials, and metadata verified the persistent app-host permission. This supports the documented application-host permission requirement; it does not prove a captured network mechanism or guarantee that future tenant policies will never request MFA. No tokens, cookies, PRTs or authentication traffic were inspected.
 - The existing desktop session and SDDM remained running during setup. The policy transition preserves UID/home mapping and the global PAM files. Automated validation passed 48 Python tests and both conversation test suites; Sol implementation, Terra evidence/build validation and Astra review were used.
 
 ## Enabling policy processing
@@ -54,3 +54,20 @@ chromium --user-data-dir="$HOME/.local/share/omarchy-himmelblau/sso-proof" --no-
 Wait for the extension to install and enable before opening the intended Microsoft work application. Record whether account selection or further credentials were needed, then test reopening the browser. Existing cookies in an older profile cannot establish broker SSO. Never inspect or capture tokens, cookies, PRTs or authentication traffic as proof.
 
 An optional dedicated-profile launcher is installed at `/usr/share/doc/omarchy-himmelblau/examples/sso-test`. Copy it to `~/sso-test` as the desktop user, using mode `0700`. Run `~/sso-test` for the extension page and `~/sso-test apps` for My Apps. Both commands intentionally reuse the same profile, including on reopening; the launcher does not itself establish that the profile is fresh. This convenience file is user-owned; the companion does not overwrite home-directory launchers during package upgrades.
+
+## Background SSO permissions
+
+For single-page applications, the extension needs host permission for the application
+as well as Microsoft sign-in. While the application is active, open Linux Entra SSO
+and enable **Background SSO** for that hostname, then approve the browser permission.
+Test normal Exit/reopen without opening the popup or toggling accounts first.
+See the [upstream application permission documentation](https://github.com/siemens/linux-entra-sso#single-page-applications).
+
+The managed-device preference for this integration is background SSO on all HTTPS
+applications when the browser/extension supports an explicit consented all-sites grant.
+This increases the extension's site access; it does not remove MFA or Conditional Access.
+Version `1.13.0` documents exact-site managed policies only. Do **not** deploy
+`wellKnownApps: {"*": true}` with that version: its reconciliation can remove its own
+all-sites grant. An upstream change is being prepared; until a supported release is
+available, use explicit application-host grants. Browser approval cannot be supplied
+by this companion package, and no browser profile databases are edited.

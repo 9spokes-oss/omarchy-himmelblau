@@ -6,7 +6,7 @@ DESTDIR ?=
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror
 
-build/pin-change: src/pin-change.c
+build/pin-change: src/pin-change.c src/recovery-account.h
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $< -lpam
 
@@ -21,6 +21,7 @@ native-test:
 	python3 tests/native-sddm/run.py --source "$(SDDM_SOURCE)" --sddm-build "$(SDDM_BUILD)"
 
 install: build/pin-change
+	install -dm755 $(DESTDIR)/etc/omarchy-himmelblau
 	install -Dm755 build/pin-change $(DESTDIR)$(PREFIX)/lib/omarchy-himmelblau/pin-change
 	install -Dm755 bin/omarchy-himmelblau $(DESTDIR)$(PREFIX)/bin/omarchy-himmelblau
 	install -Dm644 src/omarchy_himmelblau.py $(DESTDIR)$(PREFIX)/lib/omarchy-himmelblau/omarchy_himmelblau.py
@@ -34,5 +35,6 @@ install: build/pin-change
 	install -Dm644 docs/maintenance.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/maintenance.md
 	install -Dm644 docs/sddm.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/sddm.md
 	install -Dm644 docs/intune-sso.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/intune-sso.md
+	install -Dm644 docs/releasing.md $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/releasing.md
 	install -Dm755 examples/sso-test $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/examples/sso-test
 	install -Dm644 assets/menu-extension.jsonc $(DESTDIR)$(PREFIX)/share/doc/omarchy-himmelblau/menu-extension.jsonc

@@ -18,6 +18,8 @@ spec.loader.exec_module(m)
 
 class CompanionTest(unittest.TestCase):
     def setUp(self):
+        previous_umask = os.umask(0o022)
+        self.addCleanup(os.umask, previous_umask)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -25,6 +27,8 @@ class CompanionTest(unittest.TestCase):
         for name, path in {
             'STATE': 'state/state.json', 'STOCK_PAM': 'etc/pam.d/omarchy-lock-password',
             'PAM': 'etc/pam.d/omarchy-himmelblau-lock-password',
+            'RECOVERY_ACCOUNT': 'etc/omarchy-himmelblau/recovery-account',
+            'NATIVE_PAYLOAD': 'usr/share/omarchy-himmelblau/native-payload.json',
             'PIN_PAM': 'etc/pam.d/omarchy-himmelblau-pin-change',
             'SDDM_PIN_PAM': 'etc/pam.d/sddm-himmelblau-pin-change',
             'LOCK': 'usr/share/omarchy/shell/plugins/lock/Service.qml',
@@ -35,6 +39,7 @@ class CompanionTest(unittest.TestCase):
             'CACHE_TARGET': 'cache/private/himmelblaud',
         }.items():
             self.paths[name] = self.base / path
+        self.paths['ASSETS'] = ROOT / 'assets'
         self.paths['CONFIG_LAYERS'] = (self.base / 'vendor/config.conf', self.base / 'run/config.conf')
         self.mock_paths = patch.multiple(m, **self.paths)
         self.mock_paths.start(); self.addCleanup(self.mock_paths.stop)
@@ -42,15 +47,49 @@ class CompanionTest(unittest.TestCase):
         # remain enabled in the CLI and are separate from isolated temporary roots.
         ancestor_guard = patch.object(m, 'check_state_ancestors')
         ancestor_guard.start(); self.addCleanup(ancestor_guard.stop)
+        self.real_user_path_guard = m.user_path_guard
+        user_guard = patch.object(m, 'user_path_guard')
+        user_guard.start(); self.addCleanup(user_guard.stop)
+        self.real_live_guard = m.require_no_live_locker
+        live_guard = patch.object(m, 'require_no_live_locker')
+        live_guard.start(); self.addCleanup(live_guard.stop)
         self.output = patch('sys.stdout', new_callable=io.StringIO)
         self.output.start(); self.addCleanup(self.output.stop)
         native_run = m.subprocess.run
         def native_command(argv, **kw):
-            if argv == ['pacman', '-Q', 'sddm-himmelblau']:
-                return SimpleNamespace(stdout='sddm-himmelblau 0.21.0-1\n')
+            if argv == ['/usr/bin/pacman', '-Q', 'sddm-himmelblau']:
+                return SimpleNamespace(stdout='sddm-himmelblau 0.21.0-2\n')
             return native_run(argv, **kw)
         commands = patch.object(m.subprocess, 'run', native_command)
         commands.start(); self.addCleanup(commands.stop)
+        m.RECOVERY_ACCOUNT.parent.mkdir(parents=True, mode=0o755)
+        m.RECOVERY_ACCOUNT.parent.chmod(0o755)
+        native_name = m.pwd.getpwnam; native_uid = m.pwd.getpwuid
+        self.principal = SimpleNamespace(pw_uid=123456, pw_name='alice')
+        names = patch.object(m.pwd, 'getpwnam', side_effect=lambda name: self.principal if name in ('alice@example.com', 'alice') else native_name(name))
+        names.start(); self.addCleanup(names.stop)
+        uids = patch.object(m.pwd, 'getpwuid', side_effect=lambda uid: self.principal if uid == 123456 else native_uid(uid))
+        uids.start(); self.addCleanup(uids.stop)
+        native_paths = tuple(self.base / 'native' / name.name for name in m.NATIVE_EXECUTABLES)
+        native_paths_patch = patch.object(m, 'NATIVE_EXECUTABLES', native_paths)
+        native_paths_patch.start(); self.addCleanup(native_paths_patch.stop)
+        component_paths = tuple(self.base / 'components' / variant for variant in ('qt5','qt6'))
+        components_patch = patch.object(m, 'NATIVE_COMPONENTS', component_paths)
+        components_patch.start(); self.addCleanup(components_patch.stop)
+        m.NATIVE_PAYLOAD.parent.mkdir(parents=True)
+        native_files = {}
+        for directory in component_paths:
+            directory.mkdir(parents=True)
+            for name in ('qmldir', 'Theme.qml'):
+                path = directory / name; path.write_bytes(b'synthetic component'); path.chmod(0o644)
+                native_files[str(path)] = m.digest(path.read_bytes())
+        for path in native_paths:
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'synthetic native payload'); path.chmod(0o755)
+            native_files[str(path)] = m.digest(path.read_bytes())
+        m.NATIVE_PAYLOAD.write_text(json.dumps({'package':'sddm-himmelblau', 'version':'0.21.0-2',
+            'artifact_sha256':'a'*64, 'source_commit':'b'*40, 'files':native_files}))
+        m.NATIVE_PAYLOAD.chmod(0o644)
         m.SDDM_PIN_PAM.parent.mkdir(parents=True)
         m.SDDM_PIN_PAM.write_bytes(m.SDDM_PIN_PAM_CONTENT)
         m.SDDM_PIN_PAM.chmod(0o644)
@@ -70,6 +109,278 @@ class CompanionTest(unittest.TestCase):
     def setup(self, admin=False):
         m.setup('example.com', 'alice@example.com', admin)
 
+    def test_installed_launcher_never_probes_development_paths(self):
+        import runpy
+        launcher = (ROOT / 'bin/omarchy-himmelblau').read_text()
+        self.assertTrue(launcher.startswith('#!/usr/bin/python3 -I\n'))
+        with patch.object(runpy, 'run_path') as execute:
+            exec(compile(launcher, 'launcher', 'exec'), {'__file__':'/usr/bin/omarchy-himmelblau'})
+        execute.assert_called_once_with('/usr/lib/omarchy-himmelblau/omarchy_himmelblau.py', run_name='__main__')
+        with patch.dict(os.environ, {'PYTHONPATH':'/attacker', 'OMARCHY_ASSETS':'/attacker'}):
+            namespace = runpy.run_path(str(ROOT / 'src/omarchy_himmelblau.py'))
+        self.assertEqual(namespace['ASSETS'], Path('/usr/share/omarchy-himmelblau'))
+        with patch.object(m.os, 'geteuid', return_value=0):
+            with self.assertRaisesRegex(m.Error, 'unprivileged source checkout'):
+                m.main(['--development', 'doctor'])
+
+    def test_privileged_patch_ignores_hostile_path_and_environment(self):
+        evil = self.base / 'evil'; evil.mkdir()
+        (evil / 'patch').write_text('#!/bin/sh\nexit 99\n'); (evil / 'patch').chmod(0o755)
+        run = m.subprocess.run
+        observed = []
+        def command(argv, **kwargs):
+            observed.append((argv, kwargs))
+            return run(argv, **kwargs)
+        with patch.dict(os.environ, {'PATH':str(evil), 'LD_PRELOAD':'evil', 'BASH_ENV':'evil'}), patch.object(m.subprocess, 'run', command):
+            m.patch_source('lock-pam', self.before[m.STOCK_PAM])
+        self.assertEqual(observed[0][0][0], '/usr/bin/patch')
+        self.assertEqual(observed[0][1]['env'], m.COMMAND_ENV)
+        self.assertEqual(observed[0][1]['cwd'], '/')
+
+    def test_doctor_does_not_invoke_patch_or_trust_inherited_environment(self):
+        self.setup()
+        run = m.subprocess.run
+        def command(argv, **kwargs):
+            self.assertEqual(argv, ['/usr/bin/pacman', '-Q', 'sddm-himmelblau'])
+            self.assertEqual(kwargs['env'], m.COMMAND_ENV)
+            return run(argv, **kwargs)
+        with patch.dict(os.environ, {'PATH':'/attacker', 'BASH_ENV':'/attacker'}), patch.object(m.subprocess, 'run', command):
+            m.doctor()
+
+    def test_user_command_environment_drops_code_injection_variables(self):
+        account = SimpleNamespace(pw_name='alice')
+        with patch.object(m, 'canonical_user', return_value=(account, self.base)), \
+             patch.dict(os.environ, {'LD_PRELOAD':'evil','BASH_ENV':'evil','PYTHONPATH':'evil','WAYLAND_DISPLAY':'wayland-1'}):
+            environment = m.user_environment()
+        for key in ('LD_PRELOAD','BASH_ENV','PYTHONPATH'): self.assertNotIn(key, environment)
+        self.assertEqual(environment['WAYLAND_DISPLAY'], 'wayland-1')
+        self.assertEqual(environment['PATH'], '/usr/bin:/bin')
+
+    def test_setup_uses_one_validated_identity_for_all_outputs(self):
+        resolver = m.administrator
+        with patch.object(m, 'administrator', wraps=resolver) as resolve, patch.object(m, 'validate_sudo_rule'):
+            self.setup(admin=True)
+        resolve.assert_called_once_with('alice@example.com')
+        principal = m.load_state()['identity']
+        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), m.identity_file(principal))
+        self.assertEqual(m.SUDOERS.read_bytes(), m.admin_rule(principal))
+
+    def test_saved_principal_mapping_drift_never_rewrites_admin(self):
+        with patch.object(m, 'validate_sudo_rule'): self.setup(admin=True)
+        before = m.SUDOERS.read_bytes(); state = m.STATE.read_bytes()
+        wrong = SimpleNamespace(pw_name='other', pw_uid=123456)
+        with patch.object(m.pwd, 'getpwuid', return_value=wrong):
+            for action in (m.doctor, m.repair):
+                with self.assertRaises(m.Error): action()
+        self.assertEqual(m.SUDOERS.read_bytes(), before); self.assertEqual(m.STATE.read_bytes(), state)
+        self.assertEqual(m.load_state()['identity'], {'requested_upn':'alice@example.com','canonical_name':'alice','uid':123456})
+
+    def test_legacy_identity_and_numeric_admin_migrate_only_with_explicit_repair(self):
+        original_config = m.CONFIG.read_bytes()
+        with patch.object(m, 'validate_sudo_rule'): self.setup(admin=True)
+        state = m.load_state(); state.pop('identity')
+        state['files'] = [entry for entry in state['files'] if Path(entry['path']) != m.RECOVERY_ACCOUNT]
+        m.RECOVERY_ACCOUNT.unlink()
+        legacy = b'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n#123456 ALL=(ALL:ALL) ALL\n'
+        m.SUDOERS.chmod(0o640); m.SUDOERS.write_bytes(legacy); m.SUDOERS.chmod(0o440)
+        for entry in state['files']:
+            if Path(entry['path']) == m.SUDOERS: entry['after'] = m.digest(legacy)
+            if Path(entry['path']) == m.PIN_PAM: entry['after'] = m.digest(m.LEGACY_PIN_PAM_CONTENT)
+        m.PIN_PAM.write_bytes(m.LEGACY_PIN_PAM_CONTENT); m.save_state(state)
+        with self.assertRaises(m.Error): m.doctor()
+        self.assertEqual(m.SUDOERS.read_bytes(), legacy)
+        with patch.object(m, 'validate_sudo_rule'): m.repair()
+        self.assertEqual(m.RECOVERY_ACCOUNT.read_bytes(), b'alice@example.com\nalice\n123456\n')
+        self.assertIn(b'"alice" ALL=', m.SUDOERS.read_bytes())
+        self.assertIn(b'account [success=ok default=die] pam_himmelblau.so', m.PIN_PAM.read_bytes())
+        m.doctor(); m.rollback()
+        self.assertFalse(m.RECOVERY_ACCOUNT.exists()); self.assertFalse(m.SUDOERS.exists())
+        self.assertEqual(m.CONFIG.read_bytes(), original_config)
+
+    def test_admin_canonical_name_grammar_and_roundtrip(self):
+        for name in ('#1234', '%wheel', '+netgroup', 'ALL', 'a,b', 'a:b', 'a\nb', 'a"b', '-option'):
+            account = SimpleNamespace(pw_name=name, pw_uid=123456)
+            with patch.object(m.pwd, 'getpwnam', return_value=account), patch.object(m.pwd, 'getpwuid', return_value=account):
+                if name == 'ALL':
+                    with self.assertRaises(m.Error): m.administrator('alice@example.com')
+                else:
+                    with self.assertRaises(m.Error): m.administrator('alice@example.com')
+
+    def test_native_release_pin_rejects_metadata_only_or_incomplete_payload(self):
+        original = m.NATIVE_PAYLOAD.read_bytes()
+        manifest = json.loads(original); manifest['files'].pop(str(m.NATIVE_EXECUTABLES[0]))
+        m.NATIVE_PAYLOAD.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(m.Error, 'Incomplete'): m.native_sddm_contract()
+        m.NATIVE_PAYLOAD.write_bytes(original)
+        target = m.NATIVE_EXECUTABLES[0]; target.write_bytes(b'changed binary')
+        with self.assertRaisesRegex(m.Error, 'release pin'): m.native_sddm_contract()
+        target.write_bytes(b'synthetic native payload'); target.chmod(0o777)
+        with self.assertRaisesRegex(m.Error, 'metadata'): m.native_sddm_contract()
+
+    def test_native_component_trees_cannot_be_omitted_or_extended(self):
+        original = m.NATIVE_PAYLOAD.read_bytes()
+        manifest = json.loads(original)
+        manifest['files'] = {path: value for path, value in manifest['files'].items()
+                             if not Path(path).is_relative_to(m.NATIVE_COMPONENTS[0])}
+        m.NATIVE_PAYLOAD.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(m.Error, 'complete installed file set'): m.native_payload_contract()
+        m.NATIVE_PAYLOAD.write_bytes(original)
+        payload = m.NATIVE_COMPONENTS[0] / 'Theme.qml'; payload.unlink()
+        with self.assertRaisesRegex(m.Error, 'QML payload'): m.native_payload_contract()
+        payload.write_bytes(b'synthetic component'); payload.chmod(0o644)
+        extra = m.NATIVE_COMPONENTS[1] / 'Extra.qml'; extra.write_text('unlisted')
+        with self.assertRaisesRegex(m.Error, 'complete installed file set'): m.native_payload_contract()
+        extra.unlink()
+        qml = m.NATIVE_COMPONENTS[1] / 'qmldir'; qml.unlink(); qml.symlink_to(m.NATIVE_COMPONENTS[0] / 'qmldir')
+        with self.assertRaisesRegex(m.Error, 'Symlink'): m.native_payload_contract()
+
+    def test_user_ancestry_rejects_writes_foreign_owners_and_acls(self):
+        home = self.base / 'home'; home.mkdir(mode=0o700)
+        config = home / '.config'; config.mkdir(mode=0o755)
+        target = config / 'lock.qml'; target.write_text('synthetic'); target.chmod(0o644)
+        stat = Path.stat
+        def mapped(path, *args, **kwargs):
+            data = stat(path, *args, **kwargs)
+            if path != home and not path.is_relative_to(home):
+                return SimpleNamespace(st_uid=0, st_mode=(0o41777 if path == Path('/tmp') else 0o40755))
+            return data
+        with patch.object(Path, 'stat', mapped):
+            self.real_user_path_guard(home, target)
+            config.chmod(0o777)
+            with self.assertRaisesRegex(m.Error, 'Writable'): self.real_user_path_guard(home, target)
+            config.chmod(0o755)
+            def acl(path, name, **kwargs):
+                if path == config and name == 'system.posix_acl_access': return b'fake extended ACL'
+                raise OSError(m.errno.ENODATA, 'absent')
+            with patch.object(m.os, 'getxattr', acl):
+                with self.assertRaisesRegex(m.Error, 'Extended ACL'): self.real_user_path_guard(home, target)
+            def foreign(path, *args, **kwargs):
+                if path == config: return SimpleNamespace(st_uid=os.getuid()+1, st_mode=0o40755)
+                return mapped(path, *args, **kwargs)
+            with patch.object(Path, 'stat', foreign):
+                with self.assertRaisesRegex(m.Error, 'Foreign owner'): self.real_user_path_guard(home, target)
+
+    def test_rollback_runtime_guard_refuses_live_unknown_and_allows_recovery_override(self):
+        cases = [('[]', None, 1, False), ('bad', None, 1, True),
+                 ('[{"session":"7"}]','Type=wayland\nClass=user\n',1,True),
+                 ('[{"session":"7"}]','Type=tty\nClass=user\n',0,True),
+                 ('[{"session":"7"}]','Type=tty\nClass=user\n',1,False)]
+        for listing, detail, processes, denied in cases:
+            def command(argv, **kwargs):
+                self.assertEqual(kwargs['env'], m.COMMAND_ENV)
+                if argv[0] == '/usr/bin/pgrep': return SimpleNamespace(returncode=processes)
+                return SimpleNamespace(stdout=detail if 'show-session' in argv else listing)
+            with patch.object(m.subprocess, 'run', command):
+                if denied:
+                    with self.assertRaises(m.Error): self.real_live_guard()
+                else: self.real_live_guard()
+        with patch.object(m.subprocess, 'run', side_effect=AssertionError('override must not inspect runtime')):
+            self.real_live_guard(True)
+
+    def test_setup_interruption_recovers_pending_and_applied_files(self):
+        original = m.atomic; interrupted = False
+        def crash(path, data, mode):
+            nonlocal interrupted
+            if path == m.CONFIG and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        state = m.load_state()
+        self.assertEqual(state['transaction']['kind'], 'setup')
+        self.assertIn('applied', state['transaction']['progress'].values())
+        self.assertIn('pending', state['transaction']['progress'].values())
+        with self.assertRaises(m.Error): m.doctor()
+        m.recover()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_policy_interruption_recovers_with_unchanged_or_committed_state(self):
+        self.setup()
+        old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
+        original = m.atomic
+        def crash(path, data, mode):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): m.policy(True)
+        self.assertIn(b'apply_policy = true', m.CONFIG.read_bytes())
+        m.recover()
+        self.assertEqual(m.CONFIG.read_bytes(), old_config); self.assertEqual(m.STATE.read_bytes(), old_state)
+        journal = m.STATE.parent / 'policy-backup.json'; unlink = Path.unlink
+        def crash_unlink(path, *args, **kwargs):
+            if path == journal: raise KeyboardInterrupt
+            return unlink(path, *args, **kwargs)
+        with patch.object(Path, 'unlink', crash_unlink):
+            with self.assertRaises(KeyboardInterrupt): m.policy(True)
+        m.recover()
+        self.assertEqual(m.CONFIG.read_bytes(), old_config); self.assertEqual(m.STATE.read_bytes(), old_state)
+
+    def test_recovery_refuses_drift_before_any_restoration(self):
+        self.setup(); old_state = m.STATE.read_bytes(); original = m.atomic
+        def crash(path, data, mode):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): m.policy(True)
+        m.CONFIG.write_bytes(m.CONFIG.read_bytes()+b'# unknown drift\n')
+        before = m.CONFIG.read_bytes()
+        with self.assertRaisesRegex(m.Error, 'unknown target drift'): m.recover()
+        self.assertEqual(m.CONFIG.read_bytes(), before); self.assertEqual(m.STATE.read_bytes(), old_state)
+
+    def test_setup_crash_before_and_after_each_file_is_recoverable(self):
+        self.setup(); targets = [Path(entry['path']) for entry in m.load_state()['files']]; m.rollback()
+        original = m.atomic
+        for target in targets:
+            for after_write in (False, True):
+                with self.subTest(target=target.name, after_write=after_write):
+                    crashed = False
+                    def crash(path, data, mode):
+                        nonlocal crashed
+                        if path == target and not crashed:
+                            crashed = True
+                            if after_write: original(path, data, mode)
+                            raise KeyboardInterrupt
+                        return original(path, data, mode)
+                    with patch.object(m, 'atomic', crash):
+                        with self.assertRaises(KeyboardInterrupt): self.setup()
+                    m.recover()
+                    self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+                    self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_repair_and_rollback_crashes_can_resume_from_exact_before_after(self):
+        self.setup(); original = m.atomic; old_state = m.STATE.read_bytes()
+        m.PAM.unlink()
+        def crash_repair(path, data, mode):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', crash_repair):
+            with self.assertRaises(KeyboardInterrupt): m.repair()
+        self.assertTrue(m.PAM.exists())
+        m.recover()
+        self.assertFalse(m.PAM.exists()); self.assertEqual(m.STATE.read_bytes(), old_state)
+        m.repair()
+        def crash_rollback(path, data, mode):
+            if path == m.STATE:
+                state = json.loads(data)
+                progress = state.get('transaction', {})
+                if progress.get('kind') == 'rollback' and 'restored' in progress['progress'].values():
+                    raise KeyboardInterrupt
+            return original(path, data, mode)
+        with patch.object(m, 'atomic', crash_rollback):
+            with self.assertRaises(KeyboardInterrupt): m.rollback()
+        m.recover()
+        self.assertFalse(m.STATE.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_atomic_replace_and_delete_fsync_parent_directory(self):
+        target = self.base / 'durable'; calls=[]
+        original = m.fsync_directory
+        with patch.object(m, 'fsync_directory', side_effect=lambda path: calls.append(path) or original(path)):
+            m.atomic(target, b'fixed', 0o600)
+            m.unlink_durable(target)
+        self.assertEqual(calls, [self.base, self.base])
+
     def test_policy_legacy_default_and_explicit_toggle_preserve_original(self):
         before = m.CONFIG.read_bytes()
         m.setup('example.com', 'alice@example.com')
@@ -78,7 +389,7 @@ class CompanionTest(unittest.TestCase):
         original = next(item.copy() for item in state['files'] if Path(item['path']) == m.CONFIG)
         original_run = m.subprocess.run
         def read_only_command(argv, **kwargs):
-            self.assertIn(argv[0], ('patch', 'pacman'))
+            self.assertIn(argv[0], ('/usr/bin/patch', '/usr/bin/pacman'))
             return original_run(argv, **kwargs)
         with patch.object(m.subprocess, 'run', side_effect=read_only_command):
             m.policy(True)
@@ -282,7 +593,7 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(main.read_bytes(), legacy)
         m.repair()
         upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], '0.4.0')
+        self.assertEqual(upgraded['version'], '0.5.0')
         self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
         for previous, current in zip(old_state['files'], upgraded['files']):
             self.assertEqual({k:v for k,v in previous.items() if k != 'after'}, {k:v for k,v in current.items() if k != 'after'})
@@ -294,7 +605,7 @@ class CompanionTest(unittest.TestCase):
         main, legacy, old = self.legacy_root()
         state = json.loads(old); state['version'] = '0.1.0'; m.save_state(state)
         m.repair()
-        self.assertEqual(m.load_state()['version'], '0.4.0')
+        self.assertEqual(m.load_state()['version'], '0.5.0')
         self.assertNotEqual(main.read_bytes(), legacy)
 
     def test_01_root_label_without_02_pin_state_refuses_upgrade(self):
@@ -437,7 +748,7 @@ class CompanionTest(unittest.TestCase):
     def test_admin_opt_in_resolves_actual_nss_uid_and_refuses_local_collision(self):
         account = SimpleNamespace(pw_uid=123456, pw_name='alice')
         with patch.object(m.pwd, 'getpwnam', return_value=account):
-            self.assertEqual(m.administrator('alice@example.com'), 123456)
+            self.assertEqual(m.administrator('alice@example.com')['uid'], 123456)
             m.LOCAL_PASSWD.write_text('alice:x:2000:2000::/home/alice:/bin/bash\n')
             with self.assertRaises(m.Error): m.administrator('alice@example.com')
             m.LOCAL_PASSWD.write_text('local:x:123456:2000::/home/local:/bin/bash\n')
@@ -448,11 +759,11 @@ class CompanionTest(unittest.TestCase):
     def test_admin_option_only_grants_verified_uid(self):
         run = subprocess.run
         def command(argv, **kw):
-            if argv[0] == 'visudo': return SimpleNamespace(returncode=0)
+            if argv[0] == '/usr/bin/visudo': return SimpleNamespace(returncode=0)
             return run(argv, **kw)
-        with patch.object(m, 'administrator', return_value=123456), patch.object(m.subprocess, 'run', command):
+        with patch.object(m, 'administrator', return_value={'requested_upn':'alice@example.com', 'canonical_name':'alice', 'uid':123456}), patch.object(m.subprocess, 'run', command):
             self.setup(admin=True)
-        self.assertIn(b'#123456 ALL=(ALL:ALL) ALL', m.SUDOERS.read_bytes())
+        self.assertIn(b'"alice" ALL=(ALL:ALL) ALL', m.SUDOERS.read_bytes())
         self.assertNotIn(b'NOPASSWD', m.SUDOERS.read_bytes())
         self.assertEqual(m.SUDOERS.stat().st_mode & 0o777, 0o440)
 
@@ -466,14 +777,14 @@ class CompanionTest(unittest.TestCase):
         commands = []
         def command(argv, **kw):
             commands.append(argv)
-            if argv[:3] == ['omarchy-shell', 'lock', 'status']:
+            if argv[:3] == ['/usr/bin/omarchy-shell', 'lock', 'status']:
                 self.assertEqual(kw['env']['OMARCHY_PATH'], '/usr/share/omarchy')
                 return SimpleNamespace(stdout=json.dumps({key: False for key in
                     ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-            if argv == ['omarchy', 'plugin', 'list', '--json']:
+            if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
                 return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
                     'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
-            if argv[:3] == ['omarchy', 'plugin', 'clone']:
+            if argv[:3] == ['/usr/bin/omarchy', 'plugin', 'clone']:
                 clone.mkdir(parents=True)
                 shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
                 shutil.copy2(m.LOCK, clone / 'Service.qml')  # manifest.json directory branch copies exactly
@@ -488,8 +799,8 @@ class CompanionTest(unittest.TestCase):
             m.user_status(); m.enable_user()
             self.assertEqual(m.clone_hashes(clone), before_clone)
             self.assertEqual(statefile.read_bytes(), before_user_state)
-        self.assertEqual(sum(cmd[:3] == ['omarchy', 'plugin', 'clone'] for cmd in commands), 1)
-        self.assertIn(['omarchy', 'plugin', 'list', '--json'], commands)
+        self.assertEqual(sum(cmd[:3] == ['/usr/bin/omarchy', 'plugin', 'clone'] for cmd in commands), 1)
+        self.assertIn(['/usr/bin/omarchy', 'plugin', 'list', '--json'], commands)
         self.assertEqual((clone / 'Service.qml').read_bytes(), m.patch_source('lock-conversation', self.before[m.LOCK]))
         self.assertIn('omarchy-himmelblau status', hook.read_text())
         self.assertNotIn('sudo ', hook.read_text().split('printf')[0])
@@ -505,13 +816,13 @@ class CompanionTest(unittest.TestCase):
         hook = self.base / 'home/hooks/post-update.d/check'
         run = subprocess.run
         def command(argv, **kw):
-            if argv[0] == 'omarchy-shell':
+            if argv[0] == '/usr/bin/omarchy-shell':
                 return SimpleNamespace(stdout=json.dumps({key: False for key in
                     ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-            if argv == ['omarchy', 'plugin', 'list', '--json']:
+            if argv == ['/usr/bin/omarchy', 'plugin', 'list', '--json']:
                 return SimpleNamespace(stdout=json.dumps([{'id': 'alice.lock', 'enabled': True,
                     'firstParty': False, 'clonedFrom': 'omarchy.lock'}]))
-            if argv[0] == 'omarchy':
+            if argv[0] == '/usr/bin/omarchy':
                 clone.mkdir(parents=True)
                 (clone / 'Service.qml').write_bytes(m.LOCK.read_bytes().replace(b'import qs.Commons\n', b'import "unexpected"\n'))
                 return SimpleNamespace(returncode=0)
@@ -694,14 +1005,14 @@ class CompanionTest(unittest.TestCase):
                 home = self.base / f'user-{index}'
                 clone = home / 'plugins/alice.lock'; statefile = home / 'state/state.json'; hook = home / 'hooks/check'
                 def command(argv, **kw):
-                    if argv[0] == 'omarchy-shell':
+                    if argv[0] == '/usr/bin/omarchy-shell':
                         return SimpleNamespace(stdout=json.dumps({key: False for key in
                             ('locked','requested','pending','sessionLocked','secure','authenticating')}))
-                    if argv[:3] == ['omarchy','plugin','clone']:
+                    if argv[:3] == ['/usr/bin/omarchy','plugin','clone']:
                         clone.mkdir(parents=True)
                         shutil.copy2(m.LOCK, clone / 'Service.qml')
                         return SimpleNamespace(returncode=0)
-                    if argv == ['omarchy','plugin','list','--json']:
+                    if argv == ['/usr/bin/omarchy','plugin','list','--json']:
                         return SimpleNamespace(stdout=json.dumps(listing))
                     return run(argv, **kw)
                 with patch.object(m, 'user_paths', return_value=('alice', clone, statefile, hook)), \
@@ -714,7 +1025,7 @@ class CompanionTest(unittest.TestCase):
     def legacy_clone(self):
         clone = self.base / 'home/plugins/alice.lock'; clone.mkdir(parents=True)
         shutil.copy2(m.LOCK, clone / 'Service.qml');shutil.copy2(m.LOCK.parent / 'LockView.qml', clone / 'LockView.qml')
-        subprocess.run(['patch','--batch','--fuzz=0','-p1','-d',str(clone)],
+        subprocess.run(['/usr/bin/patch','--batch','--fuzz=0','-p1','-d',str(clone)],
             input=(ROOT/'tests/fixtures/lock-0.1.0.patch').read_bytes(),check=True,capture_output=True)
         hook = self.base / 'home/hooks/check';m.atomic(hook,b'#!/bin/sh\ntrue\n',0o755)
         statefile = self.base / 'home/state/state.json'
@@ -741,7 +1052,7 @@ class CompanionTest(unittest.TestCase):
         with patch.object(m,'unlocked') as unlocked,patch.object(m,'verify_native_clone'):
             m.upgrade_user('alice',clone,statefile,hook)
             unlocked.assert_called_once()
-        self.assertEqual(json.loads(statefile.read_text())['version'],'0.4.0')
+        self.assertEqual(json.loads(statefile.read_text())['version'],'0.5.0')
         self.assertEqual((clone/'Service.qml').read_bytes(),m.patch_source('lock-conversation',m.LOCK.read_bytes()))
         self.assertEqual((clone/'LockView.qml').read_bytes(),m.patch_source('lock-view',(m.LOCK.parent/'LockView.qml').read_bytes()))
         self.assertEqual(clone.stat().st_uid,os.getuid())

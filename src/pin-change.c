@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "recovery-account.h"
 
 #define RESPONSE_MAX 4096
 #define MESSAGE_MAX 8192
@@ -99,8 +100,17 @@ int main(int argc, char **argv) {
     protocol = fdopen(channel, "w"); if (!protocol) return 2;
     char buffer[16384]; struct passwd account, *found = NULL;
     if (getpwuid_r(getuid(), &account, buffer, sizeof(buffer), &found) || !found) return 2;
+    struct oh_identity identity;
+    if (!oh_recovery_account(account.pw_name, getuid(), 0, &identity)) return 2;
     struct pam_conv conv = {conversation, NULL}; pam_handle_t *handle = NULL;
-    int status = pam_start("omarchy-himmelblau-pin-change", account.pw_name, &conv, &handle);
+    int status = pam_start("omarchy-himmelblau-pin-change", identity.upn, &conv, &handle);
+    if (status == PAM_SUCCESS) status = pam_acct_mgmt(handle, 0);
+    const void *pam_user = NULL;
+    if (status == PAM_SUCCESS && (pam_get_item(handle, PAM_USER, &pam_user) != PAM_SUCCESS
+        || !pam_user || strcmp(pam_user, identity.upn))) status = PAM_SYSTEM_ERR;
+    struct oh_identity current;
+    if (status == PAM_SUCCESS && (!oh_recovery_account(identity.upn, getuid(), 0, &current)
+        || !oh_same_identity(&identity, &current))) status = PAM_SYSTEM_ERR;
     if (status == PAM_SUCCESS) status = pam_chauthtok(handle, 0);
     if (handle) pam_end(handle, status);
     explicit_bzero(buffer, sizeof(buffer));

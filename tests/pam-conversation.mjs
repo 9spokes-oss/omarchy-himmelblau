@@ -10,7 +10,7 @@ function patched(filename, asset) {
   const work = mkdtempSync(join(tmpdir(), 'omarchy-pam-conversation-'));
   try {
     writeFileSync(join(work, filename), readFileSync(new URL(`tests/fixtures/${filename}`, root)));
-    execFileSync('patch', ['--batch', '--fuzz=0', '-p1', '-d', work], {input:readFileSync(new URL(`assets/${asset}`, root))});
+    execFileSync('patch', ['--batch', '--fuzz=0', '-p1', '-d', work], {timeout:5000,input:readFileSync(new URL(`assets/${asset}`, root))});
     return readFileSync(join(work, filename), 'utf8');
   } finally { rmSync(work, {recursive:true}); }
 }
@@ -46,7 +46,7 @@ function harness() {
   state.contexts.push(context);return context;
  }};
  const scope=vm.createContext(state);
- for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope);
+ for(const name of ['currentPasswordAttempt','clearPasswordPrompt','submitPassword','handlePasswordMessage','settlePasswordAttempt','handlePasswordFailure','cancelPasswordAttempt','completePasswordAttempt','beginPinRecovery','currentPinRecovery','handlePinRecoveryLine','stopPinRecovery','finishPinRecovery','currentlyLocked','resetAuthenticationState','finishUnlock'])vm.runInContext(fn(service,name),scope,{timeout:1000});
  return state;
 }
 let s=harness();s.submitPassword('must-not-silently-discard');assert.equal(s.contexts.length,0);

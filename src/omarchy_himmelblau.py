@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Explicit, experimental Omarchy/Himmelblau companion. No tenant operations."""
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -14,9 +15,9 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.4.0'
-DEVELOPMENT_ASSETS = Path(__file__).resolve().parents[1] / 'assets'
-ASSETS = DEVELOPMENT_ASSETS if DEVELOPMENT_ASSETS.is_dir() else Path('/usr/share/omarchy-himmelblau')
+VERSION = '0.5.0'
+ASSETS = Path('/usr/share/omarchy-himmelblau')
+COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
 STATE = Path('/var/lib/omarchy-himmelblau/state.json')
 STOCK_PAM = Path('/etc/pam.d/omarchy-lock-password')
@@ -27,10 +28,18 @@ THEME = Path('/usr/share/sddm/themes/omarchy')
 COPY_THEME = Path('/usr/share/sddm/themes/omarchy-himmelblau')
 OVERRIDE = Path('/etc/sddm.conf.d/99-z-himmelblau.conf')
 SUDOERS = Path('/etc/sudoers.d/90-himmelblau-user')
+RECOVERY_ACCOUNT = Path('/etc/omarchy-himmelblau/recovery-account')
+NATIVE_PAYLOAD = Path('/usr/share/omarchy-himmelblau/native-payload.json')
+NATIVE_EXECUTABLES = tuple(Path(path) for path in (
+    '/usr/bin/sddm', '/usr/bin/sddm-greeter', '/usr/bin/sddm-greeter-qt6',
+    '/usr/lib/sddm/sddm-helper', '/usr/lib/sddm/sddm-helper-start-wayland',
+    '/usr/lib/sddm/sddm-helper-start-x11user'))
+NATIVE_COMPONENTS = (Path('/usr/lib/qt/qml/SddmComponents'), Path('/usr/lib/qt6/qml/SddmComponents'))
 PIN_PAM = Path('/etc/pam.d/omarchy-himmelblau-pin-change')
-PIN_PAM_CONTENT = b'# Dedicated current-user PIN replacement; no session unlock.\npassword required pam_himmelblau.so\n'
+PIN_PAM_CONTENT = b'# Dedicated current-user PIN replacement; no session unlock.\naccount [success=ok default=die] pam_himmelblau.so\npassword required pam_himmelblau.so\n'
 SDDM_PIN_PAM = Path('/etc/pam.d/sddm-himmelblau-pin-change')
-SDDM_PIN_PAM_CONTENT = b'# Native SDDM PIN replacement; a successful change never starts a session.\npassword required pam_himmelblau.so\n'
+SDDM_PIN_PAM_CONTENT = b'# Native SDDM PIN replacement; a successful change never starts a session.\naccount [success=ok default=die] pam_himmelblau.so\npassword required pam_himmelblau.so\n'
+LEGACY_PIN_PAM_CONTENT = PIN_PAM_CONTENT.replace(b'account [success=ok default=die] pam_himmelblau.so\n', b'')
 LOCAL_PASSWD = Path('/etc/passwd')
 CONFIG_LAYERS = (Path('/usr/lib/himmelblau/himmelblau.conf'), Path('/run/himmelblau/himmelblau.conf'))
 SERVER_CONFIG = Path('/var/cache/himmelblaud/himmelblau.conf')
@@ -62,9 +71,40 @@ def read(path):
     return path.read_bytes() if path.exists() else None
 
 
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_directory(path, mode=0o700):
+    missing = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        safe(directory / '.guard')
+        directory.mkdir(mode=mode)
+        fsync_directory(directory.parent)
+
+
+def unlink_durable(path, missing_ok=False):
+    safe(path).unlink(missing_ok=missing_ok)
+    if path.parent.exists():
+        fsync_directory(path.parent)
+
+
+def rmdir_durable(path):
+    path.rmdir()
+    fsync_directory(path.parent)
+
+
 def atomic(path, data, mode):
     path = safe(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_directory(path.parent)
     safe(path)
     fd, name = tempfile.mkstemp(prefix='.himmelblau-', dir=path.parent)
     try:
@@ -74,9 +114,17 @@ def atomic(path, data, mode):
             output.flush()
             os.fsync(output.fileno())
         os.replace(name, path)
+        fsync_directory(path.parent)
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def supported_source_hash(name, data):
+    info = json.loads((ASSETS / 'manifest.json').read_text())[name]
+    if digest(data) not in (info['before'], info['after']):
+        raise Error(f'Unsupported upstream source for {name}; refusing drift')
+    return info['after']
 
 
 def patch_source(name, data):
@@ -89,9 +137,9 @@ def patch_source(name, data):
     with tempfile.TemporaryDirectory(prefix='omarchy-himmelblau-') as work:
         target = Path(work) / info['filename']
         target.write_bytes(data)
-        subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-d', work],
+        subprocess.run(['/usr/bin/patch', '--batch', '--fuzz=0', '-p1', '-d', work],
                        input=(ASSETS / (name + '.patch')).read_bytes(), check=True,
-                       capture_output=True)
+                       capture_output=True, env=COMMAND_ENV, cwd='/')
         result = target.read_bytes()
     if digest(result) != info['after']:
         raise Error(f'Unexpected patch result: {name}')
@@ -102,7 +150,7 @@ def identity(domain, user):
     domain = domain.lower()
     if len(domain) > 253 or not re.fullmatch(r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}', domain):
         raise Error('Invalid DNS domain')
-    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}@' + re.escape(domain), user, re.I):
+    if len(user) > 256 or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}@' + re.escape(domain), user, re.I):
         raise Error('User must be a UPN in the selected domain')
     return domain, user.lower()
 
@@ -217,15 +265,80 @@ def managed_config(data, domain, user, apply_policy=False):
 def administrator(user):
     try:
         account = pwd.getpwnam(user)
+        canonical = pwd.getpwnam(account.pw_name)
+        reverse = pwd.getpwuid(account.pw_uid)
     except KeyError:
-        raise Error('Admin opt-in requires an already resolvable NSS identity') from None
-    if account.pw_uid < 1000:
-        raise Error('Refusing system UID for admin opt-in')
+        raise Error('Admin opt-in requires a resolvable, round-trip NSS identity') from None
+    name, uid = account.pw_name, account.pw_uid
+    if (uid < 1000 or name.upper() in ('ALL', 'DEFAULTS', 'USER_ALIAS', 'RUNAS_ALIAS', 'HOST_ALIAS', 'CMND_ALIAS', 'ROOT')
+            or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.@-]{0,255}', name)):
+        raise Error('Refusing system UID or unsafe canonical sudo principal')
+    if (canonical.pw_name, canonical.pw_uid) != (name, uid) or (reverse.pw_name, reverse.pw_uid) != (name, uid):
+        raise Error('NSS principal round-trip mismatch; admin authorization refused')
     for line in LOCAL_PASSWD.read_text().splitlines():
         fields = line.split(':')
-        if len(fields) > 2 and (fields[2] == str(account.pw_uid) or fields[0].lower() in {user.lower(), account.pw_name.lower()}):
-            raise Error('Admin NSS UID collides with a local passwd account')
-    return account.pw_uid
+        if len(fields) > 2 and (fields[2] == str(uid) or fields[0].lower() in {user.lower(), name.lower()}):
+            raise Error('Admin NSS identity collides with a local passwd account')
+    # Lookup consistency detects current drift; it cannot prove global NSS uniqueness.
+    return {'requested_upn': user, 'canonical_name': name, 'uid': uid}
+
+
+def admin_rule(principal):
+    return ('# Explicit canonical NSS principal; password/PIN required.\n'
+            f'"{principal["canonical_name"]}" ALL=(ALL:ALL) ALL\n').encode()
+
+
+def validate_sudo_rule(content):
+    with tempfile.NamedTemporaryFile() as candidate:
+        candidate.write(content); candidate.flush()
+        subprocess.run(['/usr/bin/visudo', '-cf', candidate.name], check=True,
+                       capture_output=True, env=COMMAND_ENV, cwd='/')
+
+
+def identity_file(principal):
+    return (f'{principal["requested_upn"]}\n{principal["canonical_name"]}\n{principal["uid"]}\n').encode('ascii')
+
+
+def recovery_parent():
+    safe(RECOVERY_ACCOUNT)
+    parent = RECOVERY_ACCOUNT.parent
+    if (not parent.is_dir() or parent.stat().st_uid != os.geteuid()
+            or stat.S_IMODE(parent.stat().st_mode) != 0o755):
+        raise Error('Recovery policy directory must already be root-owned 0755')
+
+
+def check_identity(state, allow_legacy=False):
+    principal = administrator(state['user'])
+    if state.get('identity') is None and allow_legacy:
+        return principal
+    if state.get('identity') != principal:
+        raise Error('Managed identity missing or NSS mapping changed; explicit reviewed repair required')
+    recovery_parent()
+    if allow_legacy and read(RECOVERY_ACCOUNT) is None:
+        return principal
+    if read(RECOVERY_ACCOUNT) != identity_file(principal):
+        raise Error('Recovery principal policy missing or drifted')
+    metadata = RECOVERY_ACCOUNT.stat()
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644:
+        raise Error('Recovery principal policy permission drift')
+    return principal
+
+
+def check_admin_identity(state, allow_legacy=False):
+    if not state['admin']:
+        return None
+    principal = administrator(state['user'])
+    saved = state.get('identity')
+    if saved is None:
+        legacy = (f'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n'
+                  f'#{principal["uid"]} ALL=(ALL:ALL) ALL\n').encode()
+        if not allow_legacy or read(SUDOERS) != legacy:
+            raise Error('Legacy numeric admin authorization requires explicit repair with unchanged NSS identity')
+    elif saved != principal:
+        raise Error('Saved admin principal mapping changed; refusing automatic authorization changes')
+    elif read(SUDOERS) != admin_rule(principal):
+        raise Error('Canonical admin rule drift')
+    return principal
 
 
 def root_required():
@@ -256,7 +369,7 @@ def save_state(state):
     # The containing directory holds original configuration/backups, root only.
     if STATE.parent.is_symlink():
         raise Error('Symlink state directory refused')
-    STATE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    ensure_directory(STATE.parent)
     check_state_ancestors(STATE.parent)
     if STATE.parent.stat().st_uid != os.geteuid() or stat.S_IMODE(STATE.parent.stat().st_mode) != 0o700:
         raise Error('State directory must be owned by current root and mode 0700')
@@ -313,12 +426,17 @@ def setup(domain, user, admin=False):
         print('Already set up; no changes')
         return
     native_sddm_contract()
+    principal = administrator(user)
+    recovery_parent()
+    if read(RECOVERY_ACCOUNT) is not None:
+        raise Error('Recovery principal policy exists without managed state')
     configuration_scope(domain, user)
     changes = []
     def add(path, data, mode=0o644):
         entry = planned(path, data, mode)
         if entry:
             changes.append(entry)
+    add(RECOVERY_ACCOUNT, identity_file(principal))
     original_pam = stock_pam()
     if read(PAM) is not None:
         raise Error('Dedicated PAM service exists without managed state; review manually')
@@ -355,28 +473,33 @@ def setup(domain, user, admin=False):
         raise Error('SDDM override already exists without managed state')
     add(OVERRIDE, b'[Theme]\nCurrent=omarchy-himmelblau\n')
     if admin:
-        uid = administrator(user)
         if read(SUDOERS) is not None:
             raise Error('Companion sudoers file already exists without managed state')
-        content = f'# Explicit single-identity admin opt-in; NSS UID, password/PIN required.\n#{uid} ALL=(ALL:ALL) ALL\n'.encode()
-        with tempfile.NamedTemporaryFile() as candidate:
-            candidate.write(content); candidate.flush()
-            subprocess.run(['visudo', '-cf', candidate.name], check=True, capture_output=True)
+        content = admin_rule(principal)
+        validate_sudo_rule(content)
         add(SUDOERS, content, 0o440)
     # All source/configuration preflight finished before touching guest files.
-    state = {'version': VERSION, 'domain': domain, 'user': user, 'admin': admin, 'apply_policy': False,
+    state = {'version': VERSION, 'domain': domain, 'user': user, 'admin': admin, 'identity': principal, 'apply_policy': False,
              'files': [{k: v for k, v in entry.items() if k != 'data'} for entry in changes]}
+    state['transaction'] = {'kind': 'setup', 'progress': {entry['path']: 'pending' for entry in changes}}
     save_state(state)
     try:
         for directory in theme_directories(changes):
             safe(directory / '.guard')
             directory.mkdir(mode=0o755)
             directory.chmod(0o755)  # Public greeter assets, independent of root umask.
+            fsync_directory(directory.parent)
         for entry in changes:
+            state['transaction']['progress'][entry['path']] = 'applying'
+            save_state(state)
             atomic(Path(entry['path']), entry['data'], entry['mode'])
+            state['transaction']['progress'][entry['path']] = 'applied'
+            save_state(state)
+        del state['transaction']
+        save_state(state)
     except Exception:
         try:
-            rollback()
+            rollback(_setup_recovery=True)
         except Exception:
             raise Error('Setup interrupted; automatic rollback blocked. Originals retained in root state; inspect manually.') from None
         raise Error('Setup failed; files changed by this attempt were restored.') from None
@@ -429,11 +552,17 @@ def policy(enable):
     state['apply_policy'] = enable
     state['version'] = VERSION
     journal = {'state': base64.b64encode(old_state).decode(),
-               'config': base64.b64encode(before).decode(), 'mode': 0o644}
+               'config': base64.b64encode(before).decode(), 'mode': 0o644,
+               'files': [{'path': str(CONFIG), 'data': base64.b64encode(before).decode(), 'mode': 0o644, 'after': digest(after)}],
+               'after_state': digest((json.dumps(state, indent=2) + '\n').encode()), 'progress': {}}
     atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
     try:
+        journal_step(backup, journal, str(CONFIG), 'applying')
         atomic(CONFIG, after, 0o644)
+        journal_step(backup, journal, str(CONFIG), 'applied')
+        journal_step(backup, journal, '@state', 'applying')
         save_state(state)
+        journal_step(backup, journal, '@state', 'applied')
         issues = root_issues(state, transaction=backup)
         if issues:
             raise Error('\n'.join(issues))
@@ -443,9 +572,9 @@ def policy(enable):
             atomic(STATE, old_state, 0o600)
         except Exception:
             raise Error(f'Policy rollback incomplete; recoverable originals retained at {backup}') from None
-        backup.unlink()
+        unlink_durable(backup)
         raise Error('Policy change failed; previous configuration and state restored') from None
-    backup.unlink()
+    unlink_durable(backup)
     print(f'Local apply_policy={str(enable).lower()} selected. No service restart or tenant operation performed.')
     print('This setting does not establish compliance or undo any enrollment or previously applied policy.')
 
@@ -464,14 +593,76 @@ def require_complete_configuration(domain, user, apply_policy=False):
         raise Error('Managed Himmelblau configuration keys are missing; refusing effective-scope assumptions')
 
 
+def native_payload_contract():
+    safe(NATIVE_PAYLOAD)
+    check_state_ancestors(NATIVE_PAYLOAD)
+    metadata = NATIVE_PAYLOAD.stat()
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o644 or metadata.st_size > 1024 * 1024:
+        raise Error('Unsafe independent native payload manifest')
+    no_extended_acl(NATIVE_PAYLOAD)
+    manifest = json.loads(read(NATIVE_PAYLOAD))
+    if not isinstance(manifest, dict):
+        raise Error('Invalid native payload manifest')
+    if (manifest.get('package') != 'sddm-himmelblau' or manifest.get('version') != '0.21.0-2'
+            or not isinstance(manifest.get('artifact_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', manifest['artifact_sha256'])
+            or not isinstance(manifest.get('source_commit'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', manifest['source_commit'])):
+        raise Error('Unsupported independent native payload provenance')
+    files = manifest.get('files')
+    if not isinstance(files, dict) or not {str(path) for path in NATIVE_EXECUTABLES}.issubset(files):
+        raise Error('Incomplete native authentication executable manifest')
+    component_files = set()
+    for directory in NATIVE_COMPONENTS:
+        safe(directory / '.guard')
+        if (not directory.is_dir() or directory.stat().st_uid != os.geteuid()
+                or stat.S_IMODE(directory.stat().st_mode) != 0o755):
+            raise Error('Unsafe or missing native QML component directory')
+        names = set()
+        for path in directory.rglob('*'):
+            safe(path / '.guard' if path.is_dir() else path)
+            if path.is_dir():
+                if path.stat().st_uid != os.geteuid() or path.stat().st_mode & 0o022:
+                    raise Error('Unsafe native component directory')
+            else:
+                names.add(str(path.relative_to(directory)))
+                component_files.add(str(path))
+        if 'qmldir' not in names or not any(name.endswith('.qml') for name in names):
+            raise Error('Native component tree lacks qmldir or QML payload')
+    if set(files) != {str(path) for path in NATIVE_EXECUTABLES} | component_files:
+        raise Error('Native component manifest differs from complete installed file set')
+    for name, expected in files.items():
+        path = Path(name)
+        if (not path.is_absolute() or '..' in path.parts or
+                (path not in NATIVE_EXECUTABLES and not any(path.is_relative_to(parent) for parent in NATIVE_COMPONENTS))):
+            raise Error('Unexpected native payload path')
+        if not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected):
+            raise Error('Invalid native payload hash')
+        safe(path)
+        check_state_ancestors(path)
+        no_extended_acl(path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, 'rb') as source:
+            metadata = os.fstat(source.fileno())
+            mode = stat.S_IMODE(metadata.st_mode)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or mode & 0o022 or (path in NATIVE_EXECUTABLES and mode != 0o755)):
+                raise Error('Unsafe native authentication payload metadata')
+            actual = hashlib.file_digest(source, 'sha256').hexdigest()
+        if actual != expected:
+            raise Error('Native authentication payload differs from companion release pin')
+
+
 def native_sddm_contract():
-    # This verifies installed package/service metadata, never the running daemon.
+    # Companion-owned release pin is independent of the native package metadata.
+    native_payload_contract()
+    # This verifies installed artifacts, never the running daemon.
     try:
-        result = subprocess.run(['pacman', '-Q', 'sddm-himmelblau'], check=True,
-                                capture_output=True, text=True)
+        result = subprocess.run(['/usr/bin/pacman', '-Q', 'sddm-himmelblau'], check=True,
+                                capture_output=True, text=True, env=COMMAND_ENV, cwd='/')
     except (OSError, subprocess.CalledProcessError):
-        raise Error('Reviewed native sddm-himmelblau 0.21.0-1 package required') from None
-    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-1':
+        raise Error('Reviewed native sddm-himmelblau 0.21.0-2 package required') from None
+    if result.stdout.strip() != 'sddm-himmelblau 0.21.0-2':
         raise Error('Unsupported native SDDM package version; review required')
     if read(SDDM_PIN_PAM) != SDDM_PIN_PAM_CONTENT:
         raise Error('Native SDDM PIN service missing/drifted; reinstall the native package explicitly')
@@ -491,11 +682,15 @@ def root_issues(state, *, transaction=None):
     issues = []
     try:
         no_pending_recovery(transaction)
+        if state.get('transaction') is not None:
+            raise Error('Interrupted root transaction; run explicit recover from a safe recovery session')
+        check_identity(state)
+        check_admin_identity(state)
         configuration_scope(state['domain'], state['user'], policy_mode(state))
         require_complete_configuration(state['domain'], state['user'], policy_mode(state))
         stock_pam()
         native_sddm_contract()
-        patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
+        supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
         info = json.loads((ASSETS / 'manifest.json').read_text())['sddm-conversation']
         if digest(read(COPY_THEME / 'Main.qml') or b'') != info['after']:
             raise Error('SDDM conversation theme requires explicit root repair')
@@ -523,7 +718,7 @@ def root_issues(state, *, transaction=None):
             data = read(path)
             if data is None:
                 raise Error('Missing source')
-            patch_source(name, data)
+            supported_source_hash(name, data)
         except Error:
             issues.append(f'Unsupported current source: {path}')
     return issues
@@ -542,7 +737,11 @@ def repair():
     old_state = read(STATE)
     backup = STATE.parent / 'repair-backup.json'
     no_pending_recovery()
+    if state.get('transaction') is not None:
+        raise Error('Interrupted root transaction; run explicit recover first')
     native_sddm_contract()
+    principal = check_identity(state, allow_legacy=True)
+    check_admin_identity(state, allow_legacy=True)
     configuration_scope(state['domain'], state['user'], policy_mode(state))
     require_complete_configuration(state['domain'], state['user'], policy_mode(state))
     desired_pam = patch_source('lock-pam', stock_pam())
@@ -558,8 +757,8 @@ def repair():
         # 0.2 repair installed its PIN service without updating 0.1 root labels.
         recorded_pin = next((entry for entry in state['files'] if Path(entry['path']) == PIN_PAM), None)
         if version not in ('0.1.0', '0.2.0') or (version == '0.1.0' and
-                (recorded_pin is None or recorded_pin['after'] != digest(PIN_PAM_CONTENT)
-                 or read(PIN_PAM) != PIN_PAM_CONTENT)):
+                (recorded_pin is None or recorded_pin['after'] not in (digest(PIN_PAM_CONTENT), digest(LEGACY_PIN_PAM_CONTENT))
+                 or read(PIN_PAM) not in (PIN_PAM_CONTENT, LEGACY_PIN_PAM_CONTENT))):
             raise Error('Legacy SDDM theme requires matching managed 0.2 history')
     if not legacy and theme_entry['after'] != manifest['sddm-conversation']['after']:
         raise Error('Unsupported managed SDDM theme state')
@@ -578,11 +777,19 @@ def repair():
             metadata = path.stat()
             if stat.S_IMODE(metadata.st_mode) != entry['mode'] or metadata.st_uid != os.geteuid():
                 raise Error(f'Repair refuses permission drift: {path}')
+        if path == RECOVERY_ACCOUNT and data is None and entry['after'] == digest(identity_file(principal)):
+            repairs.append((path, identity_file(principal), entry['mode']))
+            continue
+        if path == PIN_PAM and data == LEGACY_PIN_PAM_CONTENT:
+            entry['after'] = digest(PIN_PAM_CONTENT)
+            repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
+            continue
         if data is not None and digest(data) == entry['after']:
             if path == theme_path and legacy:
                 repairs.append((path, theme, entry['mode']))
             continue
-        if path == PIN_PAM and data is None:
+        if path == PIN_PAM and (data is None or data == LEGACY_PIN_PAM_CONTENT):
+            entry['after'] = digest(PIN_PAM_CONTENT)
             repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
             continue
         if path == PAM and (data is None or digest(data) == manifest['lock-pam']['before']):
@@ -590,6 +797,22 @@ def repair():
                 repairs.append((path, desired_pam, entry['mode']))
                 continue
         raise Error(f'Repair refuses unsupported managed drift: {path}')
+    if state.get('identity') is None:
+        recovery_parent()
+        if read(RECOVERY_ACCOUNT) is not None:
+            raise Error('Unmanaged recovery principal policy conflicts with migration')
+        entry = planned(RECOVERY_ACCOUNT, identity_file(principal), 0o644)
+        state['files'].append({key: value for key, value in entry.items() if key != 'data'})
+        repairs.append((RECOVERY_ACCOUNT, identity_file(principal), 0o644))
+    if state['admin'] and state.get('identity') is None:
+        entry = next((item for item in state['files'] if Path(item['path']) == SUDOERS), None)
+        if entry is None:
+            raise Error('Legacy admin rule lacks managed rollback history')
+        content = admin_rule(principal)
+        validate_sudo_rule(content)
+        repairs.append((SUDOERS, content, 0o440))
+        entry['after'] = digest(content)
+    state['identity'] = principal
     patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
@@ -597,18 +820,26 @@ def repair():
     theme_entry['after'] = digest(theme)
     state['version'] = VERSION
     originals = [{'path': str(path), 'data': base64.b64encode(read(path)).decode() if read(path) is not None else None,
-                  'mode': stat.S_IMODE(path.stat().st_mode) if path.exists() else mode}
+                  'mode': stat.S_IMODE(path.stat().st_mode) if path.exists() else mode, 'after': digest(data)}
                  for path, data, mode in repairs]
     directory_modes = [(directory, stat.S_IMODE(directory.stat().st_mode)) for directory in directories]
     journal = {'state': base64.b64encode(old_state).decode(), 'files': originals,
-               'directories': {str(path): mode for path, mode in directory_modes}}
+               'directories': {str(path): mode for path, mode in directory_modes},
+               'after_state': digest((json.dumps(state, indent=2) + '\n').encode()), 'progress': {}}
     atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
     try:
         for directory in directories:
+            journal_step(backup, journal, str(directory), 'applying')
             directory.chmod(0o755)
+            fsync_directory(directory)
+            journal_step(backup, journal, str(directory), 'applied')
         for path, data, mode in repairs:
+            journal_step(backup, journal, str(path), 'applying')
             atomic(path, data, mode)
+            journal_step(backup, journal, str(path), 'applied')
+        journal_step(backup, journal, '@state', 'applying')
         save_state(state)
+        journal_step(backup, journal, '@state', 'applied')
         issues = root_issues(state, transaction=backup)
         if issues:
             raise Error('\n'.join(issues))
@@ -617,7 +848,7 @@ def repair():
             for entry in reversed(originals):
                 path = Path(entry['path'])
                 if entry['data'] is None:
-                    safe(path).unlink(missing_ok=True)
+                    unlink_durable(path, missing_ok=True)
                 else:
                     atomic(path, base64.b64decode(entry['data']), entry['mode'])
             for directory, mode in directory_modes:
@@ -625,41 +856,178 @@ def repair():
             atomic(STATE, old_state, 0o600)
         except Exception:
             raise Error(f'Repair rollback incomplete; recoverable originals retained at {backup}') from None
-        backup.unlink()
+        unlink_durable(backup)
         raise Error('Repair failed; previous files and state restored') from None
-    backup.unlink()
+    unlink_durable(backup)
     print('Root repair complete. No daemon restart or session reload performed; existing user clones remain unchanged.')
 
 
-def rollback():
+def journal_step(path, journal, target, phase):
+    journal['progress'][target] = phase
+    atomic(path, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+
+
+def recover(recovery_only=False):
+    state = load_state()
+    require_no_live_locker(recovery_only)
+    pending = [STATE.parent / f'{kind}-backup.json' for kind in ('policy', 'repair')
+               if read(STATE.parent / f'{kind}-backup.json') is not None]
+    if not pending:
+        if state.get('transaction', {}).get('kind') in ('setup', 'rollback'):
+            rollback(recovery_only=recovery_only)
+            return
+        raise Error('No interrupted managed transaction to recover')
+    if len(pending) != 1 or state.get('transaction'):
+        raise Error('Conflicting recovery records; manual inspection required')
+    backup = pending[0]
+    metadata = backup.stat()
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise Error('Unsafe recovery journal ownership/mode')
+    journal = json.loads(read(backup))
+    if not isinstance(journal.get('files'), list) or 'after_state' not in journal or 'progress' not in journal:
+        raise Error('Legacy recovery journal requires manual inspection')
+    before_state = base64.b64decode(journal['state'])
+    current_state = read(STATE)
+    if current_state != before_state and digest(current_state) != journal.get('after_state'):
+        raise Error('Recovery refuses unknown state drift')
+    # Validate every target before restoring any file, including already restored files.
+    for entry in journal.get('files', []):
+        path = Path(entry['path'])
+        current = read(path)
+        original = base64.b64decode(entry['data']) if entry['data'] is not None else None
+        if 'after' not in entry or (current != original and (current is None or digest(current) != entry['after'])):
+            raise Error('Recovery refuses unknown target drift or legacy unbounded journal')
+        if current is not None and (path.stat().st_uid != os.geteuid() or stat.S_IMODE(path.stat().st_mode) != entry['mode']):
+            raise Error('Recovery refuses target permission drift')
+    for name, mode in journal.get('directories', {}).items():
+        path = Path(name)
+        safe(path / '.guard')
+        if (not path.is_relative_to(COPY_THEME) or not path.is_dir() or path.stat().st_uid != os.geteuid()
+                or stat.S_IMODE(path.stat().st_mode) not in (mode, 0o755)):
+            raise Error('Recovery refuses directory drift')
+    for entry in reversed(journal['files']):
+        path = Path(entry['path'])
+        journal_step(backup, journal, str(path), 'restoring')
+        if entry['data'] is None:
+            unlink_durable(path, missing_ok=True)
+        else:
+            atomic(path, base64.b64decode(entry['data']), entry['mode'])
+        journal_step(backup, journal, str(path), 'restored')
+    for name, mode in journal.get('directories', {}).items():
+        path = Path(name)
+        journal_step(backup, journal, name, 'restoring')
+        path.chmod(mode)
+        fsync_directory(path)
+        journal_step(backup, journal, name, 'restored')
+    journal_step(backup, journal, '@state', 'restoring')
+    atomic(STATE, before_state, 0o600)
+    journal_step(backup, journal, '@state', 'restored')
+    unlink_durable(backup)
+    print('Interrupted transaction restored to its previous managed state. No services or tenant operations performed.')
+
+
+def require_no_live_locker(recovery_only=False):
+    if recovery_only:
+        print('Recovery-only override: runtime safety is not verified; independent recovery access is required.')
+        return
+    try:
+        result = subprocess.run(['/usr/bin/loginctl', 'list-sessions', '--json=short'],
+                                check=True, capture_output=True, text=True, env=COMMAND_ENV, cwd='/', timeout=5)
+        sessions = json.loads(result.stdout)
+        if not isinstance(sessions, list) or len(sessions) > 64:
+            raise Error('Unknown session enumeration')
+        for session in sessions:
+            name = session.get('session') if isinstance(session, dict) else None
+            if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name):
+                raise Error('Unknown session identifier')
+            detail = subprocess.run(['/usr/bin/loginctl', 'show-session', name, '--property=Type', '--property=Class'],
+                                    check=True, capture_output=True, text=True, env=COMMAND_ENV, cwd='/', timeout=5)
+            properties = dict(line.split('=', 1) for line in detail.stdout.splitlines() if '=' in line)
+            if properties.get('Type') not in ('tty', 'unspecified', 'x11', 'wayland') or not properties.get('Class'):
+                raise Error('Unknown session state')
+            if properties['Type'] in ('x11', 'wayland') and properties['Class'] != 'greeter':
+                raise Error('A graphical session remains active')
+        processes = subprocess.run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'],
+                                   capture_output=True, env=COMMAND_ENV, cwd='/', timeout=5)
+        if processes.returncode != 1:
+            raise Error('Locker/compositor processes remain or process state is unknown')
+    except (OSError, ValueError, subprocess.SubprocessError, Error):
+        raise Error('Rollback/recovery requires all graphical/locker sessions exited; unknown state is refused. Use --recovery-only only from independent recovery access.') from None
+
+
+def rollback(recovery_only=False, _setup_recovery=False):
     state = load_state()
     no_pending_recovery()
+    if not (_setup_recovery and state.get('transaction', {}).get('kind') == 'setup'):
+        require_no_live_locker(recovery_only)
     # Validate every target first: never partly restore over unrecognized edits.
     if COPY_THEME.is_dir():
         expected = {entry['path'] for entry in state['files']}
+        expected_directories = set(theme_directories(state['files']))
         for path in COPY_THEME.rglob('*'):
-            if path.is_symlink() or (not path.is_dir() and str(path) not in expected):
+            if (path.is_symlink() or (path.is_dir() and path not in expected_directories)
+                    or (not path.is_dir() and str(path) not in expected)):
                 raise Error('Unexpected companion theme entry; refusing rollback')
     for entry in state['files']:
         data = read(Path(entry['path']))
         original = base64.b64decode(entry['before']) if entry['before'] is not None else None
         if data != original and (data is None or digest(data) != entry['after']):
             raise Error(f'Rollback refuses managed drift: {entry["path"]}')
+    state['transaction'] = {'kind': 'rollback', 'progress': {entry['path']: 'pending' for entry in state['files']}}
+    save_state(state)
     for entry in reversed(state['files']):
+        state['transaction']['progress'][entry['path']] = 'restoring'
+        save_state(state)
         path = Path(entry['path'])
         if entry['before'] is None:
-            safe(path).unlink(missing_ok=True)
+            unlink_durable(path, missing_ok=True)
         else:
             atomic(path, base64.b64decode(entry['before']), entry['before_mode'])
             if os.geteuid() == 0:
                 os.chown(path, entry['before_uid'], entry['before_gid'])
+        state['transaction']['progress'][entry['path']] = 'restored'
+        save_state(state)
     # Only remove empty companion theme directories; never recursively delete others' data.
     if COPY_THEME.is_dir():
         for directory in sorted((p for p in COPY_THEME.rglob('*') if p.is_dir()), reverse=True):
-            directory.rmdir()
-        COPY_THEME.rmdir()
-    STATE.unlink()
+            rmdir_durable(directory)
+        rmdir_durable(COPY_THEME)
+    unlink_durable(STATE)
     print('Root managed files restored. Required beforehand: disable the clone and exit every session using it; keepLoaded code survives disabling. User clone/hooks remain separate.')
+
+
+def no_extended_acl(path):
+    for attribute in ('system.posix_acl_access', 'system.posix_acl_default'):
+        try:
+            os.getxattr(path, attribute, follow_symlinks=False)
+        except OSError as error:
+            if error.errno in (errno.ENODATA, errno.ENOTSUP):
+                continue
+            raise Error('Unable to verify managed-path ACLs') from None
+        raise Error(f'Extended ACL refused for authentication code path: {path}')
+
+
+def user_path_guard(home, target):
+    if not target.is_relative_to(home):
+        raise Error('Managed user target is outside canonical home')
+    paths = [*reversed(home.parents), home]
+    current = home
+    for component in target.relative_to(home).parts:
+        current = current / component
+        paths.append(current)
+    for path in paths:
+        if path.is_symlink():
+            raise Error('Symlink in managed user ancestry')
+        if not path.exists():
+            continue
+        metadata = path.stat()
+        if metadata.st_uid not in (0, os.getuid()):
+            raise Error('Foreign owner in managed user ancestry')
+        shared_parent = (path != home and not path.is_relative_to(home)
+                         and metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX)
+        if metadata.st_mode & 0o022 and not shared_parent:
+            raise Error('Writable managed user ancestry/file refused')
+        no_extended_acl(path)
 
 
 def canonical_user():
@@ -670,6 +1038,7 @@ def canonical_user():
     home = alias.resolve(strict=True)
     if not home.is_dir() or home.stat().st_uid != os.getuid():
         raise Error('Resolved NSS home must belong to the current user')
+    user_path_guard(home, home)
     return account, home
 
 
@@ -682,19 +1051,23 @@ def user_paths():
         raise Error('Unsupported native clone user ID')
     if (user + '.lock').startswith('omarchy.'):
         raise Error('Native clone ID would use the reserved omarchy. namespace; enable-user is unsupported for this username')
-    return (user, home / '.config/omarchy/plugins' / (user + '.lock'),
-            home / '.local/state/omarchy-himmelblau/state.json',
-            home / '.config/omarchy/hooks/post-update.d/omarchy-himmelblau-check')
+    paths = (home / '.config/omarchy/plugins' / (user + '.lock'),
+             home / '.local/state/omarchy-himmelblau/state.json',
+             home / '.config/omarchy/hooks/post-update.d/omarchy-himmelblau-check')
+    for path in paths:
+        user_path_guard(home, path)
+    return (user, *paths)
 
 
 def user_environment():
     account, home = canonical_user()
-    return {**os.environ, **OMARCHY_ENV, 'HOME': str(home), 'USER': account.pw_name,
+    session = {key: os.environ[key] for key in ('DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
+    return {**COMMAND_ENV, **session, **OMARCHY_ENV, 'HOME': str(home), 'USER': account.pw_name,
             'LOGNAME': account.pw_name, 'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}'}
 
 
 def unlocked():
-    result = subprocess.run(['omarchy-shell', 'lock', 'status'], check=True,
+    result = subprocess.run(['/usr/bin/omarchy-shell', 'lock', 'status'], check=True,
                             capture_output=True, text=True, env=user_environment())
     try:
         state = json.loads(result.stdout)
@@ -707,11 +1080,24 @@ def unlocked():
 
 def clone_hashes(clone):
     safe(clone / '.guard')
+    metadata = clone.stat()
+    if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
+        raise Error('Unsafe clone root ownership/permissions')
+    no_extended_acl(clone)
     result = {}
     for path in sorted(clone.rglob('*')):
         if path.is_symlink():
             raise Error('Symlink inside managed native clone')
+        if path.is_dir():
+            metadata = path.stat()
+            if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
+                raise Error('Unsafe clone directory ownership/permissions')
+            no_extended_acl(path)
         if path.is_file():
+            metadata = path.stat()
+            if metadata.st_uid not in (0, os.getuid()) or metadata.st_mode & 0o022:
+                raise Error('Unsafe clone file ownership/permissions')
+            no_extended_acl(path)
             result[str(path.relative_to(clone))] = digest(read(path))
     return result
 
@@ -722,8 +1108,8 @@ def upstream_hashes():
     if source is None:
         raise Error('Missing upstream lock service')
     # Known before/after QML have identical intended behavior once patched.
-    files['Service.qml'] = digest(patch_source('lock-conversation', source))
-    files['LockView.qml'] = digest(patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b''))
+    files['Service.qml'] = supported_source_hash('lock-conversation', source)
+    files['LockView.qml'] = supported_source_hash('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     return files
 
 
@@ -758,7 +1144,7 @@ def user_status():
 
 
 def verify_native_clone(user):
-    result = subprocess.run(['omarchy', 'plugin', 'list', '--json'], check=True,
+    result = subprocess.run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], check=True,
                             capture_output=True, text=True, env=user_environment())
     try:
         plugins = json.loads(result.stdout)
@@ -805,20 +1191,33 @@ def replace_clone(clone, statefile, state, files, hook, hook_data=None):
         state['clone_files'] = clone_hashes(candidate)
         if clone_hashes(clone) != old_hashes:
             raise Error('Clone changed during staging; refusing update')
+        for staged in candidate.rglob('*'):
+            if staged.is_file():
+                with staged.open('rb') as source:
+                    os.fsync(source.fileno())
+        for directory in sorted((path for path in candidate.rglob('*') if path.is_dir()), reverse=True):
+            fsync_directory(directory)
+        fsync_directory(candidate)
+        fsync_directory(work)
+        fsync_directory(work.parent)
         unlocked()
         exchange_directories(clone, candidate)
         try:
+            fsync_directory(clone.parent)
+            fsync_directory(candidate.parent)
             if hook_data is not None:
                 atomic(hook, hook_data, 0o755)
             atomic(statefile, (json.dumps(state, indent=2) + '\n').encode(), 0o600)
         except Exception:
             try:
                 exchange_directories(clone, candidate)
+                fsync_directory(clone.parent)
+                fsync_directory(candidate.parent)
             except Exception:
                 cleanup = False
                 raise Error(f'Clone rollback exchange failed; old clone and state backups retained at {work}. Keep unlocked and recover manually.') from None
             if old_hook is None:
-                safe(hook).unlink(missing_ok=True)
+                unlink_durable(hook, missing_ok=True)
             else:
                 atomic(hook, old_hook, 0o755)
             if old_state is not None:
@@ -895,7 +1294,7 @@ def enable_user(upgrade=False):
     # It auto-enables the clone; keepLoaded code requires logout/login to adopt the patch.
     atomic(statefile, b'{"phase": "preparing"}\n', 0o600)
     try:
-        subprocess.run(['omarchy', 'plugin', 'clone', 'omarchy.lock'], check=True, env=user_environment())
+        subprocess.run(['/usr/bin/omarchy', 'plugin', 'clone', 'omarchy.lock'], check=True, env=user_environment())
         verify_native_clone(user)
         actual = read(clone / 'Service.qml')
         if actual != source:
@@ -903,7 +1302,7 @@ def enable_user(upgrade=False):
         if read(clone / 'LockView.qml') != read(LOCK.parent / 'LockView.qml'):
             raise Error('Native clone view differs from supported source')
         hook_data = ("#!/bin/sh\n# Read-only post-update check. Never repairs or reloads a locker.\n"
-                     "if ! omarchy-himmelblau status; then\n"
+                     "if ! /usr/bin/omarchy-himmelblau status; then\n"
                      "  printf '%s\\n' 'Review drift; root repair requires explicit sudo omarchy-himmelblau repair.' >&2\n"
                      "fi\n").encode()
         new_state = {'phase': 'ready', 'version': VERSION, 'clone_hash': digest(expected),
@@ -919,21 +1318,30 @@ def enable_user(upgrade=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--development', action='store_true', help='Use checkout assets explicitly; unprivileged development only')
     parser.add_argument('--version', action='version', version=VERSION)
     sub = parser.add_subparsers(dest='command', required=True)
     setup_parser = sub.add_parser('setup', help='Explicit root single-account configuration; no authentication')
     setup_parser.add_argument('--domain', required=True)
     setup_parser.add_argument('--user', required=True)
-    setup_parser.add_argument('--admin', action='store_true', help='Opt in the resolved NSS UID to authenticated sudo')
-    for command in ('doctor', 'status', 'repair', 'rollback'):
+    setup_parser.add_argument('--admin', action='store_true', help='Opt in the validated canonical NSS principal to authenticated sudo')
+    for command in ('doctor', 'status', 'repair'):
         sub.add_parser(command)
+    for command in ('rollback', 'recover'):
+        recovery_parser = sub.add_parser(command)
+        recovery_parser.add_argument('--recovery-only', action='store_true', help='Explicit runtime-check bypass from independent recovery access')
     policy_parser = sub.add_parser('policy', help='Explicit local policy opt-in/out; no enrollment or service actions')
     policy_choice = policy_parser.add_mutually_exclusive_group(required=True)
     policy_choice.add_argument('--enable', dest='policy_enabled', action='store_true')
     policy_choice.add_argument('--disable', dest='policy_enabled', action='store_false')
     user_parser = sub.add_parser('enable-user')
-    user_parser.add_argument('--upgrade', action='store_true', help='Upgrade an unchanged managed 0.1.0 clone atomically')
+    user_parser.add_argument('--upgrade', action='store_true', help='Upgrade a supported unchanged legacy managed clone atomically')
     args = parser.parse_args(argv)
+    if args.development:
+        if os.geteuid() == 0 or Path(__file__).resolve().parent.name != 'src':
+            raise Error('Development mode requires an unprivileged source checkout')
+        global ASSETS
+        ASSETS = Path(__file__).resolve().parents[1] / 'assets'
     if args.command == 'enable-user':
         enable_user(args.upgrade)
     elif args.command in ('doctor', 'status'):
@@ -947,7 +1355,9 @@ def main(argv=None):
         elif args.command == 'repair':
             repair()
         elif args.command == 'rollback':
-            rollback()
+            rollback(args.recovery_only)
+        elif args.command == 'recover':
+            recover(args.recovery_only)
 
 
 if __name__ == '__main__':

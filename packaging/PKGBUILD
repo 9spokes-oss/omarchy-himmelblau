@@ -1,20 +1,22 @@
 # Maintainer: 9Spokes OSS
 pkgname=omarchy-himmelblau
-pkgver=0.4.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau installation'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
 license=('MIT')
-depends=('sddm-himmelblau=0.21.0-1' 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
+depends=('sddm-himmelblau=0.21.0-2' 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
 makedepends=('make')
 # Build from a reviewed checkout; no install hooks or network/source substitution.
-source=()
-_repo="${OMARCHY_HIMMELBLAU_SRC:-${startdir%/packaging}}"
+source=('source.tar.gz' 'native-payload.json')
+sha256sums=('@SOURCE_SHA256@' '@NATIVE_PAYLOAD_SHA256@')
+_repo="$srcdir/omarchy-himmelblau"
 build() {
   make -B -C "$_repo" build/pin-change
 }
 package() {
+  install -Dm644 "$srcdir/native-payload.json" "$pkgdir/usr/share/omarchy-himmelblau/native-payload.json"
   make -C "$_repo" DESTDIR="$pkgdir" install
   install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

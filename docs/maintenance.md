@@ -34,4 +34,35 @@ Exercise these cases separately:
 
 Only the user enters credentials and MFA responses. Do not capture authentication screenshots, prompt transcripts, passwords, PINs, or codes. Record user-reported results separately from nonsecret process and lock-state evidence. Synthetic conversation tests cover failure and race conditions without consuming real invalid-PIN attempts.
 
-The helper uses `pam_chauthtok` for the current Unix identity and a fixed Himmelblau-only password service. It cannot unlock the desktop. A successful change replaces that user's Hello credential and invalidates associated cached credentials; configuration rollback does not undo it. Terminating the helper cannot reverse a daemon operation that has already committed. Keep recovery access available and use a separate normal authentication to determine which PIN is current.
+The helper binds the current Unix identity to the root-managed configured UPN, runs the dedicated PAM account phase, and calls `pam_chauthtok` only after account and identity checks succeed. It cannot unlock the desktop. A successful change replaces that user's Hello credential and invalidates associated cached credentials; configuration rollback does not undo it. Terminating the helper cannot reverse a daemon operation that has already committed. Keep recovery access available and use a separate normal authentication to determine which PIN is current.
+
+## Identity, provenance and interrupted changes
+
+Version `0.5.0` stores the configured UPN, canonical NSS name and UID. Every privileged
+status/repair checks their forward and reverse mappings. Administrative sudo rules use
+the canonical name rather than a persistent numeric-UID grant. An explicit `repair`
+can migrate an unchanged older managed rule after those checks. NSS remains trusted:
+round trips cannot establish global uniqueness or prevent a provider from assigning
+one kernel UID to multiple identities. Do not change identity mapping on a deployed
+machine without a separate migration plan.
+
+Both PIN recovery services bind to `/etc/omarchy-himmelblau/recovery-account` and deny
+missing, malformed, unsafe or mismatched identity policy before requesting a PIN.
+Only the configured principal is eligible. An account denial, `PAM_IGNORE`, expired
+account requiring an automatic token change, or changed PAM user does not authorize
+recovery. SDDM's recovery check intentionally avoids normal PAM expired-token side effects.
+
+The companion checks native executables against a payload manifest built into the
+separate companion package from the reviewed native artifact. Package name/version
+alone is insufficient. This detects a native package rebuilt or modified after the
+companion's accepted build. Trust the release source/checksums and package installation
+channel; the manifest is not a package signature and does not defend against root
+replacing both trusted packages. See [release builds](releasing.md).
+
+Configuration replacements fsync file contents and parent directories, and record
+per-entry transaction progress. If an operation is interrupted, preserve the root
+state/journal and run `sudo omarchy-himmelblau recover` from recovery access. It accepts
+only known before/after bytes; unknown edits need manual investigation. Default rollback
+and recovery refuse live or indeterminate graphical/locker sessions. The explicit
+`--recovery-only` override is for an operator at an independent console who has ensured
+that restoring configuration cannot strand a dependent session. It does not stop sessions.

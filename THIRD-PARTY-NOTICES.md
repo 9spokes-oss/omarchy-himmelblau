@@ -30,3 +30,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 The patch under `packaging/sddm-himmelblau/` modifies [SDDM](https://github.com/sddm/sddm) v0.21.0, copyright its upstream contributors. It uses the release and Arch packaging revisions recorded in that directory's `provenance.json`; the conversation work also draws on [upstream pull request 2215](https://github.com/sddm/sddm/pull/2215). Original file copyright notices are retained in the patched source.
 
 SDDM daemon, greeter and helper files are licensed under GPL-2.0-or-later. The `src/auth` library files retain LGPL-2.1-or-later as specified in their headers. These native modifications retain the licenses of their respective upstream files; the companion project's MIT license does not replace them. License texts are included in [LICENSES/SDDM-GPL-2.0.txt](LICENSES/SDDM-GPL-2.0.txt) and [LICENSES/SDDM-LGPL-2.1.txt](LICENSES/SDDM-LGPL-2.1.txt). Bundled upstream themes and assets retain their own notices and licenses in the source and package.
+
+The native patch embeds `src/recovery-account.h` as SDDM's
+`src/common/RecoveryAccount.h`. That shared header is original companion code under
+MIT; the enclosing SDDM sources retain their existing GPL/LGPL licenses. Build checks
+require the embedded header to match the companion header byte for byte.

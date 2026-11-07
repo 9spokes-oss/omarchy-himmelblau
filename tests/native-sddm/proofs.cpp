@@ -14,28 +14,44 @@
 #include "Session.h"
 #include "AuthMessages.h"
 #include "FakePlatform.h"
+#include "RecoveryAccount.h"
+static bool fixtureIdentityAllowed=true;
+static uid_t fixtureIdentityUid=1000;
+static int fixtureRecoveryAccount(const char *user,uid_t,int,struct oh_identity *identity){
+ if(!fixtureIdentityAllowed||strcmp(user,"requested@example.test"))return 0;
+ strcpy(identity->upn,"requested@example.test");strcpy(identity->name,"canonical-fixture");identity->uid=fixtureIdentityUid;return 1;
+}
 namespace SDDM {FixtureDaemon fixtureDaemon;FixtureDaemon *daemonApp=&fixtureDaemon;}
 using namespace SDDM;
 
+static int fixtureAccountResult=PAM_SUCCESS,fixtureAccountCalls=0;
+static int fixturePamAccount(void*,int){fixtureAccountCalls++;return fixtureAccountResult;}
+struct StrictAccountFixture{void*m_handle=nullptr;int m_silent=0,m_result=-1;bool acctMgmtStrict();};
+#include "PamAccountStrict.inc"
 // Fake only PAM/session/platform effects. Compile the actual helper branch and ACK check.
 namespace SDDM {
 inline uid_t fixtureHelperUid(){return 0;} // Model native root helper, never elevate the test process.
 struct FixtureSocket {int frames=1,disconnects=0;void waitForBytesWritten(int=0){}int bytesAvailable()const{return frames;}void disconnectFromServer(){disconnects++;frames=0;}};
 struct FixtureBackend;
-struct FixturePamAuth {FixtureBackend*owner;bool authenticate();bool acctMgmt();QString errorString()const{return QStringLiteral("synthetic failure");}};
+struct FixturePamAuth {FixtureBackend*owner;bool authenticate();bool acctMgmt();bool acctMgmtStrict();bool chAuthTok(int);const void *getItem(int);QString errorString()const{return QStringLiteral("synthetic failure");}};
 struct FixtureBackend {
- bool started=true,authenticated=true,accountAllowed=true,changeSucceeded=true;
+ bool started=true,authenticated=true,accountAllowed=true,changeSucceeded=true,recovery=true,remap=false,policyDrift=false;
  int authCalls=0,accountCalls=0,changeCalls=0,openCalls=0;
  bool start(const QString&){return started;}
+ oh_identity m_recoveryIdentity{"requested@example.test","canonical-fixture",1000};
  FixturePamAuth pam{this};FixturePamAuth*m_pam=&pam;FixtureBackend*m_app=this;
  void error(const QString&,Auth::Error){}bool authenticate();std::function<void()>onOpen;
- bool changePassword(){changeCalls++;return changeSucceeded;}
+ bool changePassword();bool pinRecovery()const{return recovery;}
  QString userName(){return QStringLiteral("canonical-fixture");}
  bool openSession(){openCalls++;if(onOpen)onOpen();return true;}
 };
 bool FixturePamAuth::authenticate(){owner->authCalls++;return owner->authenticated;}
 bool FixturePamAuth::acctMgmt(){owner->accountCalls++;return owner->accountAllowed;}
+bool FixturePamAuth::acctMgmtStrict(){if(owner->policyDrift)fixtureIdentityUid++;return acctMgmt();}
+bool FixturePamAuth::chAuthTok(int){owner->changeCalls++;return owner->changeSucceeded;}
+const void *FixturePamAuth::getItem(int){return owner->remap&&owner->accountCalls?"other@example.test":"requested@example.test";}
 #include "PamAuthenticate.inc"
+#include "PamChangePassword.inc"
 struct FixtureSession {
  int starts=0;QString command=QStringLiteral("never-executed");
  QString path()const{return command;}QProcessEnvironment processEnvironment()const{return {};}
@@ -243,10 +259,30 @@ private slots:
   FixtureWire::disconnected=false;FixtureWire::reply=AUTHENTICATED;
   HelperFixture helper;helper.backend.accountAllowed=false;helper.doAuth();QCOMPARE(helper.backend.accountCalls,1);QCOMPARE(helper.backend.openCalls,0);QCOMPARE(helper.session.starts,0);
  }
+ void strictAccountCheckHasNoTokenMutationSideEffects(){
+  for(int code:{PAM_SUCCESS,PAM_NEW_AUTHTOK_REQD,PAM_IGNORE,PAM_USER_UNKNOWN,PAM_PERM_DENIED,PAM_SYSTEM_ERR}){
+   StrictAccountFixture account;fixtureAccountCalls=0;fixtureAccountResult=code;
+   QCOMPARE(account.acctMgmtStrict(),code==PAM_SUCCESS);QCOMPARE(fixtureAccountCalls,1);QCOMPARE(account.m_result,code);
+  }
+ }
+ void deniedRecoveryNeverRequestsOrChangesToken(){
+  for(int variant=0;variant<4;variant++){
+   FixtureWire::disconnected=false;HelperFixture helper;helper.m_pinRecovery=true;
+   helper.backend.accountAllowed=variant!=0;helper.backend.remap=variant==1;fixtureIdentityAllowed=variant!=2;helper.backend.policyDrift=variant==3;
+   helper.doAuth();QCOMPARE(helper.backend.changeCalls,0);QCOMPARE(helper.backend.authCalls,0);
+   QCOMPARE(helper.backend.openCalls,0);QCOMPARE(helper.session.starts,0);QVERIFY(helper.exitCode!=Auth::HELPER_SUCCESS);
+  }
+  fixtureIdentityAllowed=true;fixtureIdentityUid=1000;
+ }
+ void recoveryUnresolvedIdentityNeverStartsHelper(){
+  QLocalSocket owner;DisplayFixture display;display.auth.active=false;display.m_conversationId=0;
+  fixtureIdentityAllowed=false;display.beginConversation(&owner,1,QStringLiteral("requested@example.test"),Session(),true);
+  QCOMPARE(display.auth.starts,0);fixtureIdentityAllowed=true;
+ }
  void recoveryNeverAuthenticatesOrOpensSession(){
   FixtureWire::disconnected=false;FixtureWire::tokenResults=0;
   HelperFixture helper;helper.m_pinRecovery=true;helper.doAuth();
-  QCOMPARE(helper.backend.changeCalls,1);QCOMPARE(helper.backend.authCalls,0);QCOMPARE(helper.backend.accountCalls,0);QCOMPARE(helper.backend.openCalls,0);QCOMPARE(helper.session.starts,0);QCOMPARE(FixtureWire::tokenResults,1);
+  QCOMPARE(helper.backend.changeCalls,1);QCOMPARE(helper.backend.authCalls,0);QCOMPARE(helper.backend.accountCalls,1);QCOMPARE(helper.backend.openCalls,0);QCOMPARE(helper.session.starts,0);QCOMPARE(FixtureWire::tokenResults,1);
  }
 };
 QTEST_GUILESS_MAIN(NativeProofs)

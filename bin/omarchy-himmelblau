@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 import runpy
-from pathlib import Path
-source = Path(__file__).resolve().parents[1] / 'src/omarchy_himmelblau.py'
-if not source.is_file():
-    source = Path('/usr/lib/omarchy-himmelblau/omarchy_himmelblau.py')
-runpy.run_path(str(source), run_name='__main__')
+runpy.run_path('/usr/lib/omarchy-himmelblau/omarchy_himmelblau.py', run_name='__main__')

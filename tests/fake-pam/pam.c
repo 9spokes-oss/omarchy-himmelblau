@@ -8,17 +8,35 @@
 #include <stdlib.h>
 #include <string.h>
 struct fixture_pam {struct pam_conv conv;};static struct fixture_pam h;
+static int account_checked;
 uid_t fixture_getuid(void){return 1000;}uid_t fixture_geteuid(void){return 1000;}
 int fixture_getpwuid_r(uid_t uid,struct passwd *pwd,char *buf,size_t size,struct passwd **out){
- (void)uid;(void)buf;(void)size;pwd->pw_name="fixture-user";*out=pwd;return 0;
+ (void)uid;(void)buf;(void)size;pwd->pw_name="fixture-user";pwd->pw_uid=getenv("FIXTURE_UID_DRIFT")&&account_checked?1001:1000;*out=pwd;return 0;
+}
+int fixture_getpwnam_r(const char *name,struct passwd *pwd,char *buf,size_t size,struct passwd **out){
+ (void)buf;(void)size;
+ if(getenv("FIXTURE_NSS_FAIL") || (strcmp(name,"alice@example.test") && strcmp(name,"fixture-user"))){*out=NULL;return 0;}
+ pwd->pw_name="fixture-user";pwd->pw_uid=getenv("FIXTURE_UID_DRIFT")&&account_checked?1001:1000;*out=pwd;return 0;
+}
+int pam_acct_mgmt(pam_handle_t *handle,int flags){
+ (void)handle;(void)flags;account_checked=1;
+ if(getenv("FIXTURE_UID_DRIFT")){
+  FILE *file=fopen(OH_RECOVERY_DIR "/recovery-account","w");if(!file)return PAM_SYSTEM_ERR;
+  fputs("alice@example.test\nfixture-user\n1001\n",file);fclose(file);
+ }
+ const char *result=getenv("FIXTURE_ACCOUNT_CODE");
+ return result?atoi(result):(getenv("FIXTURE_ACCOUNT_DENY")?PAM_SYSTEM_ERR:PAM_SUCCESS);
+}
+int pam_get_item(const pam_handle_t *handle,int item,const void **value){
+ (void)handle;(void)item;*value=getenv("FIXTURE_REMAP")?"other@example.test":"alice@example.test";return PAM_SUCCESS;
 }
 int pam_start(const char *service,const char *user,const struct pam_conv *conv,pam_handle_t **out){
  struct rlimit limit;getrlimit(RLIMIT_CORE,&limit);
- if(strcmp(service,"omarchy-himmelblau-pin-change")||strcmp(user,"fixture-user")||prctl(PR_GET_DUMPABLE)!=0||limit.rlim_cur!=0)return PAM_SYSTEM_ERR;
+ if(strcmp(service,"omarchy-himmelblau-pin-change")||strcmp(user,"alice@example.test")||prctl(PR_GET_DUMPABLE)!=0||limit.rlim_cur!=0)return PAM_SYSTEM_ERR;
  h.conv=*conv;*out=&h;return PAM_SUCCESS;
 }
 int pam_chauthtok(pam_handle_t *handle,int flags){
- (void)flags;const struct pam_message messages[]={
+ (void)flags;if(!account_checked)return PAM_SYSTEM_ERR;const struct pam_message messages[]={
  {PAM_TEXT_INFO,"Use number 42 in Authenticator <b>literal</b>"},
  {PAM_PROMPT_ECHO_OFF,"New PIN:"},{PAM_PROMPT_ECHO_OFF,"Confirm PIN:"},
  {PAM_PROMPT_ECHO_ON,"One-time code:"},{PAM_ERROR_MSG,"A literal test error"}};

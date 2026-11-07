@@ -17,3 +17,27 @@ jobs:
           persist-credentials: false
       - name: Run offline checks
         run: make test
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake extra-cmake-modules libpam0g-dev libxau-dev libxcb1-dev libxkbcommon-dev libsystemd-dev qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools qtbase5-dev qtdeclarative5-dev qttools5-dev qttools5-dev-tools
+      - name: Verify pinned source, patches and resulting files
+        run: python3 tools/prepare-native.py build/native-source
+      - name: Build actual Qt6 daemon, helper and greeter
+        run: |
+          cmake -S build/native-source/sddm-0.21.0 -B build/qt6 -DBUILD_WITH_QT6=ON -DBUILD_MAN_PAGES=OFF
+          cmake --build build/qt6 --parallel 2
+      - name: Build shipped Qt5 greeter and components
+        run: |
+          cmake -S build/native-source/sddm-0.21.0 -B build/qt5 -DBUILD_MAN_PAGES=OFF
+          cmake --build build/qt5/src/greeter --parallel 2
+          cmake --build build/qt5/components --parallel 2
+      - name: Run native security and lifecycle proofs
+        run: make native-test SDDM_SOURCE=build/native-source/sddm-0.21.0 SDDM_BUILD=build/qt6

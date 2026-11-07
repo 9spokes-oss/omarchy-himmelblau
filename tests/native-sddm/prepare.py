@@ -24,6 +24,7 @@ display=(source/'src/daemon/Display.cpp').read_text()
 methods='\n'.join(method(display, marker).replace('Display::','DisplayFixture::') for marker in [
  'void Display::login(', 'void Display::beginConversation(', 'void Display::respondConversation(', 'void Display::cancelConversation(', 'void Display::finishConversation(',
  'void Display::slotRequestChanged()', 'void Display::slotAuthenticationFinished(', 'void Display::slotHelperFinished('])
+methods=methods.replace('oh_recovery_account(', 'fixtureRecoveryAccount(')
 methods=methods.replace('XorgDisplayServer','FixtureXorgDisplayServer').replace('OrgFreedesktopLogin1ManagerInterface','FixtureManager')
 methods=methods.replace('Logind::','FixtureLogind::').replace('QDBusConnection::systemBus()','0')
 methods=methods.replace('mainConfig.','fixtureMainConfig.').replace('stateConfig.','fixtureStateConfig.')
@@ -36,3 +37,7 @@ body+='\n'+method(auth,'void Auth::Private::requestFinished()').replace('Auth::P
 pam=(source/'src/helper/backend/PamBackend.cpp').read_text()
 (target/'PamConversation.inc').write_text(method(pam,'int PamBackend::converse(').replace('PamBackend::','PamConversationFixture::'))
 (target/'PamAuthenticate.inc').write_text(method(pam,'bool PamBackend::authenticate()').replace('PamBackend::','FixtureBackend::'))
+(target/'PamChangePassword.inc').write_text(method(pam,'bool PamBackend::changePassword()').replace('PamBackend::','FixtureBackend::').replace('oh_recovery_account(', 'fixtureRecoveryAccount('))
+
+handle=(source/'src/helper/backend/PamHandle.cpp').read_text()
+(target/'PamAccountStrict.inc').write_text(method(handle,'bool PamHandle::acctMgmtStrict()').replace('PamHandle::','StrictAccountFixture::').replace('pam_acct_mgmt(', 'fixturePamAccount('))

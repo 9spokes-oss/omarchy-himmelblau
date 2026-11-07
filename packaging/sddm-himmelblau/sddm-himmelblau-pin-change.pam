@@ -1,2 +1,3 @@
-# Native SDDM PIN replacement; a successful change never starts a session.
+#%PAM-1.0
+account [success=ok default=die] pam_himmelblau.so
 password required pam_himmelblau.so

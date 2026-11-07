@@ -4,13 +4,13 @@ import {execFileSync} from 'node:child_process';
 import {tmpdir} from 'node:os';import {join} from 'node:path';import vm from 'node:vm';
 const root=new URL('../',import.meta.url),work=mkdtempSync(join(tmpdir(),'sddm-theme-proof-'));
 let source;
-try{writeFileSync(join(work,'Main.qml'),readFileSync(new URL('tests/fixtures/Main.qml',root)));execFileSync('patch',['--batch','--fuzz=0','-p1','-d',work],{input:readFileSync(new URL('assets/sddm-conversation.patch',root))});source=readFileSync(join(work,'Main.qml'),'utf8');}finally{rmSync(work,{recursive:true});}
-function fn(name){const start=source.indexOf(`function ${name}(`);assert.ok(start>=0,name);let end=source.indexOf('{',start)+1,depth=1;while(depth){if(source[end]==='{')depth++;if(source[end]==='}')depth--;end++;}return source.slice(start,end);}
+try{writeFileSync(join(work,'Main.qml'),readFileSync(new URL('tests/fixtures/Main.qml',root)));execFileSync('patch',['--batch','--fuzz=0','-p1','-d',work],{timeout:5000,input:readFileSync(new URL('assets/sddm-conversation.patch',root))});source=readFileSync(join(work,'Main.qml'),'utf8');}finally{rmSync(work,{recursive:true});}
+function fn(name){const start=source.indexOf(`function ${name}(`);assert.ok(start>=0,name);let end=source.indexOf('{',start)+1,depth=1;while(depth && end<source.length){if(source[end]==='{')depth++;if(source[end]==='}')depth--;end++;}assert.equal(depth,0,'unterminated function');return source.slice(start,end);}
 function fixture(){
  const calls={starts:[],responses:[],cancels:[]};const state={conversationAvailable:true,currentUser:'alice@example.test',sessionIndex:0,activeAttempt:0,activePrompt:0,lastPrompt:0,lastSentPrompt:0,responseHidden:true,recovering:false,cancelling:false,authorized:false,sessionStarted:false,noticeError:false,promptText:'',notices:[],loginFailed:false,
  password:{text:'',forceActiveFocus(){}},Qt:{Key_Escape:1,Key_R:2,ControlModifier:4}};state.root=state;
  state.sddm={beginConversation(user,session,recovery){calls.starts.push({user,session,recovery});return calls.starts.length;},respondConversation(attempt,prompt,response){calls.responses.push({attempt,prompt,response});},cancelConversation(attempt){calls.cancels.push(attempt);}};
- const scope=vm.createContext(state);for(const name of ['startConversation','submitResponse','cancelConversation','keyAction','onConversationPrompt','onConversationMessage','onConversationAuthorized','onConversationFinished','onSocketDisconnected'])vm.runInContext(fn(name),scope);
+ const scope=vm.createContext(state);for(const name of ['startConversation','submitResponse','cancelConversation','keyAction','onConversationPrompt','onConversationMessage','onConversationAuthorized','onConversationFinished','onSocketDisconnected'])vm.runInContext(fn(name),scope,{timeout:1000});
  return{state,calls};
 }
 let {state:s,calls}=fixture();s.conversationAvailable=false;s.startConversation(false);s.startConversation(true);assert.equal(calls.starts.length,0);
