@@ -1,9 +1,12 @@
 # Building and verifying a release
 
-The recipes in `packaging/` are release templates. They deliberately cannot build
-directly from an arbitrary checkout. Use a clean, reviewed commit; the exporter
-includes only `git archive` content and records its commit, tree and archive hash.
-Never run `makepkg` as root.
+The recipes in `packaging/` are templates and cannot build from an arbitrary
+checkout. Release from a clean, reviewed commit: the exporter ships only `git
+archive` content and records the commit, tree and archive hash. Never run
+`makepkg` as root.
+
+Never build a release with `makepkg --nocheck`. The native package's `check()`
+runs the security proofs; skipping it skips them.
 
 ```sh
 make test
@@ -12,43 +15,53 @@ cd /path/outside-checkout/release/native
 makepkg --noconfirm
 ```
 
-The native recipe verifies the pinned SDDM archive and patches, builds Qt6 and Qt5,
-and executes the native security proofs. Its proof sources come from the same
-checksum-pinned companion source archive. After independently inspecting that build:
+The native build verifies the pinned SDDM archive and patches, builds Qt6 and Qt5,
+and runs the proofs. Inspect the result independently, then pin it into the
+companion package:
 
 ```sh
 python3 /path/to/checkout/tools/finish-release.py /path/outside-checkout/release \
-  /path/outside-checkout/release/native/sddm-himmelblau-0.21.0-3-x86_64.pkg.tar.zst
+  /path/outside-checkout/release/native/sddm-himmelblau-*.pkg.tar.zst
 cd /path/outside-checkout/release/companion
 makepkg --noconfirm
 ```
 
-Install build dependencies from the recipes in a disposable Arch build environment.
-If the new native dependency is not installed there, `makepkg --nodeps` for the
-companion is acceptable only after separately checking that every other dependency
-is present and the exact native package has built successfully. It is not a runtime
-dependency waiver. Package installation does not start services or configure PAM.
+`finish-release.py` reads only metadata and hashes from the native archive; it
+installs nothing. The companion manifest pins the six native authentication
+executables and the packaged QML components. It refuses a release directory that
+is already pinned: export a fresh one to pin a different package.
 
-`finish-release.py` extracts only metadata and hashes from the exact native archive;
-it does not install it. The resulting companion payload manifest pins all six native
-authentication executables and packaged QML components. Keep `release.json`, both
-package archives, `source.tar.gz`, and SHA256SUMS together. Generate package checksums
-after the final build. From the exact clean release checkout, also run
-`python3 tools/corresponding-source.py /path/outside-checkout/release`. Publish its
-`sddm-corresponding-source.tar.gz` (complete patched native source) together with
-`source.tar.gz` (companion, patches, recipes and tests) alongside the native binary;
-do not rely solely on an upstream source download remaining available.
+Install build dependencies in a disposable Arch environment. If the companion
+cannot find the new native package as a dependency, `makepkg --nodeps` is fine
+only after you check every other dependency and confirm the exact native package
+built. It does not waive the runtime dependency. Installing a package starts no
+services and configures no PAM.
 
-Publish them from the reviewed commit as an **experimental
-prerelease**, with actual validation and known limitations. Do not publish private
-VM files, account/tenant/device identifiers, credentials, or authentication traces.
+Then, from the same clean checkout:
 
-Verify release checksums through a trusted publisher/source channel before `pacman -U`.
-Checksums detect mismatches; without a separately trusted signature they do not prove
-publisher identity against compromise of that same distribution channel. These builds
-are not asserted bit-for-bit reproducible. CI compiles actual native code and tests
-the protocol but cannot substitute real tenant authentication or desktop acceptance.
+```sh
+python3 tools/corresponding-source.py /path/outside-checkout/release
+```
 
-Before publication, review all reachable Git history and release payloads for private
-data, check third-party licenses and exact source provenance, and record VM acceptance.
-An upstream PR or marketplace submission remains pending until its maintainers accept it.
+Generate package checksums after the final build. Keep `release.json`, both
+package archives, `source.tar.gz`, `sddm-corresponding-source.tar.gz` and
+`SHA256SUMS` together. Publish the corresponding source (complete patched native
+source) and `source.tar.gz` (companion, patches, recipes, tests) with the native
+binary, so a release does not depend on the upstream download staying available.
+
+## Publishing
+
+- Publish from the reviewed commit as an experimental prerelease, listing what was
+  validated and the known limitations.
+- Before publishing, review all reachable Git history and the release files for
+  private data, check third-party licenses and source provenance, and record VM
+  acceptance. Release nothing containing private VM files, account, tenant or
+  device identifiers, credentials, or authentication traces.
+- Users should verify checksums through a trusted channel before `pacman -U`.
+  Without a separate signature, checksums catch mismatches but not a compromise of
+  the channel that serves them.
+- Builds are not bit-for-bit reproducible. CI compiles the native code and tests
+  the protocol, but it does not replace real tenant authentication or desktop
+  acceptance.
+- An upstream PR or marketplace submission stays pending until its maintainers
+  accept it.
