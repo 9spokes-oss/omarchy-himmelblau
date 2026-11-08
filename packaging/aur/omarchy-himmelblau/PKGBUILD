@@ -1,4 +1,4 @@
-# Maintainer: 9Spokes OSS
+# Maintainer: @MAINTAINER@
 # AUR recipe. The release recipe (packaging/PKGBUILD) pins a published native
 # artifact; a local build has none, so build() pins the installed
 # sddm-himmelblau files instead (see tools/pin-installed-native.py).
@@ -11,7 +11,10 @@ pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau inst
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
 license=('MIT')
-depends=("sddm-himmelblau=$_native" 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
+# Unlike the release recipe, no 'omarchy' dependency: that package is only in
+# Omarchy's own repository, not Arch's or the AUR. setup refuses to run without
+# Omarchy's lock source, and doctor reports it missing.
+depends=("sddm-himmelblau=$_native" 'himmelblau>=4.0.8' 'python' 'patch' 'pam')
 makedepends=('make' 'git' "sddm-himmelblau=$_native")
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('@RELEASE_SHA256@')

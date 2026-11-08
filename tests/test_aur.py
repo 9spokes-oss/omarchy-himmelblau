@@ -44,6 +44,21 @@ class AurRecipeTest(unittest.TestCase):
         self.assertIn("'f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'",
                       AUR_NATIVE.read_text(), 'upstream SDDM archive checksum differs from the release recipe')
 
+    def test_companion_dependencies_match_release_except_omarchy(self):
+        def depends(path):
+            script = f'source {str(path)!r} >/dev/null; printf "%s\\n" "${{depends[@]}}"'
+            return subprocess.run(['bash', '-c', script], capture_output=True, text=True, check=True,
+                                  timeout=10, env={'PATH': '/usr/bin:/bin'}).stdout.split()
+        release = depends(ROOT / 'packaging/PKGBUILD')
+        self.assertIn('omarchy', release)
+        self.assertEqual(depends(AUR_COMPANION), [d for d in release if d != 'omarchy'])
+
+    def test_aur_repositories_are_publishable(self):
+        for path in (AUR_NATIVE, AUR_COMPANION):
+            self.assertTrue(path.read_text().startswith('# Maintainer: @MAINTAINER@\n'), path)
+            self.assertIn('Permission to use, copy, modify, and/or distribute',
+                          (path.parent / 'LICENSE').read_text(), path.parent)
+
     def test_release_recipe_checksums_match_committed_inputs(self):
         script = (f'source {str(RELEASE_NATIVE)!r} >/dev/null; '
                   'for i in "${!source[@]}"; do printf "%s %s\\n" "${source[i]}" "${sha256sums[i]}"; done')

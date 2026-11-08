@@ -1,4 +1,4 @@
-# Maintainer: 9Spokes OSS
+# Maintainer: @MAINTAINER@
 # AUR recipe: builds the native backport from a tagged omarchy-himmelblau release.
 # Keep build(), check() and the dependency arrays in step with
 # packaging/sddm-himmelblau/PKGBUILD (tests/test_aur.py checks this).

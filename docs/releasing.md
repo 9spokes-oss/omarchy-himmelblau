@@ -81,16 +81,26 @@ GitHub release archive instead of a local export.
   proofs from the release archive, so the archive checksum covers them.
   `tests/test_aur.py` checks that versions, dependencies and `build()` match the
   release recipe.
+- **No `omarchy` dependency.** The `omarchy` package is only in Omarchy's own
+  repository, so an AUR package can't depend on it. `setup` refuses to run without
+  Omarchy's lock source instead. This is the only intended difference from the
+  release recipe's dependencies.
+- **Himmelblau comes first.** Both recipes need `himmelblau>=4.0.8`. Until the AUR's
+  `himmelblau` package carries 4.0.8 or later, the recipes can't resolve their
+  dependencies. Update that package through its maintainer, or adopt it if it is
+  orphaned, rather than uploading a duplicate.
 
 To publish after tagging `vX.Y.Z` and pushing the tag:
 
 1. In both recipes, replace `@RELEASE_SHA256@` with the archive checksum
-   (`updpkgsums`). In the companion, replace `@RELEASE_COMMIT@` with the tag's full
-   commit hash.
+   (`updpkgsums`) and `@MAINTAINER@` with the AUR account holder's
+   `Name <address at domain dot tld>`. In the companion, replace `@RELEASE_COMMIT@`
+   with the tag's full commit hash.
 2. Build both in a clean Arch environment: native first (its `check()` runs the
    proofs), install it, then build the companion. Never use `--nocheck`.
 3. Generate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO` and push each
-   recipe to its AUR repository (`ssh://aur@aur.archlinux.org/<pkgname>.git`).
+   recipe with its `LICENSE` (0BSD, covering the recipe only) to its AUR
+   repository (`ssh://aur@aur.archlinux.org/<pkgname>.git`).
    Don't commit filled-in checksums or `.SRCINFO` back to `packaging/aur/`; the
    templates keep the placeholders.
 
