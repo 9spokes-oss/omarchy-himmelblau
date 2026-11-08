@@ -65,3 +65,34 @@ binary, so a release does not depend on the upstream download staying available.
   acceptance.
 - An upstream PR or marketplace submission stays pending until its maintainers
   accept it.
+
+## AUR
+
+`packaging/aur/` holds AUR recipes for both packages. They build from the tagged
+GitHub release archive instead of a local export.
+
+- **The native pin.** A local build has no published native artifact, so the AUR
+  companion pins the files of the *installed* `sddm-himmelblau` when it is built
+  (`tools/pin-installed-native.py`). The manifest is marked `"build": "local"`.
+  `doctor` still detects later changes to those files. That they came from the
+  reviewed source rests on the recipes' pinned archive checksums, plus the
+  companion's check that the tag still points at the reviewed commit.
+- **One source of truth.** The native recipe takes its patches, PAM service and
+  proofs from the release archive, so the archive checksum covers them.
+  `tests/test_aur.py` checks that versions, dependencies and `build()` match the
+  release recipe.
+
+To publish after tagging `vX.Y.Z` and pushing the tag:
+
+1. In both recipes, replace `@RELEASE_SHA256@` with the archive checksum
+   (`updpkgsums`). In the companion, replace `@RELEASE_COMMIT@` with the tag's full
+   commit hash.
+2. Build both in a clean Arch environment: native first (its `check()` runs the
+   proofs), install it, then build the companion. Never use `--nocheck`.
+3. Generate `.SRCINFO` with `makepkg --printsrcinfo > .SRCINFO` and push each
+   recipe to its AUR repository (`ssh://aur@aur.archlinux.org/<pkgname>.git`).
+   Don't commit filled-in checksums or `.SRCINFO` back to `packaging/aur/`; the
+   templates keep the placeholders.
+
+Any change to the native package's `pkgrel` changes `NATIVE_VERSION`, so
+AUR-only fixes still need a companion release.
