@@ -296,7 +296,7 @@ Item {
   function runWake() {
     if (!wakeProcess.running) wakeProcess.running = true
     if (lockRequested) armBlankTimer()
-    if (authenticatingPassword) conversationIdleTimer.restart()
+    if (authenticatingPassword && awaitingPasswordResponse) conversationIdleTimer.restart()
     resumeFingerprint()
     nudgeFingerprint()
   }
@@ -1093,15 +1093,23 @@ Item {
     }
   }
 
-  // Cancels a sign-in or PIN change after a minute without PAM messages or user activity.
+  // Cancel only an unanswered input prompt after a minute without user activity.
+  // Silent PAM/network waits have their own backend timeouts.
   Timer {
     id: conversationIdleTimer
     interval: 60000
-    onTriggered: root.cancelPasswordAttempt()
+    onTriggered: {
+      if (root.authenticatingPassword && root.awaitingPasswordResponse) root.cancelPasswordAttempt()
+    }
+  }
+
+  onAwaitingPasswordResponseChanged: {
+    if (authenticatingPassword && awaitingPasswordResponse) conversationIdleTimer.restart()
+    else conversationIdleTimer.stop()
   }
 
   onAuthenticatingPasswordChanged: {
-    if (authenticatingPassword) conversationIdleTimer.restart()
+    if (authenticatingPassword && awaitingPasswordResponse) conversationIdleTimer.restart()
     else conversationIdleTimer.stop()
     if (!lockRequested) return
     if (authenticatingPassword) idleBlankTimer.stop()

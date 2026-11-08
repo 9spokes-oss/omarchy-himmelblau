@@ -5,9 +5,9 @@
   "arch_packaging_commit": "d31bfcbb0a8d2a8ca7ee4fd01d5d8dacdb1de729",
   "arch_cmake_commit": "228778c2b4b7e26db1e1d69fe484ed75c5791c3a",
   "arch_patch_sha256": "7f6ae3250f72a7de65e4b622d4396895005c73ee1e91c5901272c37e2c83bd05",
-  "native_patch_sha256": "c56a764929753447e181fe150a0496c7d8cb4ed548c734ab471ffc436eae9577",
+  "native_patch_sha256": "a3f8bc7f74dae8c3466144442be24152fa8364abebc58c234d89ca9d6c6f720c",
   "result_files": {
-    "src/auth/Auth.cpp": "1338e1bbd98d261ef1fc756c0a3e6cffd08ce162d7803ee17291c2e5a5e1310a",
+    "src/auth/Auth.cpp": "3bf4654c94cf0cca096f0e3567929d97d104894ffa1185d645b0a39794598aa1",
     "src/auth/Auth.h": "eae7a44af536029a5e3f3055a791a7d1351cbd732167a2db59d0dd683e82a9f3",
     "src/auth/AuthMessages.h": "0133368e51ab14a3616ccfe6faa56a2f3ea89af634f79ba24c88f43aae770884",
     "src/auth/AuthPrompt.cpp": "c94295d7fd8935801341a5e02a1b67de4cdbd8a9881d173ddaf4e59ddf19ff67",

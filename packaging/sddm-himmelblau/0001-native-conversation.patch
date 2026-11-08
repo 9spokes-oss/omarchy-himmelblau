@@ -127,7 +127,7 @@ index 6c9b5c6..09ffb13 100644
          if (exitStatus != QProcess::NormalExit) {
              qWarning("Auth: sddm-helper (%s) crashed (exit code %d)",
                       qPrintable(child->arguments().join(QLatin1Char(' '))),
-@@ -230,20 +268,27 @@ namespace SDDM {
+@@ -230,20 +268,29 @@ namespace SDDM {
          else
              qWarning("Auth: sddm-helper exited with %d", exitCode);
  
@@ -142,8 +142,10 @@ index 6c9b5c6..09ffb13 100644
      void Auth::Private::childError(QProcess::ProcessError error) {
 -        Q_UNUSED(error);
          Q_EMIT qobject_cast<Auth*>(parent())->error(child->errorString(), ERROR_INTERNAL);
-+        if (error == QProcess::FailedToStart)
++        if (error == QProcess::FailedToStart) {
++            killTimer->stop();
 +            Q_EMIT qobject_cast<Auth*>(parent())->finished(HELPER_OTHER_ERROR);
++        }
      }
  
      void Auth::Private::requestFinished() {
@@ -157,7 +159,7 @@ index 6c9b5c6..09ffb13 100644
      }
  
  
-@@ -262,6 +307,9 @@ namespace SDDM {
+@@ -262,6 +309,9 @@ namespace SDDM {
      }
  
      Auth::~Auth() {
@@ -167,7 +169,7 @@ index 6c9b5c6..09ffb13 100644
          stop();
          delete d;
      }
-@@ -367,11 +415,33 @@ namespace SDDM {
+@@ -367,11 +417,34 @@ namespace SDDM {
          }
      }
  
@@ -179,6 +181,7 @@ index 6c9b5c6..09ffb13 100644
 +
      void Auth::start() {
 +        if (isActive()) return;
++        d->killTimer->stop();
 +        // A fresh helper identity prevents an old socket from attaching to a new attempt.
 +        SocketServer::instance()->helpers.remove(d->id);
 +        d->id = Private::lastId++;
@@ -202,7 +205,7 @@ index 6c9b5c6..09ffb13 100644
              args << QStringLiteral("--start") << d->sessionPath;
          if (!d->user.isEmpty())
              args << QStringLiteral("--user") << d->user;
-@@ -384,14 +454,26 @@ namespace SDDM {
+@@ -384,14 +457,26 @@ namespace SDDM {
          d->child->start(QStringLiteral("%1/sddm-helper").arg(QStringLiteral(LIBEXEC_INSTALL_DIR)), args);
      }
  
@@ -413,7 +416,7 @@ new file mode 100644
 index 0000000..648d185
 --- /dev/null
 +++ b/src/common/RecoveryAccount.h
-@@ -0,0 +1,82 @@
+@@ -0,0 +0,82 @@
 +/* SPDX-License-Identifier: MIT
 + * Copyright (c) 2026 9Spokes
 + * Fixed, root-managed principal binding shared by the two PIN recovery clients.

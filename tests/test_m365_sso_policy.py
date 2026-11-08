@@ -5,6 +5,9 @@ import json
 import os
 from pathlib import Path
 import stat
+import shutil
+import subprocess
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -79,7 +82,7 @@ class M365PolicyTest(unittest.TestCase):
 
     def test_stdout_generation_has_no_install_or_network_effect(self):
         output = io.StringIO()
-        with patch.object(m, '_install') as install, contextlib.redirect_stdout(output):
+        with patch.object(m.os, 'geteuid', return_value=1000), patch.object(m, '_install') as install, contextlib.redirect_stdout(output):
             self.assertEqual(m.main(['--sharepoint-host', 'example.sharepoint.com',
                                      '--onedrive-host', 'example-my.sharepoint.com']), 0)
         install.assert_not_called()
@@ -92,6 +95,79 @@ class M365PolicyTest(unittest.TestCase):
                 m.main(['--sharepoint-host', 'example.sharepoint.com',
                         '--onedrive-host', 'example-my.sharepoint.com', '--install'])
         install.assert_not_called()
+
+    def test_root_checkout_refused_before_reading_preset_or_installing(self):
+        args = ['--sharepoint-host', 'example.sharepoint.com',
+                '--onedrive-host', 'example-my.sharepoint.com']
+        for extra in ([], ['--install']):
+            with self.subTest(extra=extra), patch.object(m.os, 'geteuid', return_value=0), \
+                    patch.object(m, 'generate') as generate, patch.object(m, '_install') as install, \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                m.main(args + extra)
+            generate.assert_not_called()
+            install.assert_not_called()
+
+    def test_root_sources_require_fixed_preset_isolation_and_trusted_ancestry(self):
+        script = self.root / 'usr/lib/omarchy-himmelblau/m365-sso-policy.py'
+        preset = self.root / 'usr/share/omarchy-himmelblau/chromium-m365-sso.json'
+        for source in (script, preset):
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text('{}')
+        check = m.trusted
+        def local_trusted(path, owner_uid, directory):
+            self.assertEqual(owner_uid, 0)
+            # The isolated fixture is user-owned; system ancestors retain root ownership.
+            return check(path, os.getuid() if path == self.root or self.root in path.parents else 0, directory)
+        # /tmp is intentionally writable, so model only the fixture's trusted boundary.
+        def fixture_trusted(path, owner_uid, directory):
+            if path == self.root or self.root in path.parents:
+                return local_trusted(path, owner_uid, directory)
+        with patch.object(m, '__file__', str(script)), patch.object(m, 'INSTALLED_SCRIPT', script), \
+                patch.object(m, 'INSTALLED_PRESET', preset), patch.object(m, 'PRESET', preset), \
+                patch.object(m.sys, 'flags', SimpleNamespace(isolated=1)), \
+                patch.object(m, 'trusted', side_effect=fixture_trusted):
+            m.root_sources()
+            with patch.object(m, 'PRESET', self.root / 'checkout.json'), self.assertRaises(m.PolicyError):
+                m.root_sources()
+            with patch.object(m.sys, 'flags', SimpleNamespace(isolated=0)), self.assertRaises(m.PolicyError):
+                m.root_sources()
+            preset.parent.chmod(0o777)
+            with self.assertRaises(m.PolicyError):
+                m.root_sources()
+            preset.parent.chmod(0o755)
+            preset.unlink(); preset.symlink_to(script)
+            with self.assertRaises(m.PolicyError):
+                m.root_sources()
+
+    def test_staged_install_ships_generator_and_unchanged_preset(self):
+        checkout = self.root / 'checkout'; checkout.mkdir()
+        for name in ('assets', 'docs', 'LICENSES', 'bin', 'src', 'tools', 'examples'):
+            shutil.copytree(ROOT / name, checkout / name)
+        for name in ('Makefile', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'README.md'):
+            shutil.copyfile(ROOT / name, checkout / name)
+        (checkout / 'build').mkdir()
+        (checkout / 'build/pin-change').write_text('test fixture')
+        stage = self.root / 'stage'
+        subprocess.run(['make', '-s', '-o', 'build/pin-change', 'install', 'DESTDIR=' + str(stage)],
+                       cwd=checkout, check=True, capture_output=True)
+        script = stage / 'usr/lib/omarchy-himmelblau/m365-sso-policy.py'
+        preset = stage / 'usr/share/omarchy-himmelblau/chromium-m365-sso.json'
+        self.assertEqual(script.read_bytes(), (ROOT / 'tools/m365-sso-policy.py').read_bytes())
+        self.assertTrue(script.read_text().startswith('#!/usr/bin/python3 -I\n'))
+        self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o755)
+        self.assertEqual(preset.read_bytes(), (ROOT / 'examples/chromium-m365-sso.json').read_bytes())
+        self.assertEqual(stat.S_IMODE(preset.stat().st_mode), 0o644)
+
+    def test_cli_install_reports_new_or_identical_policy(self):
+        for installed, expected in [(True, 'M365 SSO policy installed.'),
+                                    (False, 'M365 SSO policy already installed.')]:
+            output = io.StringIO()
+            with self.subTest(installed=installed), patch.object(m.os, 'geteuid', return_value=0), \
+                    patch.object(m, 'root_sources'), patch.object(m, '_install', return_value=installed), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(m.main(['--sharepoint-host', 'example.sharepoint.com',
+                                         '--onedrive-host', 'example-my.sharepoint.com', '--install']), 0)
+            self.assertEqual(output.getvalue(), expected + '\n')
 
     def test_install_under_restrictive_umask_is_public_and_idempotent(self):
         previous = os.umask(0o077)

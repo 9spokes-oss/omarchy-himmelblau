@@ -30,14 +30,14 @@ sign-in and hardware-backed protection are not established. See the detailed
 
 Plugin `0.5.2` also passed explicit migration, shell restart,
 and a user-confirmed current-PIN lock/unlock while preserving the desktop and terminal.
-See the [version-specific acceptance record](docs/maintenance.md#plugin-052-acceptance).
+Version `0.5.3` with native `0.21.0-4` has source/test validation only and has not
+passed live acceptance. See the [version-specific acceptance record](docs/maintenance.md#plugin-052-acceptance).
 
-To prefill M365 Background SSO permissions for your company, run this from a trusted
-checkout using its actual SharePoint and OneDrive hostnames (they need not match your
+To prefill M365 Background SSO permissions for your company, use the installed generator with its actual SharePoint and OneDrive hostnames (they need not match your
 email domain):
 
 ```sh
-sudo /usr/bin/python3 -I tools/m365-sso-policy.py --sharepoint-host example.sharepoint.com --onedrive-host example-my.sharepoint.com --install
+sudo /usr/lib/omarchy-himmelblau/m365-sso-policy.py --sharepoint-host example.sharepoint.com --onedrive-host example-my.sharepoint.com --install
 ```
 
 Omit `sudo` and `--install` to preview JSON first; add `--app-host app.example.com`
@@ -46,7 +46,7 @@ pending permission request. See [configuration and validation](docs/intune-sso.m
 
 ## Packages and setup
 
-The `0.5.2` companion requires `sddm-himmelblau=0.21.0-3`. This is a reviewed native
+The `0.5.3` companion requires `sddm-himmelblau=0.21.0-4`. This is a reviewed native
 backport, not a theme-only change or an official upstream SDDM release. Build both
 packages from a clean committed source export using [the release procedure](docs/releasing.md).
 Do not run the template PKGBUILDs directly or build packages as root.
@@ -70,6 +70,18 @@ account through Himmelblau to establish its identity before setup requires NSS
 resolution. The first successful cloud authentication can create a tenant device.
 Do not clear caches or rejoin an existing device to work around a setup failure.
 
+After setup, install and activate the plugin from an unlocked desktop, then log out
+and back in before testing the lock. Setup does not restart daemons, authenticate,
+join a tenant or reload sessions. Root `doctor` checks files and sources; it does not
+test daemon negotiation, authentication or sessions. User `status` performs the same
+checks as `plugin-status`; each command refuses the wrong privilege level.
+
+For a controlled `0.5.2` upgrade, install companion `0.5.3` and native SDDM
+`0.21.0-4` together, run `sudo omarchy-himmelblau repair`, then update the plugin
+while unlocked and restart the shell. Until repair, `doctor`, `setup` and `policy`
+refuse the old theme. The old `0.5.2` plugin can still lock during this transition;
+`status` and `plugin-status` report that it needs updating. See [maintenance](docs/maintenance.md).
+
 ## Install the Omarchy plugin
 
 After installing and configuring the matching companion packages, run as the target
@@ -92,23 +104,25 @@ omarchy-restart-shell
 omarchy-himmelblau plugin-status
 ```
 
-If an earlier companion-created user lock clone is enabled, replace the activation
-command with `omarchy-himmelblau activate-plugin --migrate`. It accepts only the known
-managed clone, disables it through Omarchy, verifies one selected lock implementation,
-and preserves its files/state. Unknown or multiple enabled lock clones are refused.
+If another lock clone is enabled, activation is refused. Disable it with
+`omarchy plugin disable <id>` while unlocked, then run `activate-plugin`.
+If activation fails, stay unlocked, inspect `omarchy plugin list`, disable the fixed
+plugin ID and restore the previous locker before restarting the shell.
 Keep the session unlocked and Stay Awake during activation. A rescan alone does not
 replace `keepLoaded` code; verify the shell is ready before locking.
 
 The published plugin is `9spokes.himmelblau-lock`, a native clone of `omarchy.lock`.
 It does not install packages, request sudo, join a tenant or overwrite existing user
-configuration on installation. A missing/drifted companion PAM prerequisite prevents
-locking; missing PIN helper support cannot unlock the screen. Keep the recovery
-console available and inspect any prerequisite error before relying on the locker.
+configuration on installation. If the dedicated PAM file cannot be loaded
+(`/etc/pam.d/omarchy-himmelblau-lock-password`), locking is refused with a desktop
+notification. Idle/suspend callers can remain unlocked in this case; verify lock state.
+After locking, a setup check runs once with a 15 s timeout; failure shows a warning
+on the locked screen. Inspect that warning from recovery access before relying on it.
 
-The original `enable-user` / `enable-user --upgrade` workflow remains available for
-managed user-specific clones. Do not enable it alongside the published plugin. Plugin
-and companion versions must match; unreviewed Omarchy source or plugin changes are
-refused. Update them together and repeat the unlocked activation checks.
+Plugin and companion versions must match; unreviewed Omarchy source or plugin
+changes are refused. Update them together and repeat the unlocked activation checks.
+The former `enable-user`, `enable-user --upgrade` and `activate-plugin --migrate`
+commands are removed. Disable any old `<user>.lock` clone before activation.
 
 To remove the plugin, first arrange a verified replacement locker for the work
 account, or end the work desktop and use the local recovery account for the remaining
@@ -117,9 +131,8 @@ switching a live work desktop straight back to it can strand the next lock.
 
 From an unlocked session, disable `9spokes.himmelblau-lock` through Omarchy, select
 and verify the replacement, and restart the shell before removing the disabled plugin
-with `omarchy plugin remove 9spokes.himmelblau-lock`. A previously managed user clone
-is preserved by migration, but must be checked against the current companion before
-reuse. Do not remove system dependencies while any session still uses them. Plugin
+with `omarchy plugin remove 9spokes.himmelblau-lock`. Old user clones must be
+checked against the current companion before reuse. Do not remove system dependencies while any session still uses them. Plugin
 removal does not remove credentials, undo a PIN change or delete tenant objects.
 
 ## Login, lock and PIN recovery
@@ -128,19 +141,27 @@ Press Enter to begin authentication, then answer each displayed prompt. Secret i
 are masked and informational instructions remain visible. Escape cancels and leaves
 the screen locked or at the greeter. **Reset work PIN** (`Ctrl+R`) starts the configured
 account's recovery flow; it cannot itself unlock or create a desktop.
+A failed or cancelled reset starts a 30 s backoff, doubling up to 15 min. The locker
+keeps this in memory and clears it on unlock or successful reset; SDDM tracks it in
+the daemon and clears it after successful reset. The greeter displays the remaining
+wait. An unanswered lock-screen input prompt is cancelled after 60 s without user
+activity. Silent MFA/network waits use backend timeouts and are not cancelled by
+this prompt timer; the new timer behavior still needs live acceptance.
 
 The locker helper is unprivileged, accepts no alternate user/service argument, and
 binds its current UID to the root-managed configured UPN. SDDM repeats the same identity
 checks in its privileged helper. Both require successful PAM account authorization
-before token change, and reject identity changes during that check. A cancelled
+before token change (account management is not authentication), and reject identity
+changes during that check. A cancelled
 operation cannot undo a credential change already committed by the daemon.
 
 ## Security and maintenance
 
 Privileged commands use fixed executable paths and an isolated Python interpreter.
 The companion tracks exact managed files, identity mappings and native payload hashes;
-unknown configuration, source or package drift is refused. Explicit `repair` migrates
-recognized older state. See [security policy](SECURITY.md), [maintenance](docs/maintenance.md)
+unknown configuration, source or package drift is refused. Explicit `repair` upgrades
+the recorded `0.5.2` theme; old 0.1/0.2 state is no longer migrated. See
+[security policy](SECURITY.md), [maintenance](docs/maintenance.md)
 and [release trust boundaries](docs/releasing.md).
 
 A user-owned lock clone is a snapshot: review it after Omarchy updates. Quickshell's
@@ -151,11 +172,15 @@ independent security principals by this integration.
 
 Before root rollback, disable the clone and exit every session loading it. The command
 refuses live or indeterminate graphical sessions by default. From independent recovery
-access, `recover` restores only known interrupted transaction states. Package removal
+access, `recover` restores only known interrupted transaction states. Root rollback
+does not remove user clones or hooks, and disabling a plugin leaves loaded code alive
+until the shell exits. Package removal
 alone does not reverse setup, PIN changes, tenant objects or Himmelblau's package hooks.
 
 Intune policy processing is an explicit opt-in (`policy --enable`); tenant scripts can
-run with root privileges. Enrollment does not prove compliance. The browser extension's
+run with root privileges. The command does not restart services or perform tenant
+operations; changing `apply_policy` does not prove compliance or undo enrollment
+or previously applied policy. Enrollment does not prove compliance. The browser extension's
 Online and compliance badges do not establish successful web SSO. All-site Background
 SSO is a deliberate broader permission and still requires browser approval; read
 [the current extension limitation](docs/intune-sso.md#background-sso-permissions).
@@ -168,8 +193,9 @@ python3 tools/prepare-native.py /tmp/omarchy-native-source
 ```
 
 CI compiles the actual patched Qt6 daemon/helper and Qt5 greeter and runs native security
-and lifecycle proofs. `bin/omarchy-himmelblau --development` explicitly runs checkout
-code as an unprivileged user; root checkout execution through that launcher is refused.
+and lifecycle proofs. Run checkout code unprivileged with
+`python3 src/omarchy_himmelblau.py --development <command>`. The installed launcher
+refuses `--development`, and development mode refuses root.
 Use a disposable VM for privileged integration and actual authentication acceptance.
 
 Companion code and Omarchy adaptations use [MIT](LICENSE). SDDM changes retain their

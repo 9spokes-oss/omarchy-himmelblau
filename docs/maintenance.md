@@ -19,13 +19,27 @@ hardening or a fresh session through the newly installed SDDM daemon. Earlier
 milestones exercised those flows; their version-specific results remain separate.
 Releases and marketplace submission are currently draft/withdrawn while polishing.
 
-Before the next native package publication, remove the added hard `RLIMIT_CORE=0`
-limit from the normal-login helper path: child desktop sessions can inherit it.
-Retain helper dump protection, keep the PIN-only helpers' limits separate, and test
-child-limit inheritance under a new package identity. This affects crash-dump
-configuration, not authentication correctness; piped core collectors can ignore
-this limit. Existing `0.5.2` assets and the running desktop are not changed by this
-follow-up.
+## Controlled upgrade to 0.5.3
+
+Version `0.5.3` with native `0.21.0-4` has not passed live acceptance. The `0.5.2`
+results above remain historical and do not validate this release.
+
+1. Install companion `0.5.3` and native SDDM `0.21.0-4` together.
+2. Run `sudo omarchy-himmelblau repair` to upgrade the recorded `0.5.2` theme copy.
+   Until then, `doctor`, `setup` and `policy` refuse it and require explicit repair.
+3. Update the plugin while unlocked, restart with `omarchy-restart-shell`, and run
+   user `omarchy-himmelblau status` or `plugin-status` before testing the lock.
+
+The `0.5.2` plugin continues locking between package and plugin upgrades, but status
+reports that it needs updating. The removed `activate-plugin --migrate` and
+`enable-user` commands cannot be used for this upgrade. Disable competing lock clones
+with `omarchy plugin disable <id>` before activation. Older 0.1/0.2 state is rejected.
+Keep recovery access and matching rollback packages available.
+
+The normal-login helper's hard `RLIMIT_CORE=0` inheritance issue is fixed in source:
+only `--change-pin` gets that limit. Source/build tests validate the fix; a fresh
+session through the `0.21.0-4` daemon and runtime child-limit checks remain pending.
+Existing `0.5.2` assets and the running desktop are unchanged by that source fix.
 
 ## Validation procedure
 
@@ -67,10 +81,9 @@ The helper binds the current Unix identity to the root-managed configured UPN, r
 
 ## Identity, provenance and interrupted changes
 
-Version `0.5.0` stores the configured UPN, canonical NSS name and UID. Every privileged
-status/repair checks their forward and reverse mappings. Administrative sudo rules use
-the canonical name rather than a persistent numeric-UID grant. An explicit `repair`
-can migrate an unchanged older managed rule after those checks. NSS remains trusted:
+Since version `0.5.0`, state stores the configured UPN, canonical NSS name and UID. Every privileged
+`doctor`/repair operation checks their forward and reverse mappings. Administrative sudo rules use
+the canonical name rather than a persistent numeric-UID grant. Numeric-UID sudoers rule migration is no longer supported. NSS remains trusted:
 round trips cannot establish global uniqueness or prevent a provider from assigning
 one kernel UID to multiple identities. Do not change identity mapping on a deployed
 machine without a separate migration plan.

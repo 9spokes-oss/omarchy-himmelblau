@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Generate an exact-host M365 extension policy; no browser or network access."""
 import argparse
 import json
@@ -10,7 +10,10 @@ import sys
 import tempfile
 
 EXTENSION = 'jlnfnnolkbjieggibinobhkjdfbpcohn'
-PRESET = Path(__file__).resolve().parents[1] / 'examples/chromium-m365-sso.json'
+INSTALLED_SCRIPT = Path('/usr/lib/omarchy-himmelblau/m365-sso-policy.py')
+INSTALLED_PRESET = Path('/usr/share/omarchy-himmelblau/chromium-m365-sso.json')
+PRESET = (INSTALLED_PRESET if Path(__file__).absolute() == INSTALLED_SCRIPT else
+          Path(__file__).resolve().parents[1] / 'examples/chromium-m365-sso.json')
 POLICY_DIR = Path('/etc/chromium/policies/managed')
 POLICY_NAME = '90-omarchy-himmelblau-m365.json'
 MISSING = object()
@@ -57,12 +60,12 @@ def generate(sharepoint, onedrive, apps=()):
     extras = [hostname(value) for value in apps]
     preset = apps_in(json.loads(PRESET.read_text(encoding='utf-8')))
     if not isinstance(preset, dict) or not preset or any(value is not True for value in preset.values()):
-        raise PolicyError('The repository M365 preset is invalid')
+        raise PolicyError('The M365 preset is invalid')
     known = {}
     for host in preset:
         normalized = hostname(host)
         if normalized in known:
-            raise PolicyError('The repository M365 preset contains duplicate normalized hosts')
+            raise PolicyError('The M365 preset contains duplicate normalized hosts')
         known[normalized] = True
     for host in [sharepoint, onedrive, *extras]:
         known[host] = True
@@ -77,6 +80,18 @@ def trusted(path, owner_uid, directory):
     if directory and metadata.st_mode & 0o005 != 0o005:
         raise PolicyError('Policy directories must be readable and traversable by Chromium')
     return metadata
+
+
+def root_sources():
+    """Never read checkout data or run a checkout generator with root privileges."""
+    if Path(__file__).absolute() != INSTALLED_SCRIPT or PRESET != INSTALLED_PRESET:
+        raise PolicyError('Root execution requires the installed generator and preset')
+    if not sys.flags.isolated:
+        raise PolicyError('Root execution requires /usr/bin/python3 -I')
+    for source in (INSTALLED_SCRIPT, INSTALLED_PRESET):
+        for directory in reversed(source.parents):
+            trusted(directory, 0, True)
+        trusted(source, 0, False)
 
 
 def _install(policy, directory, boundary, owner_uid):
@@ -153,11 +168,14 @@ def main(argv=None):
     parser.add_argument('--install', action='store_true', help='Explicitly install the fixed Chromium managed policy as root')
     args = parser.parse_args(argv)
     try:
+        if os.geteuid() == 0:
+            root_sources()
         policy = generate(args.sharepoint_host, args.onedrive_host, args.app_host)
         if args.install:
             if os.geteuid() != 0:
                 raise PolicyError('--install requires root')
-            _install(policy, POLICY_DIR, Path('/'), 0)
+            installed = _install(policy, POLICY_DIR, Path('/'), 0)
+            print('M365 SSO policy installed.' if installed else 'M365 SSO policy already installed.')
         else:
             print(json.dumps(policy, indent=2))
     except (PolicyError, OSError, ValueError) as error:

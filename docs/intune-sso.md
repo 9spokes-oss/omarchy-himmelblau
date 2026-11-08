@@ -94,7 +94,7 @@ from an email domain without verifying it. Microsoft's [endpoint list](https://l
 and [web-app documentation](https://learn.microsoft.com/en-us/microsoft-365-apps/privacy/web-cookies)
 identify the current and legacy entry hosts used here.
 
-Use `tools/m365-sso-policy.py --sharepoint-host tenant.sharepoint.com
+Use `/usr/lib/omarchy-himmelblau/m365-sso-policy.py --sharepoint-host tenant.sharepoint.com
 --onedrive-host tenant-my.sharepoint.com` to generate the complete JSON. The two
 verified tenant hostnames are explicit inputs; different prefixes are accepted for
 renamed or multi-geo environments. Repeat `--app-host app.example.com` for other
@@ -102,7 +102,8 @@ applications. Input validation requires exact ASCII DNS names and never performs
 network discovery or infers tenant ownership from a hostname.
 
 By default the script prints JSON and changes nothing. Add `--install` and run with
-`sudo /usr/bin/python3 -I` for the fixed file
+`sudo /usr/lib/omarchy-himmelblau/m365-sso-policy.py` (with the same hostname
+arguments) for the fixed file
 `/etc/chromium/policies/managed/90-omarchy-himmelblau-m365.json`. The installer checks
 trusted nonsymlink paths, writes a new root-owned `0644` file, accepts identical
 existing content, and refuses different target content or conflicting managed
@@ -113,7 +114,11 @@ Review existing `/etc/chromium/policies/managed/*.json` files for conflicting
 JSON as a separate root-owned, mode `0644` policy file; do not overwrite an existing
 policy blindly. Linux Chromium maps settings directly under that extension ID,
 as documented by [Chromium](https://www.chromium.org/administrators/configuring-policy-for-extensions/#linux).
-The companion does not install this optional example automatically.
+The package ships the generator and preset at fixed root-owned paths under
+`/usr/lib/omarchy-himmelblau` and `/usr/share/omarchy-himmelblau`; it does not activate
+the optional policy automatically. Root execution refuses checkout code, mutable
+paths and a non-isolated Python interpreter. For unprivileged checkout previews only,
+use `python3 -I tools/m365-sso-policy.py` with the same hostname arguments.
 
 True `wellKnownApps` entries request these permissions; they are not an exclusive
 browser permission allowlist. Existing exact-site grants omitted from this map can

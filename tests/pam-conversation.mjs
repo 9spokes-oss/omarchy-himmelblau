@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import { loadFunctions, patchedFixture } from './qml-functions.mjs';
 
 const service = patchedFixture('Service.qml', 'lock-conversation.patch');
+const handlerSource = service
+  .replace('onAwaitingPasswordResponseChanged:', 'function promptStateChanged()')
+  .replace('onAuthenticatingPasswordChanged:', 'function authenticationStateChanged()')
+  .replace(/(id: conversationIdleTimer[\s\S]*?)onTriggered:/, '$1function idlePromptTriggered()');
 const view = patchedFixture('LockView.qml', 'lock-view.patch');
 
 const CONVERSATION_FUNCTIONS = [
@@ -9,7 +13,7 @@ const CONVERSATION_FUNCTIONS = [
   'addPasswordNotice', 'settlePasswordAttempt', 'handlePasswordFailure', 'cancelPasswordAttempt',
   'completePasswordAttempt', 'beginPinRecovery', 'currentPinRecovery', 'handlePinRecoveryLine',
   'stopPinRecovery', 'escalatePinRecoveryStop', 'finishPinRecovery', 'currentlyLocked',
-  'resetAuthenticationState', 'finishUnlock',
+  'resetAuthenticationState', 'finishUnlock', 'promptStateChanged', 'authenticationStateChanged', 'idlePromptTriggered',
 ];
 
 function stoppedTimer() {
@@ -45,6 +49,8 @@ function harness() {
     sessionLock: { locked: true, secure: true },
     fingerprintPam: { active: false },
     pinRecoveryStopTimer: stoppedTimer(),
+    conversationIdleTimer: stoppedTimer(),
+    armBlankTimer() {},
     PamResult: { Success: 0 },
     I18n: { t() { return { arg(n) { return `failed ${n}`; } }; }, formatNumber(n) { return n; } },
     runWake() {},
@@ -112,7 +118,18 @@ function harness() {
       };
     },
   };
-  return loadFunctions(service, CONVERSATION_FUNCTIONS, state);
+  loadFunctions(handlerSource, CONVERSATION_FUNCTIONS, state);
+  // Model QML change signals using the actual source handlers, including synchronous
+  // notification when a response or PAM message clears a pending prompt.
+  for (const [property, handler] of [['awaitingPasswordResponse', 'promptStateChanged'],
+    ['authenticatingPassword', 'authenticationStateChanged']]) {
+    let value = state[property];
+    Object.defineProperty(state, property, {
+      get() { return value; },
+      set(next) { if (value !== next) { value = next; state[handler](); } },
+    });
+  }
+  return state;
 }
 
 let s, c, next, recovery;
@@ -386,16 +403,47 @@ s.submitPassword('dummy');
 c.complete(0);
 assert.equal(s.unlocks, 1);
 
-// Activity during a conversation restarts its one-minute cancel timer.
+// Only unanswered input arms the timer. Silent backend/MFA waits are never
+// cancelled, even if a stale timer event is delivered after input submission.
+s = harness();
+s.submitPassword('');
+c = s.passwordPam;
+assert.equal(s.conversationIdleTimer.running, false);
+s.idlePromptTriggered();
+assert.equal(s.passwordPam, c);
+c.prompt('PIN:');
+assert.equal(s.conversationIdleTimer.running, true);
+s.submitPassword('dummy-pin');
+assert.equal(s.conversationIdleTimer.running, false);
+s.idlePromptTriggered();
+assert.equal(s.passwordPam, c);
+c.prompt('Continue?', true);
+assert.equal(s.conversationIdleTimer.running, true);
+c.info('Waiting for Authenticator approval');
+assert.equal(s.conversationIdleTimer.running, false);
+s.idlePromptTriggered();
+assert.equal(s.passwordPam, c);
+c.prompt('One-time code:');
+assert.equal(s.conversationIdleTimer.running, true);
+s.idlePromptTriggered(); // The timer's 60 s expiry while input remains pending.
+assert.equal(s.passwordPam, null);
+assert.equal(s.unlocks, 0);
+assert.equal(s.conversationIdleTimer.running, false);
+
+// Activity refreshes the timeout only while an input prompt is pending.
 const wake = loadFunctions(service, ['runWake'], {
   wakeProcess: { running: true },
   lockRequested: true,
   authenticatingPassword: true,
+  awaitingPasswordResponse: false,
   conversationIdleTimer: stoppedTimer(),
   armBlankTimer() {},
   resumeFingerprint() {},
   nudgeFingerprint() {},
 });
+wake.runWake();
+assert.equal(wake.conversationIdleTimer.running, false);
+wake.awaitingPasswordResponse = true;
 wake.runWake();
 assert.equal(wake.conversationIdleTimer.running, true);
 wake.conversationIdleTimer.stop();
