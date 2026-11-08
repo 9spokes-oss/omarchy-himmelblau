@@ -40,7 +40,7 @@ Only the user types credentials, PINs and MFA responses. Record what the user re
 
 ## Recorded results
 
-Recorded on 2026-11-07 with `sddm-himmelblau 0.21.0-1`, companion `0.3.0-1`, Omarchy `4.5.0-3` and Himmelblau `4.0.8-1`, using the Qt6 greeter. The PIN/MFA recovery cycle has not been run again on later builds, including `0.21.0-3` and the changes after it. The results cover the account and tenant used, not every MFA method or policy; Intune enrollment and offline sign-in were not tested.
+Recorded on 2026-11-07 with `sddm-himmelblau 0.21.0-1`, companion `0.3.0-1`, Omarchy `4.5.0-3` and Himmelblau `4.0.8-1`, using the Qt6 greeter. The separate 2026-11-08 acceptance for companion `0.5.3-1` and native `0.21.0-4`, including repeated PIN/MFA recovery, is recorded in [maintenance](maintenance.md#plugin-053-acceptance). The results cover the account and tenant used, not every MFA method or policy; Intune enrollment and offline sign-in were not tested.
 
 - Local recovery login opened a Wayland desktop through the rebuilt greeter.
 - The user confirmed login with the current PIN; session metadata showed a new work desktop.

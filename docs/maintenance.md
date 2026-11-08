@@ -21,8 +21,8 @@ Releases and marketplace submission are currently draft/withdrawn while polishin
 
 ## Controlled upgrade to 0.5.3
 
-Version `0.5.3` with native `0.21.0-4` has not passed live acceptance. The `0.5.2`
-results above remain historical and do not validate this release.
+Version `0.5.3` with native `0.21.0-4` completed the controlled lab acceptance
+below on 2026-11-08. The `0.5.2` results above remain historical.
 
 1. Install companion `0.5.3` and native SDDM `0.21.0-4` together.
 2. Run `sudo omarchy-himmelblau repair` to upgrade the recorded `0.5.2` theme copy.
@@ -37,9 +37,44 @@ with `omarchy plugin disable <id>` before activation. Older 0.1/0.2 state is rej
 Keep recovery access and matching rollback packages available.
 
 The normal-login helper's hard `RLIMIT_CORE=0` inheritance issue is fixed in source:
-only `--change-pin` gets that limit. Source/build tests validate the fix; a fresh
-session through the `0.21.0-4` daemon and runtime child-limit checks remain pending.
-Existing `0.5.2` assets and the running desktop are unchanged by that source fix.
+only `--change-pin` gets that limit. Source/build tests validate the fix. Fresh
+desktop processes had unlimited core limits, but the daemon itself had soft/hard
+limits of zero; this runtime observation does not independently prove the source
+fix's effect on inheritance.
+
+## Plugin 0.5.3 acceptance
+
+On 2026-11-08, source `2ebc04dca67536df95dede8fb7673beca5fdd1d2`, companion
+`0.5.3-1` and native SDDM `0.21.0-4` completed the following controlled lab checks:
+
+- Paired package installation, explicit repair and doctor passed. The previous
+  `0.5.2` plugin still passed locker preflight while status requested an update.
+  Exact-source plugin activation and the supported shell restart preserved the
+  original desktop and two terminals, checked by process IDs and start times.
+- A secure lock reported dedicated PAM and recovery ready, with no setup warning.
+  Normal authentication cancellation and PIN-reset cancellation/backoff passed.
+  An unanswered input timed out at about 60.6 seconds and retained the secure lock.
+- The user confirmed current-PIN unlock and successful locker PIN/MFA replacement
+  while the screen stayed locked, followed by a separate new-PIN unlock. Process
+  checks confirmed the original desktop and both terminals survived.
+- A fresh SDDM daemon's running executable matched the installed native payload.
+  Normal and reset helpers exited after Escape with no responses supplied; the
+  same daemon and greeter remained, with no work session. The user confirmed a
+  current-PIN login, then successful greeter PIN/MFA replacement. After reset,
+  metadata showed the same daemon/greeter and no work session or remaining helper.
+- The user confirmed login with the latest PIN, then lock/unlock into the same
+  desktop and terminal. Final doctor, user status/plugin-status and locker
+  preflight passed; native payload hashes, identity/home mapping, PAM,
+  Himmelblau configuration, shell configuration and plugin Git configuration
+  matched their expected baselines. The original idle preferences were restored.
+
+User authentication reports and nonsecret process/lock metadata are separate
+observations. Local recovery SSH/sudo worked, but local recovery GUI login was not
+repeated on this build. A silent MFA wait longer than 60 seconds was not
+independently timed. Core-limit runtime causality remains inconclusive as described
+above. These results do not establish offline sign-in or every MFA method/policy.
+Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3` is unpublished.
+Marketplace submission remains withdrawn.
 
 ## Validation procedure
 

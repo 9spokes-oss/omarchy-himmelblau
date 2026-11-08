@@ -30,8 +30,9 @@ sign-in and hardware-backed protection are not established. See the detailed
 
 Plugin `0.5.2` also passed explicit migration, shell restart,
 and a user-confirmed current-PIN lock/unlock while preserving the desktop and terminal.
-Version `0.5.3` with native `0.21.0-4` has source/test validation only and has not
-passed live acceptance. See the [version-specific acceptance record](docs/maintenance.md#plugin-052-acceptance).
+Version `0.5.3` with native `0.21.0-4` completed controlled lab acceptance on
+2026-11-08, including separate locker and fresh-SDDM PIN/MFA recovery cycles. See
+the [version-specific results and limits](docs/maintenance.md#plugin-053-acceptance).
 
 To prefill M365 Background SSO permissions for your company, use the installed generator with its actual SharePoint and OneDrive hostnames (they need not match your
 email domain):
@@ -145,8 +146,9 @@ A failed or cancelled reset starts a 30 s backoff, doubling up to 15 min. The lo
 keeps this in memory and clears it on unlock or successful reset; SDDM tracks it in
 the daemon and clears it after successful reset. The greeter displays the remaining
 wait. An unanswered lock-screen input prompt is cancelled after 60 s without user
-activity. Silent MFA/network waits use backend timeouts and are not cancelled by
-this prompt timer; the new timer behavior still needs live acceptance.
+activity; this timeout passed live in the lab. Silent MFA/network waits use backend
+timeouts and are not cancelled by this prompt timer. A silent MFA wait beyond
+60 seconds was not independently timed.
 
 The locker helper is unprivileged, accepts no alternate user/service argument, and
 binds its current UID to the root-managed configured UPN. SDDM repeats the same identity
