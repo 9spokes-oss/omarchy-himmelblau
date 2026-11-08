@@ -203,6 +203,24 @@ class CompanionTest(unittest.TestCase):
         target.write_bytes(b'synthetic native payload'); target.chmod(0o777)
         with self.assertRaisesRegex(m.Error, 'metadata'): m.native_sddm_contract()
 
+    def test_native_pin_accepts_only_release_or_marked_local_provenance(self):
+        original = m.NATIVE_PAYLOAD.read_bytes()
+        release = json.loads(original)
+        local = dict(release, build='local', artifact_sha256=None)
+        m.NATIVE_PAYLOAD.write_text(json.dumps(local))
+        m.native_payload_contract()
+        for changes in ({'build': 'local'},                      # local, but still names an artifact
+                        {'artifact_sha256': None},               # no artifact, not marked local
+                        {'build': 'release', 'artifact_sha256': None},
+                        {'build': None, 'artifact_sha256': None}):
+            m.NATIVE_PAYLOAD.write_text(json.dumps(dict(release, **changes)))
+            with self.assertRaisesRegex(m.Error, 'provenance'): m.native_payload_contract()
+        m.NATIVE_PAYLOAD.write_text(json.dumps(local))
+        m.NATIVE_EXECUTABLES[0].write_bytes(b'changed binary')
+        with self.assertRaisesRegex(m.Error, 'release pin'): m.native_payload_contract()
+        m.NATIVE_EXECUTABLES[0].write_bytes(b'synthetic native payload')
+        m.NATIVE_PAYLOAD.write_bytes(original)
+
     def test_native_component_trees_cannot_be_omitted_or_extended(self):
         original = m.NATIVE_PAYLOAD.read_bytes()
         manifest = json.loads(original)

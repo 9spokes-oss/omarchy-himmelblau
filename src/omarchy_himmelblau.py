@@ -676,9 +676,15 @@ def native_payload_contract():
     payload = json.loads(read(NATIVE_PAYLOAD))
     if not isinstance(payload, dict):
         raise Error('Invalid native payload payload')
+    # A release pin names its published artifact. A local (AUR) build has none:
+    # tools/pin-installed-native.py marks it "build": "local" with a null hash.
+    artifact = payload.get('artifact_sha256')
+    if 'build' in payload:
+        artifact_ok = payload['build'] == 'local' and artifact is None
+    else:
+        artifact_ok = isinstance(artifact, str) and re.fullmatch(r'[0-9a-f]{64}', artifact)
     if (payload.get('package') != 'sddm-himmelblau' or payload.get('version') != NATIVE_VERSION
-            or not isinstance(payload.get('artifact_sha256'), str)
-            or not re.fullmatch(r'[0-9a-f]{64}', payload['artifact_sha256'])
+            or not artifact_ok
             or not isinstance(payload.get('source_commit'), str)
             or not re.fullmatch(r'[0-9a-f]{40}', payload['source_commit'])):
         raise Error('Unsupported independent native payload provenance')
