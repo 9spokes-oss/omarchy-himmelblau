@@ -285,12 +285,12 @@ class CompanionTest(unittest.TestCase):
 
     def test_setup_interruption_recovers_pending_and_applied_files(self):
         original = m.atomic; interrupted = False
-        def crash(path, data, mode):
+        def crash(path, data, mode, *owner):
             nonlocal interrupted
             if path == m.CONFIG and not interrupted:
                 interrupted = True
                 raise KeyboardInterrupt
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): self.setup()
         # Initial setup: no state file before, and none yet when it crashed.
@@ -308,9 +308,9 @@ class CompanionTest(unittest.TestCase):
         self.setup()
         old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
         original = m.atomic
-        def crash(path, data, mode):
+        def crash(path, data, mode, *owner):
             if path == m.STATE: raise KeyboardInterrupt
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): m.policy(True)
         self.assertIn(b'apply_policy = true', m.CONFIG.read_bytes())
@@ -327,9 +327,9 @@ class CompanionTest(unittest.TestCase):
 
     def test_recovery_refuses_drift_before_any_restoration(self):
         self.setup(); old_state = m.STATE.read_bytes(); original = m.atomic
-        def crash(path, data, mode):
+        def crash(path, data, mode, *owner):
             if path == m.STATE: raise KeyboardInterrupt
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): m.policy(True)
         m.CONFIG.write_bytes(m.CONFIG.read_bytes()+b'# unknown drift\n')
@@ -344,13 +344,13 @@ class CompanionTest(unittest.TestCase):
             for after_write in (False, True):
                 with self.subTest(target=target.name, after_write=after_write):
                     crashed = False
-                    def crash(path, data, mode):
+                    def crash(path, data, mode, *owner):
                         nonlocal crashed
                         if path == target and not crashed:
                             crashed = True
-                            if after_write: original(path, data, mode)
+                            if after_write: original(path, data, mode, *owner)
                             raise KeyboardInterrupt
-                        return original(path, data, mode)
+                        return original(path, data, mode, *owner)
                     with patch.object(m, 'atomic', crash):
                         with self.assertRaises(KeyboardInterrupt): self.setup()
                     m.recover()
@@ -360,9 +360,9 @@ class CompanionTest(unittest.TestCase):
     def test_repair_and_rollback_crashes_can_resume_from_exact_before_after(self):
         self.setup(); original = m.atomic; old_state = m.STATE.read_bytes()
         m.PAM.unlink()
-        def crash_repair(path, data, mode):
+        def crash_repair(path, data, mode, *owner):
             if path == m.STATE: raise KeyboardInterrupt
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash_repair):
             with self.assertRaises(KeyboardInterrupt): m.repair()
         self.assertTrue(m.PAM.exists())
@@ -411,9 +411,9 @@ class CompanionTest(unittest.TestCase):
         """A policy change that crashed at its state commit: CONFIG is at its after value."""
         self.setup()
         atomic = m.atomic
-        def crash(path, data, mode):
+        def crash(path, data, mode, *owner):
             if path == m.STATE: raise KeyboardInterrupt
-            return atomic(path, data, mode)
+            return atomic(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): m.policy(True)
         return json.loads(m.journal_path().read_text())
@@ -442,9 +442,9 @@ class CompanionTest(unittest.TestCase):
 
     def test_recover_refuses_after_side_directory_metadata_drift(self):
         atomic = m.atomic
-        def crash(path, data, mode):
+        def crash(path, data, mode, *owner):
             if path == m.CONFIG: raise KeyboardInterrupt  # Theme directories already exist.
-            return atomic(path, data, mode)
+            return atomic(path, data, mode, *owner)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): self.setup()
         journal = json.loads(m.journal_path().read_text())
@@ -545,6 +545,72 @@ class CompanionTest(unittest.TestCase):
             self.assertFalse(m.COPY_THEME.exists())
         finally:
             os.umask(previous)
+
+    def test_a_second_root_command_is_refused_while_one_holds_the_lock(self):
+        self.setup()
+        old = {path: path.read_bytes() for path in (m.STATE, m.CONFIG)}
+        fd = os.open(m.STATE.parent / '.lock', os.O_RDWR)
+        try:
+            m.fcntl.flock(fd, m.fcntl.LOCK_EX | m.fcntl.LOCK_NB)  # Another process's command.
+            for action in (self.setup, m.repair, m.rollback, m.recover, lambda: m.policy(True)):
+                with self.subTest(action=action):
+                    with self.assertRaisesRegex(m.Error, 'Another omarchy-himmelblau root command'):
+                        action()
+            self.assertFalse(m.journal_path().exists())
+            for path, data in old.items():
+                self.assertEqual(path.read_bytes(), data)
+        finally:
+            os.close(fd)
+        m.policy(True)
+
+    def test_journal_creation_never_replaces_an_existing_journal(self):
+        self.setup()
+        m.journal_path().write_text('{"other": 1}'); m.journal_path().chmod(0o600)
+        with self.assertRaisesRegex(m.Error, 'journal exists'):
+            m.create_exclusive(m.journal_path(), b'{}', 0o600)
+        self.assertEqual(m.journal_path().read_text(), '{"other": 1}')
+        self.assertEqual([p.name for p in m.STATE.parent.iterdir() if p.name.startswith('.himmelblau-')], [])
+
+    def test_owner_is_set_on_the_temporary_inode_before_replacement(self):
+        calls = []
+        fchown, replace = os.fchown, os.replace
+        def record_fchown(fd, uid, gid):
+            calls.append('fchown'); return fchown(fd, uid, gid)
+        def record_replace(source, target):
+            calls.append('replace'); return replace(source, target)
+        target = self.base / 'owned'
+        with patch.object(m.os, 'fchown', record_fchown), patch.object(m.os, 'replace', record_replace):
+            m.atomic(target, b'data', 0o640, os.geteuid(), os.getegid())
+        self.assertEqual(calls, ['fchown', 'replace'])
+        self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+
+    def test_transactions_set_directory_owner_and_doctor_checks_group(self):
+        self.setup()
+        theme_dirs = set(m.theme_directories(m.load_state()['files']))
+        chowned = []
+        chown = os.chown
+        def record(path, uid, gid, *args, **kwargs):
+            chowned.append((Path(path), uid, gid)); return chown(path, uid, gid, *args, **kwargs)
+        m.PAM.unlink()
+        with patch.object(m.os, 'chown', record):
+            m.repair()
+        self.assertTrue(theme_dirs <= {path for path, *_ in chowned})
+        self.assertTrue(all((uid, gid) == m.owner() for path, uid, gid in chowned if path in theme_dirs))
+        uid, gid = m.owner(); state = m.load_state()
+        with patch.object(m, 'owner', return_value=(uid, gid + 1)):  # Directories now off-group.
+            issues = m.root_issues(state)
+        self.assertTrue(any('companion theme directory' in issue for issue in issues), issues)
+
+    def test_directory_recovery_accepts_each_field_at_before_or_after_only(self):
+        before = {'mode': 0o700, 'uid': 1, 'gid': 1}
+        after = {'mode': 0o755, 'uid': 1, 'gid': 2}
+        self.assertTrue(m.matches_directory({'mode': 0o755, 'uid': 1, 'gid': 1}, before, after))
+        self.assertTrue(m.matches_directory({'mode': 0o700, 'uid': 1, 'gid': 2}, before, after))
+        self.assertFalse(m.matches_directory({'mode': 0o750, 'uid': 1, 'gid': 1}, before, after))
+        self.assertFalse(m.matches_directory({'mode': 0o755, 'uid': 1, 'gid': 3}, before, after))
+        self.assertFalse(m.matches_directory(None, before, after))
+        self.assertTrue(m.matches_directory(None, None, after))
+        self.assertFalse(m.matches_directory({'mode': 0o700, 'uid': 1, 'gid': 1}, None, after))
 
     def test_state_access_refuses_writable_or_foreign_ancestors(self):
         self.setup()
@@ -768,12 +834,12 @@ class CompanionTest(unittest.TestCase):
         for target in (m.CONFIG, m.STATE):
             old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
             failed = False
-            def fail_once(path, data, mode):
+            def fail_once(path, data, mode, *owner):
                 nonlocal failed
                 if Path(path) == target and not failed:
                     failed = True
                     raise OSError('synthetic failure')
-                return original(path, data, mode)
+                return original(path, data, mode, *owner)
             with patch.object(m, 'atomic', fail_once):
                 with self.assertRaises(m.Error): m.policy(True)
             self.assertTrue(failed)
@@ -785,9 +851,9 @@ class CompanionTest(unittest.TestCase):
         m.setup('example.com', 'alice@example.com')
         old_config = m.CONFIG.read_bytes(); old_state = m.STATE.read_bytes()
         original = m.atomic
-        def failure(path, data, mode):
+        def failure(path, data, mode, *owner):
             if Path(path) == m.STATE: raise OSError('synthetic persistent state failure')
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', failure):
             with self.assertRaisesRegex(m.Error, 'could not be undone; run recover'): m.policy(True)
         journal = m.journal_path()
@@ -896,6 +962,30 @@ class CompanionTest(unittest.TestCase):
         self.setup()
         self.assertTrue(m.STATE.exists())
 
+    def test_setup_finds_autologin_the_way_sddm_parses_it(self):
+        conf_dir = self.base / 'etc/sddm.conf.d'
+        cases = {
+            conf_dir / 'autologin': '[Autologin]\nUser=alice\n',  # No .conf suffix.
+            conf_dir / 'inline.conf': '[Autologin] # active\nUser=alice\n',
+            conf_dir / 'value-comment.conf': '[Autologin]\nUser = alice # note\n',
+            self.base / 'usr/lib/sddm/sddm.conf.d/vendor.conf': '[Autologin]\nUser=alice\n',
+            self.base / 'etc/sddm.conf': '[General]\n[Autologin]\n  User=alice\n',
+        }
+        for path, text in cases.items():
+            with self.subTest(path=path.name):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                self.assertEqual(m.autologin_sources(), [path])
+                with self.assertRaisesRegex(m.Error, 'autologin'): self.setup()
+                path.unlink()
+
+    def test_setup_ignores_autologin_sddm_would_not_apply(self):
+        self.write_autologin('[Autologin]\n# User=alice\nUser=\nUser= # none\n;User=alice\n'
+                             '[Other]\nUser=alice\nUser=alice [Autologin]\n')
+        (self.base / 'etc/sddm.conf.d/subdir').mkdir()
+        self.assertEqual(m.autologin_sources(), [])
+        self.setup()
+
     def test_doctor_reports_autologin_added_after_setup(self):
         self.setup()
         self.write_autologin('[Autologin]\nUser=alice\n')
@@ -934,12 +1024,12 @@ class CompanionTest(unittest.TestCase):
         for failed_path in (m.PAM, m.STATE):
             with self.subTest(path=failed_path):
                 failed = False
-                def injected(path, data, mode):
+                def injected(path, data, mode, *owner):
                     nonlocal failed
                     if path == failed_path and not failed:
                         failed = True
                         raise OSError('synthetic repair failure')
-                    return atomic(path, data, mode)
+                    return atomic(path, data, mode, *owner)
                 with patch.object(m, 'atomic', injected):
                     with self.assertRaisesRegex(m.Error, 'Repair failed and was undone'):
                         m.repair()
@@ -950,10 +1040,10 @@ class CompanionTest(unittest.TestCase):
     def test_repair_failed_rollback_retains_recoverable_journal(self):
         old = self.missing_pam_root()
         atomic = m.atomic
-        def injected(path, data, mode):
+        def injected(path, data, mode, *owner):
             if path == m.STATE:
                 raise OSError('state write and restore failure')
-            return atomic(path, data, mode)
+            return atomic(path, data, mode, *owner)
         with patch.object(m, 'atomic', injected):
             with self.assertRaisesRegex(m.Error, 'could not be undone; run recover'):
                 m.repair()
@@ -1021,19 +1111,19 @@ class CompanionTest(unittest.TestCase):
         m.CONFIG.parent.symlink_to(elsewhere, target_is_directory=True)
         with self.assertRaises(m.Error): self.setup()
         m.CONFIG.parent.unlink();m.CONFIG.parent.mkdir();m.CONFIG.write_bytes(self.before[m.CONFIG])
-        m.STATE.parent.mkdir(mode=0o755)
-        with self.assertRaises(m.Error): self.setup()
+        m.STATE.parent.mkdir(exist_ok=True); m.STATE.parent.chmod(0o755)
+        with self.assertRaisesRegex(m.Error, 'State directory must be'): self.setup()
         self.assertFalse(m.PAM.exists())
 
     def test_transaction_failure_restores_touched_files(self):
         original = m.atomic
         failed = False
-        def injected(path, data, mode):
+        def injected(path, data, mode, *owner):
             nonlocal failed
             if path == m.CONFIG and not failed:
                 failed = True
                 raise OSError('synthetic write failure')
-            return original(path, data, mode)
+            return original(path, data, mode, *owner)
         with patch.object(m, 'atomic', injected):
             with self.assertRaises(m.Error): self.setup()
         for path, before in self.before.items(): self.assertEqual(path.read_bytes(), before)

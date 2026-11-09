@@ -148,7 +148,11 @@ command except `recover` refuses while the journal exists. Preserve it and run
 `sudo omarchy-himmelblau recover` from recovery access. Recovery always undoes, never
 completes, the change, and accepts each target only at its before or after value,
 including owner and mode; unknown edits need manual investigation. Any other `*.json`
-in that directory makes every command refuse. Default rollback
+in that directory makes every command refuse. `setup`, `policy`, `repair`, `rollback` and
+`recover` each hold an exclusive lock (`.lock` in the same directory) for their whole run,
+so a second one is refused rather than interleaved, and the journal is created without
+ever replacing an existing one. File owners are set on the temporary file before it
+replaces the target, so a crash never leaves a file with new contents and an old owner. Default rollback
 and recovery refuse live or indeterminate graphical/locker sessions. The explicit
 `--recovery-only` override is for an operator at an independent console who has ensured
 that restoring configuration cannot strand a dependent session. It does not stop sessions.

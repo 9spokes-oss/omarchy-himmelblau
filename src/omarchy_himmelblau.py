@@ -3,6 +3,8 @@
 import argparse
 import base64
 import errno
+import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -116,13 +118,17 @@ def rmdir_durable(path):
     fsync_directory(path.parent)
 
 
-def atomic(path, data, mode):
+def atomic(path, data, mode, uid=None, gid=None):
+    """Replace path with data. Owner and mode are set on the temporary inode before it
+    is synced and renamed, so the target is never visible with partial metadata."""
     path = safe(path)
     ensure_directory(path.parent)
     safe(path)
     fd, name = tempfile.mkstemp(prefix='.himmelblau-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as output:
+            if uid is not None:
+                os.fchown(output.fileno(), uid, gid)
             os.fchmod(output.fileno(), mode)
             output.write(data)
             output.flush()
@@ -132,6 +138,25 @@ def atomic(path, data, mode):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def create_exclusive(path, data, mode):
+    """Create path with data, failing if it already exists (never replaces)."""
+    path = safe(path)
+    fd, name = tempfile.mkstemp(prefix='.himmelblau-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            os.fchmod(output.fileno(), mode)
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        try:
+            os.link(name, path)
+        except FileExistsError:
+            raise Error(f'Another root transaction journal exists ({path}); run recover') from None
+    finally:
+        os.unlink(name)
+    fsync_directory(path.parent)
 
 
 _MANIFESTS = {}
@@ -401,6 +426,41 @@ def journal_path():
     return STATE.parent / 'transaction.json'
 
 
+_lock_depth = 0
+
+
+def exclusive(function):
+    """Hold an exclusive lock on the state directory for a whole root command, so two
+    commands can never plan or apply changes concurrently. Nested calls reuse it."""
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        global _lock_depth
+        if _lock_depth:
+            _lock_depth += 1
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _lock_depth -= 1
+        prepare_state_directory()
+        fd = os.open(STATE.parent / '.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or (metadata.st_uid, metadata.st_gid) != owner():
+                raise Error('Unsafe state lock file')
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise Error('Another omarchy-himmelblau root command is running') from None
+            _lock_depth = 1
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _lock_depth = 0
+        finally:
+            os.close(fd)
+    return wrapper
+
+
 def owner():
     """Owner of every file and directory the companion writes (root in production)."""
     return os.geteuid(), os.getegid()
@@ -552,11 +612,13 @@ def checked_theme_directories(entries):
                 raise Error(f'Unexpected companion theme entry: {path}')
     for directory in directories:
         safe(directory / '.guard')
-        if not directory.is_dir() or directory.stat().st_uid != os.geteuid():
+        if (not directory.is_dir()
+                or (directory.stat().st_uid, directory.stat().st_gid) != owner()):
             raise Error(f'Unowned or missing companion theme directory: {directory}')
     return directories
 
 
+@exclusive
 def setup(domain, user, admin=False):
     domain, user = identity(domain, user)
     check_state_directory()
@@ -632,6 +694,7 @@ def setup(domain, user, admin=False):
     print('Root setup complete.')
 
 
+@exclusive
 def policy(enable):
     """Explicit local configuration only; no service or tenant operations."""
     state = load_state()
@@ -749,23 +812,33 @@ def native_payload_contract():
 
 
 def autologin_sources():
-    """SDDM configuration files that set a non-empty [Autologin] User=."""
-    files = [path for directory in SDDM_CONF_DIRS if directory.is_dir()
-             for path in sorted(directory.glob('*.conf'))]
+    """SDDM configuration files that set a non-empty [Autologin] User=.
+
+    Mirrors SDDM 0.21's ConfigReader: every regular file in each configuration
+    directory, then /etc/sddm.conf; each line is cut at its first '#' and trimmed; a
+    line containing '=' is an assignment, otherwise '[name]' starts a section. Any file
+    setting a user counts, whatever later files say, so the check never depends on
+    SDDM's file ordering."""
+    files = []
+    for directory in SDDM_CONF_DIRS:
+        if directory.is_dir():
+            files += sorted(path for path in directory.iterdir()
+                            if path.is_file() or path.is_symlink())
     found = []
     for path in files + [SDDM_CONF]:
-        data = read(path)
+        data = read(path)  # A symlinked configuration file is refused, not skipped.
         if data is None:
             continue
-        section = None
-        for line in data.decode(errors='replace').splitlines():
-            line = line.strip()
-            if line.startswith('[') and line.endswith(']'):
-                section = line[1:-1].strip()
-            elif (section == 'Autologin' and not line.startswith(('#', ';')) and '=' in line
-                  and line.split('=', 1)[0].strip() == 'User' and line.split('=', 1)[1].strip()):
-                found.append(path)
-                break
+        section = 'General'
+        for line in data.decode('utf-8', errors='replace').splitlines():
+            line = line.strip().split('#', 1)[0].strip()
+            if '=' in line:
+                name, value = (part.strip() for part in line.split('=', 1))
+                if section == 'Autologin' and name == 'User' and value:
+                    found.append(path)
+                    break
+            elif line.startswith('[') and line.endswith(']'):
+                section = line[1:-1]
     return found
 
 
@@ -855,6 +928,7 @@ def doctor():
     print('Managed root files and upstream sources match.')
 
 
+@exclusive
 def repair():
     """Rewrite managed files the companion can regenerate exactly, within one version."""
     state = load_state()
@@ -982,7 +1056,7 @@ def transact(operation, state, files, directories=(), verify=None):
                          'after': None if mode is None else {'mode': mode, 'uid': uid, 'gid': gid}}
                         for path, mode in directories],
     }
-    atomic(journal_path(), (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+    create_exclusive(journal_path(), (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
     try:
         for entry in sorted(journal['directories'], key=depth):
             if entry['after'] is None:
@@ -990,15 +1064,14 @@ def transact(operation, state, files, directories=(), verify=None):
             path = Path(entry['path'])
             if entry['before'] is None:
                 make_directory(path, entry['after']['mode'])
+            os.chown(path, entry['after']['uid'], entry['after']['gid'])
             path.chmod(entry['after']['mode'])
             fsync_directory(path)
         for path, data, mode, file_uid, file_gid in files:
             if data is None:
                 unlink_durable(path, missing_ok=True)
             else:
-                atomic(path, data, mode)
-                if (file_uid, file_gid) != (uid, gid):
-                    os.chown(path, file_uid, file_gid)
+                atomic(path, data, mode, file_uid, file_gid)
         for entry in sorted(journal['directories'], key=depth, reverse=True):
             if entry['after'] is None and Path(entry['path']).exists():
                 rmdir_durable(Path(entry['path']))
@@ -1031,7 +1104,11 @@ def matches_file(current, before, after):
 
 
 def matches_directory(current, before, after):
-    return current == before or current == after
+    # Owner and mode are two system calls, so each field may independently be at its
+    # before or after value; any other value, or an unexpected absence, is drift.
+    if current is None or before is None or after is None:
+        return current == before or current == after
+    return all(current[key] in (before[key], after[key]) for key in ('mode', 'uid', 'gid'))
 
 
 def restore_journal(journal):
@@ -1065,8 +1142,7 @@ def restore_journal(journal):
         if before is None:
             unlink_durable(path, missing_ok=True)
         else:
-            atomic(path, base64.b64decode(before['data']), before['mode'])
-            os.chown(path, before['uid'], before['gid'])
+            atomic(path, base64.b64decode(before['data']), before['mode'], before['uid'], before['gid'])
     for entry in sorted(journal['directories'], key=depth, reverse=True):
         path = Path(entry['path'])
         if entry['before'] is None and path.exists():
@@ -1103,6 +1179,7 @@ def valid_journal(journal):
             and all(valid_directory(entry) for entry in journal['directories']))
 
 
+@exclusive
 def recover(recovery_only=False):
     """Undo an interrupted root transaction. Never loads state first: the operation may
     have created or deleted it."""
@@ -1151,6 +1228,7 @@ def require_no_live_locker(recovery_only=False):
         raise Error('A graphical session or locker is running, or session state is unknown') from None
 
 
+@exclusive
 def rollback(recovery_only=False):
     """Restore every managed file's rollback target. Accepts a schema-1 state from any
     companion version: everything it needs is in the state."""
