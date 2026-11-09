@@ -101,9 +101,10 @@ on the lock.
 - **One lock plugin at a time.** Disable any other lock plugin first
   (`omarchy plugin disable <id>`): when two are enabled, Omarchy picks one arbitrarily.
   `status` reports a second one.
-- **Setup comes first.** Until `setup` has installed
-  `/etc/pam.d/omarchy-himmelblau-lock-password`, the plugin refuses to lock and shows a
-  desktop notification, and idle or suspend leaves the screen unlocked.
+- **Before setup, it's a local-password lock.** Until `setup` has installed
+  `/etc/pam.d/omarchy-himmelblau-lock-password`, the plugin locks with Omarchy's stock
+  password service and says so on the lock screen. An Entra account can't unlock it
+  that way, so run `setup` before relying on it.
 - **Lock-time check.** After locking, a setup check runs once with a 15 s timeout; a
   failure shows a warning on the locked screen.
 

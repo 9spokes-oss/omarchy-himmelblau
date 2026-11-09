@@ -26,6 +26,10 @@ Item {
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
   property bool passwordPamConfigured: false
+  // Omarchy's own password service: used only when the work service is missing,
+  // so a machine without setup still locks rather than staying open.
+  property bool stockPasswordPamConfigured: false
+  readonly property bool lockPamAvailable: passwordPamConfigured || stockPasswordPamConfigured
   property bool fingerprintConfigured: false
   property int fingerprintUnreachedStreak: 0
   property bool fingerprintAttemptReachedDevice: false
@@ -148,7 +152,7 @@ Item {
   }
 
   function recoverStrandedLock() {
-    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
+    if (!strandedLock || currentlyLocked() || !lockPamAvailable) return
 
     strandedLock = false
     logEvent("lock-stranded: recovering")
@@ -240,17 +244,24 @@ Item {
   function checkLockSetup() {
     if (!pinHelperCheck.running) pinHelperCheck.running = true
     lockWarning = ""
+    if (!passwordPamConfigured)
+      lockWarning = "Work sign-in isn't set up; this lock accepts only a local password. Run: sudo omarchy-himmelblau setup"
     if (lockPreflight.running) return
     lockPreflightTimeout.restart()
     lockPreflight.running = true
   }
 
   function warnLockSetup() {
-    if (lockRequested) lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
+    if (lockRequested && passwordPamConfigured)
+      lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
+  }
+
+  function passwordPamService() {
+    return passwordPamConfigured ? "omarchy-himmelblau-lock-password" : "omarchy-lock-password"
   }
 
   function beginLock() {
-    if (!passwordPamConfigured) {
+    if (!lockPamAvailable) {
       refuseLock()
       return false
     }
@@ -435,7 +446,7 @@ Item {
     failureMessage = ""
     authenticatingPassword = true
     passwordAttempt += 1
-    var context = passwordPamFactory.createObject(root, { attemptId: passwordAttempt })
+    var context = passwordPamFactory.createObject(root, { attemptId: passwordAttempt, config: passwordPamService() })
     passwordPam = context
     if (!context || !context.start()) handlePasswordFailure(context, passwordAttempt)
   }
@@ -1125,9 +1136,18 @@ Item {
     onFileChanged: reload()
   }
 
+  FileView {
+    path: "/etc/pam.d/omarchy-lock-password"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.stockPasswordPamConfigured = true
+    onLoadFailed: root.stockPasswordPamConfigured = false
+    onFileChanged: reload()
+  }
+
   Process {
     id: lockRefusedNotice
-    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password"]
+    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password and /etc/pam.d/omarchy-lock-password"]
   }
 
   Process {
@@ -1158,8 +1178,8 @@ Item {
 
   // No lock before PAM is known good. An answer from before then may be stale --
   // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
-  onPasswordPamConfiguredChanged: {
-    if (!passwordPamConfigured) return
+  onLockPamAvailableChanged: {
+    if (!lockPamAvailable) return
 
     strandedLock = false
     strandedLockResolved = false
@@ -1178,7 +1198,7 @@ Item {
     target: "lock"
 
     function lock(): string {
-      if (!root.passwordPamConfigured) {
+      if (!root.lockPamAvailable) {
         root.refuseLock()
         return "missing-pam"
       }
@@ -1201,6 +1221,7 @@ Item {
         secure: sessionLock.secure,
         realScreens: root.realScreenCount(),
         passwordPam: root.passwordPamConfigured,
+        passwordPamService: root.passwordPamService(),
         lockWarning: root.lockWarning,
         recoveryAvailable: root.pinRecoveryAvailable,
         fingerprint: root.fingerprintConfigured,
