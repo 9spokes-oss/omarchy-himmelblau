@@ -149,8 +149,7 @@ class EntraAccounts(StackTest):
                     stub(carol=f'auth={result} account=SUCCESS')
                     run = drive(service, ENTRA, 'auth')
                     self.assertRefused(run, 'auth')
-                    if service != LOCK:  # The lock service runs as root here too.
-                        self.assertEqual(tally(ENTRA), 1)
+                    self.assertEqual(tally(ENTRA), 1)
 
     def test_every_account_failure_is_refused_after_successful_auth(self):
         for result in FAILURES + ('ACCT_EXPIRED',):
@@ -198,7 +197,9 @@ class PasswordChange(StackTest):
                         self.assertEqual(run['chauthtok'], 'SUCCESS', run.out)
                     else:
                         self.assertRefused(run, 'chauthtok')
-                    # pam_unix never runs for an Entra account: it would prompt.
+                    # No pam_unix "New password" prompt in the update pass. (pam_unix's
+                    # preliminary check as root doesn't prompt, so this alone doesn't
+                    # prove pam_unix never ran; the homed test below covers bypasses.)
                     self.assertEqual(run.prompts, [], run.out)
                     expected = ['passwd carol@example.test prelim']
                     if prelim == 'SUCCESS':
@@ -307,6 +308,24 @@ class LoginChecks(StackTest):
                 self.assertRefused(drive(service, NOSHELL, 'auth'), 'auth')
 
 
+class Su(StackTest):
+    """Arch's su authenticates with pam_unix directly and has no system-auth account or
+    session stage, so Himmelblau is never involved in either direction."""
+
+    def test_su_to_entra_account_fails_without_himmelblau(self):
+        stub(carol=ALL_OK)
+        run = drive('su', ENTRA, 'auth', uid=1000, suid=True)
+        self.assertRefused(run, 'auth')
+        self.assertEqual(run.calls, [])
+
+    def test_root_su_to_entra_account_skips_himmelblau_account_and_session(self):
+        stub(carol='auth=AUTH_ERR account=PERM_DENIED session=SERVICE_ERR')
+        run = drive('su', ENTRA, 'auth', 'account', 'session')
+        self.assertEqual((run['auth'], run['account'], run['session']),
+                         ('SUCCESS', 'SUCCESS', 'SUCCESS'), run.out)
+        self.assertEqual(run.calls, [])
+
+
 class GuardErrors(StackTest):
     """pam_localuser can't read /etc/passwd: every stage dies before Himmelblau."""
 
@@ -342,6 +361,22 @@ class AsCallingUser(StackTest):
         self.assertEqual(run['auth'], 'SUCCESS', run.out)
         stub(carol='auth=AUTH_ERR')
         self.assertRefused(drive(LOCK, ENTRA, 'auth', uid=50001), 'auth')
+
+    def test_lock_screen_cannot_lock_out_as_the_locked_user(self):
+        # Known limit, as on stock Omarchy: the lock screen runs PAM as the locked
+        # user, who can't write root's /run/faillock (tmpfiles: 0755 root), so
+        # failures there are never counted and faillock never stops an attempt.
+        # The TPM's PIN anti-hammering is the only throttle on the lock screen.
+        Path('/run/faillock').mkdir(mode=0o755, exist_ok=True)
+        stub(carol='auth=AUTH_ERR')
+        for user, uid in (('alice', 1000), (ENTRA, 50001)):
+            with self.subTest(user=user):
+                for _ in range(12):
+                    self.assertRefused(drive(LOCK, user, 'auth', uid=uid), 'auth')
+                self.assertEqual(tally(user), 0)
+        stub(carol='auth=SUCCESS')
+        run = drive(LOCK, ENTRA, 'auth', uid=50001)
+        self.assertEqual(run['auth'], 'SUCCESS', run.out)
 
     def test_setuid_sudo(self):
         stub(carol='auth=SUCCESS account=SUCCESS')
