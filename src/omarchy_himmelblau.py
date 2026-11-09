@@ -938,6 +938,18 @@ def directory_record(path):
     return {'mode': stat.S_IMODE(metadata.st_mode), 'uid': metadata.st_uid, 'gid': metadata.st_gid}
 
 
+def make_directory(path, mode):
+    # Clear the umask so the directory is created with its exact mode: no crash window
+    # leaves one that matches neither its journalled before nor after value.
+    safe(path / '.guard')
+    previous = os.umask(0)
+    try:
+        path.mkdir(mode=mode)
+    finally:
+        os.umask(previous)
+    fsync_directory(path.parent)
+
+
 def depth(entry):
     return len(Path(entry['path']).parts)
 
@@ -977,10 +989,8 @@ def transact(operation, state, files, directories=(), verify=None):
                 continue
             path = Path(entry['path'])
             if entry['before'] is None:
-                safe(path / '.guard')
-                path.mkdir(mode=entry['after']['mode'])
-                fsync_directory(path.parent)
-            path.chmod(entry['after']['mode'])  # Independent of the root umask.
+                make_directory(path, entry['after']['mode'])
+            path.chmod(entry['after']['mode'])
             fsync_directory(path)
         for path, data, mode, file_uid, file_gid in files:
             if data is None:
@@ -1046,8 +1056,7 @@ def restore_journal(journal):
         if before is None:
             continue
         if not path.exists():
-            path.mkdir(mode=before['mode'])
-            fsync_directory(path.parent)
+            make_directory(path, before['mode'])
         os.chown(path, before['uid'], before['gid'])
         path.chmod(before['mode'])
         fsync_directory(path)

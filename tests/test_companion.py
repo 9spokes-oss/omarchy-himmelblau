@@ -507,6 +507,45 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaisesRegex(m.Error, 'predates this companion'): action()
         self.assertTrue(m.PAM.exists())
 
+    def crash_at_journal_unlink(self, action):
+        unlink = m.unlink_durable
+        def crash(path, missing_ok=False):
+            if path == m.journal_path(): raise KeyboardInterrupt
+            return unlink(path, missing_ok)
+        with patch.object(m, 'unlink_durable', crash):
+            with self.assertRaises(KeyboardInterrupt): action()
+
+    def test_setup_crash_after_commit_is_undone_by_recover(self):
+        self.crash_at_journal_unlink(self.setup)
+        self.assertTrue(m.STATE.exists()); self.assertTrue(m.PAM.exists())
+        m.recover()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        self.assertFalse(m.COPY_THEME.exists())
+        self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_repair_crash_after_commit_is_undone_by_recover(self):
+        self.setup(); m.PAM.unlink(); state = m.STATE.read_bytes()
+        self.crash_at_journal_unlink(m.repair)
+        self.assertTrue(m.PAM.exists())
+        m.recover()
+        self.assertFalse(m.PAM.exists()); self.assertEqual(m.STATE.read_bytes(), state)
+
+    def test_directories_are_created_with_their_exact_mode_under_any_umask(self):
+        previous = os.umask(0o077)
+        try:
+            mkdir = Path.mkdir
+            def crash_after_mkdir(path, *args, **kwargs):
+                mkdir(path, *args, **kwargs)
+                if path == m.COPY_THEME:
+                    raise KeyboardInterrupt  # Before any chmod.
+            with patch.object(Path, 'mkdir', crash_after_mkdir):
+                with self.assertRaises(KeyboardInterrupt): self.setup()
+            self.assertEqual(m.COPY_THEME.stat().st_mode & 0o777, 0o755)
+            m.recover()
+            self.assertFalse(m.COPY_THEME.exists())
+        finally:
+            os.umask(previous)
+
     def test_state_access_refuses_writable_or_foreign_ancestors(self):
         self.setup()
         state = m.load_state()
