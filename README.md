@@ -62,6 +62,12 @@ Entra, enroll Intune, restart services or alter a user's home. The native SDDM p
 replaces stock SDDM; coordinate it with the companion and preserve matching rollback
 packages/configuration. See [SDDM installation](docs/sddm.md).
 
+SDDM autologin is unsupported: it skips the sign-in screen, so the Entra user never gets
+to sign in, and an autologin session's lock screen has no failed-attempt lockout.
+Omarchy's installer turns it on in `/etc/sddm.conf.d/autologin.conf`; remove the
+`[Autologin]` `User=` line before setup. `setup` refuses while autologin is configured,
+and `doctor` reports it if it returns.
+
 After reviewing the effective configuration and preparing independent recovery access:
 
 ```sh

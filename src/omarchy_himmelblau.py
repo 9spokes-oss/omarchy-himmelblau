@@ -28,6 +28,8 @@ CONFIG = Path('/etc/himmelblau/himmelblau.conf')
 THEME = Path('/usr/share/sddm/themes/omarchy')
 COPY_THEME = Path('/usr/share/sddm/themes/omarchy-himmelblau')
 OVERRIDE = Path('/etc/sddm.conf.d/99-z-himmelblau.conf')
+SDDM_CONF = Path('/etc/sddm.conf')
+SDDM_CONF_DIRS = (Path('/usr/lib/sddm/sddm.conf.d'), Path('/etc/sddm.conf.d'))
 SUDOERS = Path('/etc/sudoers.d/90-himmelblau-user')
 RECOVERY_ACCOUNT = Path('/etc/omarchy-himmelblau/recovery-account')
 NATIVE_PAYLOAD = Path('/usr/share/omarchy-himmelblau/native-payload.json')
@@ -506,6 +508,7 @@ def setup(domain, user, admin=False):
         print('Already set up; no changes')
         return
     native_sddm_contract()
+    require_no_autologin()
     principal = administrator(user)
     recovery_parent()
     if read(RECOVERY_ACCOUNT) is not None:
@@ -733,6 +736,36 @@ def native_payload_contract():
             raise Error('Native authentication payload differs from companion release pin')
 
 
+def autologin_sources():
+    """SDDM configuration files that set a non-empty [Autologin] User=."""
+    files = [path for directory in SDDM_CONF_DIRS if directory.is_dir()
+             for path in sorted(directory.glob('*.conf'))]
+    found = []
+    for path in files + [SDDM_CONF]:
+        data = read(path)
+        if data is None:
+            continue
+        section = None
+        for line in data.decode(errors='replace').splitlines():
+            line = line.strip()
+            if line.startswith('[') and line.endswith(']'):
+                section = line[1:-1].strip()
+            elif (section == 'Autologin' and not line.startswith(('#', ';')) and '=' in line
+                  and line.split('=', 1)[0].strip() == 'User' and line.split('=', 1)[1].strip()):
+                found.append(path)
+                break
+    return found
+
+
+def require_no_autologin():
+    # Autologin skips the sign-in screen (bypassing the Entra user) and leaves the
+    # session's lock screen without a faillock tally, so it is unsupported.
+    sources = autologin_sources()
+    if sources:
+        raise Error('SDDM autologin is configured in ' + ', '.join(map(str, sources))
+                    + '; it is unsupported. Remove its [Autologin] User= line, then retry')
+
+
 def native_sddm_contract():
     # Companion-owned release pin is independent of the native package metadata.
     native_payload_contract()
@@ -769,6 +802,7 @@ def root_issues(state, *, transaction=None):
         require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
         stock_pam()
         native_sddm_contract()
+        require_no_autologin()
         supported_source_hash('sddm-conversation', read(THEME / 'Main.qml') or b'')
         if digest(read(COPY_THEME / 'Main.qml') or b'') != manifest('sddm-conversation')['after']:
             raise Error('SDDM conversation theme needs explicit root repair')

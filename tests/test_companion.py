@@ -41,6 +41,8 @@ class CompanionTest(unittest.TestCase):
             self.paths[name] = self.base / path
         self.paths['ASSETS'] = ROOT / 'assets'
         self.paths['CONFIG_LAYERS'] = (self.base / 'vendor/config.conf', self.base / 'run/config.conf')
+        self.paths['SDDM_CONF'] = self.base / 'etc/sddm.conf'
+        self.paths['SDDM_CONF_DIRS'] = (self.base / 'usr/lib/sddm/sddm.conf.d', self.base / 'etc/sddm.conf.d')
         self.mock_paths = patch.multiple(m, **self.paths)
         self.mock_paths.start(); self.addCleanup(self.mock_paths.stop)
         # The host sandbox maps / and /tmp ownership to nobody; production guards
@@ -703,6 +705,29 @@ class CompanionTest(unittest.TestCase):
         self.assertFalse(m.PAM.exists())
         self.assertFalse(m.OVERRIDE.exists())
         self.assertFalse(m.COPY_THEME.exists())
+
+    def write_autologin(self, text):
+        path = self.base / 'etc/sddm.conf.d/autologin.conf'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        return path
+
+    def test_setup_refuses_sddm_autologin(self):
+        path = self.write_autologin('[Autologin]\nUser=alice\nSession=omarchy\n\n[Theme]\nCurrent=omarchy\n')
+        with self.assertRaisesRegex(m.Error, 'autologin.*' + str(path)):
+            self.setup()
+        self.assertFalse(m.STATE.exists())
+        self.assertFalse(m.OVERRIDE.exists())
+
+    def test_setup_ignores_empty_or_commented_autologin_user(self):
+        self.write_autologin('[Autologin]\nUser=\n#User=alice\nSession=omarchy\n[Other]\nUser=alice\n')
+        self.setup()
+        self.assertTrue(m.STATE.exists())
+
+    def test_doctor_reports_autologin_added_after_setup(self):
+        self.setup()
+        self.write_autologin('[Autologin]\nUser=alice\n')
+        self.assertTrue(any('autologin' in issue for issue in m.root_issues(m.load_state())))
 
     def missing_pam_root(self):
         self.setup()
