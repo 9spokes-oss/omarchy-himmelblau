@@ -86,11 +86,12 @@ join a tenant or reload sessions. Root `doctor` checks files and sources; it doe
 test daemon negotiation, authentication or sessions. User `status` performs the same
 checks as `plugin-status`; each command refuses the wrong privilege level.
 
-For a controlled `0.5.2` upgrade, install companion `0.5.3` and native SDDM
-`0.21.0-4` together, run `sudo omarchy-himmelblau repair`, then update the plugin
-while unlocked and restart the shell. Until repair, `doctor`, `setup` and `policy`
-refuse the old theme. The old `0.5.2` plugin can still lock during this transition;
-`status` and `plugin-status` report that it needs updating. See [maintenance](docs/maintenance.md).
+This is a prototype with no in-place upgrades. To change companion versions, run
+`sudo omarchy-himmelblau rollback`, upgrade the packages, then run `setup` again.
+`doctor`, `setup`, `repair` and `policy` refuse state written by another version;
+`rollback` accepts it. State from `0.5.3` and earlier predates the current format and is
+refused by every command: roll it back with the companion that wrote it before
+upgrading. See [maintenance](docs/maintenance.md).
 
 ## Install the Omarchy plugin
 
@@ -167,7 +168,8 @@ independent security principals by this integration.
 
 Before root rollback, disable the clone and exit every session loading it. The command
 refuses live or indeterminate graphical sessions by default. From independent recovery
-access, `recover` restores only known interrupted transaction states. Root rollback
+access, `recover` undoes an interrupted root change, restoring each file's exact bytes,
+owner and mode only if every target is still at its journalled before or after value. Root rollback
 does not remove user clones or hooks, and disabling a plugin leaves loaded code alive
 until the shell exits. Package removal
 alone does not reverse setup, PIN changes, tenant objects or Himmelblau's package hooks.

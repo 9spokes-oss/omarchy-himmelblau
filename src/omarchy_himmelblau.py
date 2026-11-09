@@ -21,6 +21,8 @@ ASSETS = Path('/usr/share/omarchy-himmelblau')
 COMMAND_ENV = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
 OMARCHY_ENV = {'OMARCHY_PATH': '/usr/share/omarchy'}
 STATE = Path('/var/lib/omarchy-himmelblau/state.json')
+SCHEMA = 1  # Persistent state format.
+JOURNAL_FORMAT = 1
 STOCK_PAM = Path('/etc/pam.d/omarchy-lock-password')
 PAM = Path('/etc/pam.d/omarchy-himmelblau-lock-password')
 LOCK = Path('/usr/share/omarchy/shell/plugins/lock/Service.qml')
@@ -148,7 +150,7 @@ def manifest(name):
     if name == 'fixed-plugin':
         required = {'id': str, 'files': dict, 'upstream': dict}
     elif name == 'previous-release':
-        # The one release that repair and locker-preflight upgrade from.
+        # The one release whose plugin locker-preflight still accepts.
         required = {'version': str, 'sddm-conversation': str, 'plugin-files': dict}
     else:
         required = {'filename': str, 'before': str, 'after': str}
@@ -395,16 +397,53 @@ def user_required():
         raise Error('Run this command as the desktop user, not root')
 
 
-def load_state():
+def journal_path():
+    return STATE.parent / 'transaction.json'
+
+
+def owner():
+    """Owner of every file and directory the companion writes (root in production)."""
+    return os.geteuid(), os.getegid()
+
+
+def check_state_directory(*, allow_journal=False):
+    """Every root command starts here. The state directory is private and holds only
+    state.json, transaction.json and atomic() temporary files; a pending journal
+    blocks everything except recover."""
+    directory = STATE.parent
+    if directory.is_symlink():
+        raise Error('Symlink state directory refused')
+    if not directory.exists():
+        return
+    check_state_ancestors(directory)
+    metadata = directory.stat()
+    if (metadata.st_uid, metadata.st_gid) != owner() or stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise Error('Unsafe state directory ownership/mode')
+    for path in directory.iterdir():
+        if path.suffix == '.json' and path.name not in (STATE.name, journal_path().name):
+            raise Error(f'Unexpected file in state directory: {path}')
+    if not allow_journal and (journal_path().exists() or journal_path().is_symlink()):
+        raise Error(f'Interrupted root transaction ({journal_path()}); run recover first')
+
+
+def check_state_file():
+    metadata = STATE.stat()
+    if (metadata.st_uid, metadata.st_gid) != owner() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise Error('Unsafe state ownership/mode')
+
+
+def load_state(any_version=False):
+    """Load schema-1 state. Only rollback accepts a state from another version."""
+    check_state_directory()
     data = read(STATE)
     if data is None:
         raise Error('No root setup state; run setup first')
-    if STATE.stat().st_uid != os.geteuid() or stat.S_IMODE(STATE.stat().st_mode) != 0o600:
-        raise Error('Unsafe state ownership/mode')
-    check_state_ancestors(STATE.parent)
-    if STATE.parent.stat().st_uid != os.geteuid() or stat.S_IMODE(STATE.parent.stat().st_mode) != 0o700:
-        raise Error('Unsafe state directory ownership/mode')
-    return check_state(parse_json(data, STATE))
+    check_state_file()
+    state = check_state(parse_json(data, STATE))
+    if not any_version and state['version'] != VERSION:
+        raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
+                    'run rollback, then setup')
+    return state
 
 
 def parse_json(data, path):
@@ -415,22 +454,28 @@ def parse_json(data, path):
 
 
 def check_state(state):
-    """Raise Error unless root state has every field the root commands index."""
+    """Raise Error unless root state is schema 1 with every field the root commands index."""
     def valid_entry(entry):
-        if not isinstance(entry, dict) or 'before' not in entry:
+        if not isinstance(entry, dict) or 'restore' not in entry:
             return False
-        fields = {'path': str, 'after': str, 'mode': int}
-        if entry['before'] is not None:
-            fields.update(before=str, before_mode=int, before_uid=int, before_gid=int)
-        return all(type(entry.get(key)) is kind for key, kind in fields.items())
-    fields = {'domain': str, 'user': str, 'admin': bool, 'apply_policy': bool,
+        fields = {'path': str, 'after': str, 'mode': int, 'restore_kind': str}
+        if entry['restore'] is not None:
+            fields.update(restore=str, restore_mode=int, restore_uid=int, restore_gid=int)
+        return (all(type(entry.get(key)) is kind for key, kind in fields.items())
+                and entry['restore_kind'] == 'original')
+    fields = {'version': str, 'domain': str, 'user': str, 'admin': bool, 'apply_policy': bool,
               'identity': dict, 'files': list}
-    if not (isinstance(state, dict)
-            and all(type(state.get(key)) is kind for key, kind in fields.items())
-            and all(valid_entry(entry) for entry in state['files'])
-            and ('transaction' not in state
-                 or isinstance(state['transaction'], dict)
-                 and isinstance(state['transaction'].get('progress'), dict))):
+    if not isinstance(state, dict):
+        raise Error(f'Invalid state file: {STATE}')
+    if 'schema' not in state:
+        raise Error(f'Invalid state file: {STATE}; it predates this companion. '
+                    'Roll back with the companion that wrote it, or restore a snapshot')
+    if type(state['schema']) is not int:
+        raise Error(f'Invalid state file: {STATE}')
+    if state['schema'] != SCHEMA:
+        raise Error(f'Unsupported state schema {state["schema"]}: {STATE}')
+    if not (all(type(state.get(key)) is kind for key, kind in fields.items())
+            and all(valid_entry(entry) for entry in state['files'])):
         raise Error(f'Invalid state file: {STATE}')
     return state
 
@@ -442,29 +487,44 @@ def check_state_ancestors(path):
             raise Error('Unsafe state ancestor ownership/mode')
 
 
-def save_state(state):
-    # The containing directory holds original configuration/backups, root only.
+def serialize_state(state):
+    return (json.dumps(state, indent=2) + '\n').encode()
+
+
+def prepare_state_directory():
+    # The state directory holds rollback bytes of root configuration: root only.
     if STATE.parent.is_symlink():
         raise Error('Symlink state directory refused')
     ensure_directory(STATE.parent)
     check_state_ancestors(STATE.parent)
-    if STATE.parent.stat().st_uid != os.geteuid() or stat.S_IMODE(STATE.parent.stat().st_mode) != 0o700:
+    metadata = STATE.parent.stat()
+    if (metadata.st_uid, metadata.st_gid) != owner() or stat.S_IMODE(metadata.st_mode) != 0o700:
         raise Error('State directory must be owned by current root and mode 0700')
-    atomic(STATE, (json.dumps(state, indent=2) + '\n').encode(), 0o600)
+
+
+def save_state(state):
+    prepare_state_directory()
+    atomic(STATE, serialize_state(state), 0o600)
 
 
 def planned(path, data, mode):
+    """A managed-file change: what to write, and the file's current bytes as its rollback target."""
     before = read(path)
     if before == data:
         return None
-    entry = {'path': str(path), 'before': None, 'before_mode': None, 'before_uid': None,
-             'before_gid': None, 'after': digest(data), 'data': data, 'mode': mode}
+    entry = {'path': str(path), 'after': digest(data), 'mode': mode, 'restore': None,
+             'restore_mode': None, 'restore_uid': None, 'restore_gid': None,
+             'restore_kind': 'original', 'data': data}
     if before is not None:
         metadata = path.stat()
-        entry.update(before=base64.b64encode(before).decode(),
-                     before_mode=stat.S_IMODE(metadata.st_mode),
-                     before_uid=metadata.st_uid, before_gid=metadata.st_gid)
+        entry.update(restore=base64.b64encode(before).decode(),
+                     restore_mode=stat.S_IMODE(metadata.st_mode),
+                     restore_uid=metadata.st_uid, restore_gid=metadata.st_gid)
     return entry
+
+
+def state_entry(entry):
+    return {key: value for key, value in entry.items() if key != 'data'}
 
 
 def theme_directories(entries):
@@ -499,7 +559,7 @@ def checked_theme_directories(entries):
 
 def setup(domain, user, admin=False):
     domain, user = identity(domain, user)
-    no_pending_recovery()
+    check_state_directory()
     if read(STATE) is not None:
         state = load_state()
         if (state['domain'], state['user'], state['admin']) != (domain, user, admin):
@@ -562,40 +622,19 @@ def setup(domain, user, admin=False):
         validate_sudo_rule(content)
         add(SUDOERS, content, 0o440)
     # All source/configuration preflight finished before touching guest files.
-    state = {'version': VERSION, 'domain': domain, 'user': user, 'admin': admin,
-             'identity': principal, 'apply_policy': False,
-             'files': [{k: v for k, v in entry.items() if k != 'data'} for entry in changes]}
-    state['transaction'] = {'kind': 'setup', 'progress': {entry['path']: 'pending' for entry in changes}}
-    save_state(state)
-    try:
-        for directory in theme_directories(changes):
-            safe(directory / '.guard')
-            directory.mkdir(mode=0o755)
-            directory.chmod(0o755)  # Public greeter assets, independent of root umask.
-            fsync_directory(directory.parent)
-        for entry in changes:
-            state['transaction']['progress'][entry['path']] = 'applying'
-            save_state(state)
-            atomic(Path(entry['path']), entry['data'], entry['mode'])
-            state['transaction']['progress'][entry['path']] = 'applied'
-            save_state(state)
-        del state['transaction']
-        save_state(state)
-    except Exception:
-        try:
-            undo_setup()
-        except Exception:
-            raise Error(f'Setup failed and could not be undone; originals are in {STATE}') from None
-        raise Error('Setup failed and was undone') from None
+    state = {'schema': SCHEMA, 'version': VERSION, 'domain': domain, 'user': user,
+             'admin': admin, 'identity': principal, 'apply_policy': False,
+             'files': [state_entry(entry) for entry in changes]}
+    # A failed setup runs from a live session, so its undo skips the locker check.
+    transact('setup', state,
+             [(Path(entry['path']), entry['data'], entry['mode'], *owner()) for entry in changes],
+             [(directory, 0o755) for directory in theme_directories(changes)])  # Public greeter assets.
     print('Root setup complete.')
 
 
 def policy(enable):
     """Explicit local configuration only; no service or tenant operations."""
     state = load_state()
-    old_state = read(STATE)
-    backup = STATE.parent / 'policy-backup.json'
-    no_pending_recovery()
     issues = root_issues(state)
     if issues:
         raise Error('\n'.join(issues))
@@ -620,38 +659,11 @@ def policy(enable):
     managed_config(after, state['domain'], state['user'], enable)
     entry = next((item for item in state['files'] if Path(item['path']) == CONFIG), None)
     if entry is None:
-        entry = planned(CONFIG, after, 0o644)
-        state['files'].append({key: value for key, value in entry.items() if key != 'data'})
+        state['files'].append(state_entry(planned(CONFIG, after, 0o644)))
     else:
         entry['after'] = digest(after)  # Preserve the original setup rollback bytes.
     state['apply_policy'] = enable
-    state['version'] = VERSION
-    journal = {'state': base64.b64encode(old_state).decode(),
-               'config': base64.b64encode(before).decode(), 'mode': 0o644,
-               'files': [{'path': str(CONFIG), 'data': base64.b64encode(before).decode(),
-                          'mode': 0o644, 'after': digest(after)}],
-               'after_state': digest((json.dumps(state, indent=2) + '\n').encode()), 'progress': {}}
-    atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
-    try:
-        journal_step(backup, journal, str(CONFIG), 'applying')
-        atomic(CONFIG, after, 0o644)
-        journal_step(backup, journal, str(CONFIG), 'applied')
-        journal_step(backup, journal, '@state', 'applying')
-        save_state(state)
-        journal_step(backup, journal, '@state', 'applied')
-        issues = root_issues(state, transaction=backup)
-        if issues:
-            raise Error('\n'.join(issues))
-    except Exception:
-        try:
-            atomic(CONFIG, before, 0o644)
-            atomic(STATE, old_state, 0o600)
-        except Exception:
-            raise Error(f'Policy change failed and could not be undone; originals are in {backup}') \
-                from None
-        unlink_durable(backup)
-        raise Error('Policy change failed and was undone') from None
-    unlink_durable(backup)
+    transact('policy', state, [(CONFIG, after, 0o644, *owner())], verify=verify_root)
     print(f'Set apply_policy = {str(enable).lower()}.')
 
 
@@ -783,19 +795,17 @@ def native_sddm_contract():
         raise Error('Unsafe native SDDM PIN service ownership/mode')
 
 
-def no_pending_recovery(transaction=None):
-    for operation in ('repair', 'policy'):
-        journal = STATE.parent / f'{operation}-backup.json'
-        if read(journal) is not None and journal != transaction:
-            raise Error(f'Pending {operation} recovery journal: {journal}')
+def verify_root(state):
+    """Post-commit check for policy and repair; any issue undoes the operation."""
+    issues = root_issues(state, in_transaction=True)
+    if issues:
+        raise Error('\n'.join(issues))
 
 
-def root_issues(state, *, transaction=None):
+def root_issues(state, *, in_transaction=False):
     issues = []
     try:
-        no_pending_recovery(transaction)
-        if state.get('transaction') is not None:
-            raise Error('Interrupted root transaction; run recover first')
+        check_state_directory(allow_journal=in_transaction)
         check_identity(state)
         check_admin_identity(state)
         configuration_scope(state['domain'], state['user'], state['apply_policy'])
@@ -813,7 +823,7 @@ def root_issues(state, *, transaction=None):
         path = Path(entry['path'])
         if (actual is None or digest(actual) != entry['after']
                 or stat.S_IMODE(path.stat().st_mode) != entry['mode']
-                or path.stat().st_uid != os.geteuid()):
+                or (path.stat().st_uid, path.stat().st_gid) != owner()):
             issues.append(f'Managed file drift: {entry["path"]}')
     try:
         for directory in checked_theme_directories(state['files']):
@@ -846,12 +856,8 @@ def doctor():
 
 
 def repair():
+    """Rewrite managed files the companion can regenerate exactly, within one version."""
     state = load_state()
-    old_state = read(STATE)
-    backup = STATE.parent / 'repair-backup.json'
-    no_pending_recovery()
-    if state.get('transaction') is not None:
-        raise Error('Interrupted root transaction; run recover first')
     native_sddm_contract()
     principal = saved_identity(state)
     recovery_parent()
@@ -862,9 +868,7 @@ def repair():
     theme = patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')
     theme_path = COPY_THEME / 'Main.qml'
     theme_entry = next((entry for entry in state['files'] if Path(entry['path']) == theme_path), None)
-    previous = manifest('previous-release')['sddm-conversation']
-    upgrade = theme_entry is not None and theme_entry['after'] == previous
-    if theme_entry is None or (not upgrade and theme_entry['after'] != digest(theme)):
+    if theme_entry is None or theme_entry['after'] != digest(theme):
         raise Error('Unsupported managed SDDM theme state')
     repairs = []
     # Full file/source/configuration preflight precedes journal or managed writes.
@@ -873,157 +877,241 @@ def repair():
         data = read(path)
         if data is not None:
             metadata = path.stat()
-            if stat.S_IMODE(metadata.st_mode) != entry['mode'] or metadata.st_uid != os.geteuid():
+            if (stat.S_IMODE(metadata.st_mode) != entry['mode']
+                    or (metadata.st_uid, metadata.st_gid) != owner()):
                 raise Error(f'Repair refuses permission drift: {path}')
         if (path == RECOVERY_ACCOUNT and data is None
                 and entry['after'] == digest(identity_file(principal))):
-            repairs.append((path, identity_file(principal), entry['mode']))
+            repairs.append((path, identity_file(principal), entry['mode'], *owner()))
             continue
         if data is not None and digest(data) == entry['after']:
-            if upgrade and path == theme_path:
-                repairs.append((path, theme, entry['mode']))
             continue
         if path == PIN_PAM and data is None and entry['after'] == digest(PIN_PAM_CONTENT):
-            repairs.append((path, PIN_PAM_CONTENT, entry['mode']))
+            repairs.append((path, PIN_PAM_CONTENT, entry['mode'], *owner()))
             continue
         if path == PAM and (data is None or digest(data) == manifest('lock-pam')['before']):
             if digest(desired_pam) == entry['after']:
-                repairs.append((path, desired_pam, entry['mode']))
+                repairs.append((path, desired_pam, entry['mode'], *owner()))
                 continue
         raise Error(f'Repair refuses unsupported managed drift: {path}')
     patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
     directories = checked_theme_directories(state['files'])
-    if upgrade:
-        # Rollback metadata stays; only the managed result changes.
-        theme_entry['after'] = digest(theme)
-    state['version'] = VERSION
-    originals = []
-    for path, data, mode in repairs:
-        current = read(path)
-        originals.append({
-            'path': str(path),
-            'data': base64.b64encode(current).decode() if current is not None else None,
-            'mode': stat.S_IMODE(path.stat().st_mode) if path.exists() else mode,
-            'after': digest(data)})
-    directory_modes = [(directory, stat.S_IMODE(directory.stat().st_mode)) for directory in directories]
-    journal = {'state': base64.b64encode(old_state).decode(), 'files': originals,
-               'directories': {str(path): mode for path, mode in directory_modes},
-               'after_state': digest((json.dumps(state, indent=2) + '\n').encode()), 'progress': {}}
-    atomic(backup, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
-    try:
-        for directory in directories:
-            journal_step(backup, journal, str(directory), 'applying')
-            directory.chmod(0o755)
-            fsync_directory(directory)
-            journal_step(backup, journal, str(directory), 'applied')
-        for path, data, mode in repairs:
-            journal_step(backup, journal, str(path), 'applying')
-            atomic(path, data, mode)
-            journal_step(backup, journal, str(path), 'applied')
-        journal_step(backup, journal, '@state', 'applying')
-        save_state(state)
-        journal_step(backup, journal, '@state', 'applied')
-        issues = root_issues(state, transaction=backup)
-        if issues:
-            raise Error('\n'.join(issues))
-    except Exception:
-        try:
-            for entry in reversed(originals):
-                path = Path(entry['path'])
-                if entry['data'] is None:
-                    unlink_durable(path, missing_ok=True)
-                else:
-                    atomic(path, base64.b64decode(entry['data']), entry['mode'])
-            for directory, mode in directory_modes:
-                directory.chmod(mode)
-            atomic(STATE, old_state, 0o600)
-        except Exception:
-            raise Error(f'Repair failed and could not be undone; originals are in {backup}') from None
-        unlink_durable(backup)
-        raise Error('Repair failed and was undone') from None
-    unlink_durable(backup)
+    transact('repair', state, repairs, [(directory, 0o755) for directory in directories],
+             verify=verify_root)
     print('Root repair complete.')
 
 
-def journal_step(path, journal, target, phase):
-    journal['progress'][target] = phase
-    atomic(path, (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+
+# Transactions. Every root change (setup, policy, repair, rollback) runs through
+# transact(): one journal, written once before the first change, records each
+# target's exact before (bytes or absence, owner, mode) and after (hash or
+# absence, owner, mode), and the state file's before bytes and after hash.
+# recover() and a failed operation's inline undo share restore_journal(), which
+# checks every target against before or after, then puts every one back.
+
+OPERATION_LABELS = {'setup': 'Setup', 'policy': 'Policy change', 'repair': 'Repair',
+                    'rollback': 'Rollback'}
 
 
-def recover(recovery_only=False):
-    state = load_state()
-    require_no_live_locker(recovery_only)
-    pending = [STATE.parent / f'{kind}-backup.json' for kind in ('policy', 'repair')
-               if read(STATE.parent / f'{kind}-backup.json') is not None]
-    if not pending:
-        if state.get('transaction', {}).get('kind') in ('setup', 'rollback'):
-            rollback(recovery_only=recovery_only)
-            return
-        raise Error('No interrupted managed transaction to recover')
-    if len(pending) != 1 or state.get('transaction'):
-        raise Error('More than one recovery record exists')
-    backup = pending[0]
-    metadata = backup.stat()
-    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
-        raise Error('Unsafe recovery journal ownership/mode')
-    journal = parse_json(read(backup), backup)
-    if not valid_journal(journal):
-        raise Error(f'Unsupported recovery journal: {backup}')
-    before_state = base64.b64decode(journal['state'])
+def b64(data):
+    return base64.b64encode(data).decode() if data is not None else None
+
+
+def file_record(path):
+    path = safe(path)
+    data = read(path)
+    if data is None:
+        return None
+    metadata = path.stat()
+    return {'data': b64(data), 'mode': stat.S_IMODE(metadata.st_mode),
+            'uid': metadata.st_uid, 'gid': metadata.st_gid}
+
+
+def directory_record(path):
+    safe(path / '.guard')
+    if not path.exists():
+        return None
+    if not path.is_dir():
+        raise Error(f'Expected directory: {path}')
+    metadata = path.stat()
+    return {'mode': stat.S_IMODE(metadata.st_mode), 'uid': metadata.st_uid, 'gid': metadata.st_gid}
+
+
+def depth(entry):
+    return len(Path(entry['path']).parts)
+
+
+def transact(operation, state, files, directories=(), verify=None):
+    """Apply one journalled root change.
+
+    files: (path, data or None to delete, mode, uid, gid), applied in order.
+    directories: (path, mode or None to remove); created and chmodded before the
+    files, removed (deepest first, must be empty) after them.
+    state: the new state, or None to delete the state file.
+    verify: called after the commit; an exception undoes the whole operation.
+    """
+    check_state_directory()
+    prepare_state_directory()
+    old_state = read(STATE)
+    if old_state is not None:
+        check_state_file()
+    new_state = serialize_state(state) if state is not None else None
+    uid, gid = owner()
+    journal = {
+        'journal': JOURNAL_FORMAT, 'operation': operation,
+        'state_before': b64(old_state),
+        'state_after': digest(new_state) if new_state is not None else None,
+        'files': [{'path': str(path), 'before': file_record(path),
+                   'after': None if data is None else
+                   {'sha256': digest(data), 'mode': mode, 'uid': file_uid, 'gid': file_gid}}
+                  for path, data, mode, file_uid, file_gid in files],
+        'directories': [{'path': str(path), 'before': directory_record(path),
+                         'after': None if mode is None else {'mode': mode, 'uid': uid, 'gid': gid}}
+                        for path, mode in directories],
+    }
+    atomic(journal_path(), (json.dumps(journal, indent=2) + '\n').encode(), 0o600)
+    try:
+        for entry in sorted(journal['directories'], key=depth):
+            if entry['after'] is None:
+                continue
+            path = Path(entry['path'])
+            if entry['before'] is None:
+                safe(path / '.guard')
+                path.mkdir(mode=entry['after']['mode'])
+                fsync_directory(path.parent)
+            path.chmod(entry['after']['mode'])  # Independent of the root umask.
+            fsync_directory(path)
+        for path, data, mode, file_uid, file_gid in files:
+            if data is None:
+                unlink_durable(path, missing_ok=True)
+            else:
+                atomic(path, data, mode)
+                if (file_uid, file_gid) != (uid, gid):
+                    os.chown(path, file_uid, file_gid)
+        for entry in sorted(journal['directories'], key=depth, reverse=True):
+            if entry['after'] is None and Path(entry['path']).exists():
+                rmdir_durable(Path(entry['path']))
+        if new_state is not None:
+            save_state(state)
+        else:
+            unlink_durable(STATE, missing_ok=True)
+        if verify is not None:
+            verify(state)
+    except Exception:
+        label = OPERATION_LABELS[operation]
+        try:
+            restore_journal(journal)
+        except Exception:
+            raise Error(f'{label} failed and could not be undone; run recover '
+                        f'(journal: {journal_path()})') from None
+        unlink_durable(journal_path())
+        raise Error(f'{label} failed and was undone') from None
+    unlink_durable(journal_path())
+
+
+def matches_file(current, before, after):
+    if current == before:
+        return True
+    if after is None or current is None:
+        return current is None and after is None
+    return (digest(base64.b64decode(current['data'])) == after['sha256']
+            and (current['mode'], current['uid'], current['gid'])
+            == (after['mode'], after['uid'], after['gid']))
+
+
+def matches_directory(current, before, after):
+    return current == before or current == after
+
+
+def restore_journal(journal):
+    """Put every journalled target back to its before value, after checking that each
+    one is exactly at its before or after value. Never rolls forward."""
     current_state = read(STATE)
-    if current_state != before_state and digest(current_state) != journal.get('after_state'):
+    if current_state is not None:
+        check_state_file()
+    before_state = base64.b64decode(journal['state_before']) if journal['state_before'] else None
+    if not (current_state == before_state
+            or (current_state is None and journal['state_after'] is None)
+            or (current_state is not None and digest(current_state) == journal['state_after'])):
         raise Error('Recovery refuses unknown state drift')
-    # Validate every target before restoring any file, including already restored files.
+    for entry in journal['directories']:
+        if not matches_directory(directory_record(Path(entry['path'])), entry['before'], entry['after']):
+            raise Error(f'Recovery refuses directory drift: {entry["path"]}')
     for entry in journal['files']:
-        path = Path(entry['path'])
-        current = read(path)
-        original = base64.b64decode(entry['data']) if entry['data'] is not None else None
-        if current != original and (current is None or digest(current) != entry['after']):
-            raise Error(f'Recovery refuses unknown target drift: {path}')
-        if current is not None and (path.stat().st_uid != os.geteuid()
-                                    or stat.S_IMODE(path.stat().st_mode) != entry['mode']):
-            raise Error(f'Recovery refuses target permission drift: {path}')
-    for name, mode in journal.get('directories', {}).items():
-        path = Path(name)
-        safe(path / '.guard')
-        if (not path.is_relative_to(COPY_THEME) or not path.is_dir()
-                or path.stat().st_uid != os.geteuid()
-                or stat.S_IMODE(path.stat().st_mode) not in (mode, 0o755)):
-            raise Error('Recovery refuses directory drift')
+        if not matches_file(file_record(Path(entry['path'])), entry['before'], entry['after']):
+            raise Error(f'Recovery refuses unknown target drift: {entry["path"]}')
+    for entry in sorted(journal['directories'], key=depth):
+        before, path = entry['before'], Path(entry['path'])
+        if before is None:
+            continue
+        if not path.exists():
+            path.mkdir(mode=before['mode'])
+            fsync_directory(path.parent)
+        os.chown(path, before['uid'], before['gid'])
+        path.chmod(before['mode'])
+        fsync_directory(path)
     for entry in reversed(journal['files']):
-        path = Path(entry['path'])
-        journal_step(backup, journal, str(path), 'restoring')
-        if entry['data'] is None:
+        before, path = entry['before'], Path(entry['path'])
+        if before is None:
             unlink_durable(path, missing_ok=True)
         else:
-            atomic(path, base64.b64decode(entry['data']), entry['mode'])
-        journal_step(backup, journal, str(path), 'restored')
-    for name, mode in journal.get('directories', {}).items():
-        path = Path(name)
-        journal_step(backup, journal, name, 'restoring')
-        path.chmod(mode)
-        fsync_directory(path)
-        journal_step(backup, journal, name, 'restored')
-    journal_step(backup, journal, '@state', 'restoring')
-    atomic(STATE, before_state, 0o600)
-    journal_step(backup, journal, '@state', 'restored')
-    unlink_durable(backup)
-    print('Interrupted transaction restored.')
+            atomic(path, base64.b64decode(before['data']), before['mode'])
+            os.chown(path, before['uid'], before['gid'])
+    for entry in sorted(journal['directories'], key=depth, reverse=True):
+        path = Path(entry['path'])
+        if entry['before'] is None and path.exists():
+            rmdir_durable(path)
+    if before_state is None:
+        unlink_durable(STATE, missing_ok=True)
+    else:
+        atomic(STATE, before_state, 0o600)
 
 
 def valid_journal(journal):
-    def valid_entry(entry):
+    def metadata(value, *keys):
+        return isinstance(value, dict) and all(type(value.get(key)) is int for key in keys)
+    def valid_file(entry):
+        before, after = entry.get('before'), entry.get('after')
         return (isinstance(entry, dict) and type(entry.get('path')) is str
-                and type(entry.get('mode')) is int and type(entry.get('after')) is str
-                and (entry.get('data') is None or type(entry['data']) is str))
-    return (isinstance(journal, dict) and type(journal.get('state')) is str
-            and type(journal.get('after_state')) is str
-            and isinstance(journal.get('progress'), dict)
+                and (before is None or metadata(before, 'mode', 'uid', 'gid')
+                     and type(before.get('data')) is str)
+                and (after is None or metadata(after, 'mode', 'uid', 'gid')
+                     and type(after.get('sha256')) is str))
+    def valid_directory(entry):
+        before, after = entry.get('before'), entry.get('after')
+        return (isinstance(entry, dict) and type(entry.get('path')) is str
+                and Path(entry['path']).is_relative_to(COPY_THEME)
+                and (before is None or metadata(before, 'mode', 'uid', 'gid'))
+                and (after is None or metadata(after, 'mode', 'uid', 'gid')))
+    return (isinstance(journal, dict) and journal.get('journal') == JOURNAL_FORMAT
+            and journal.get('operation') in OPERATION_LABELS
+            and (journal.get('state_before') is None or type(journal['state_before']) is str)
+            and (journal.get('state_after') is None or type(journal['state_after']) is str)
             and isinstance(journal.get('files'), list)
-            and all(valid_entry(entry) for entry in journal['files'])
-            and isinstance(journal.get('directories', {}), dict)
-            and all(type(mode) is int for mode in journal.get('directories', {}).values()))
+            and all(valid_file(entry) for entry in journal['files'])
+            and isinstance(journal.get('directories'), list)
+            and all(valid_directory(entry) for entry in journal['directories']))
+
+
+def recover(recovery_only=False):
+    """Undo an interrupted root transaction. Never loads state first: the operation may
+    have created or deleted it."""
+    check_state_directory(allow_journal=True)
+    path = journal_path()
+    data = read(path)
+    if data is None:
+        raise Error('No interrupted root transaction to recover')
+    metadata = path.stat()
+    if (metadata.st_uid, metadata.st_gid) != owner() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise Error('Unsafe recovery journal ownership/mode')
+    journal = parse_json(data, path)
+    if not valid_journal(journal):
+        raise Error(f'Unsupported recovery journal: {path}')
+    require_no_live_locker(recovery_only)
+    restore_journal(journal)
+    unlink_durable(path)
+    print('Interrupted transaction restored.')
 
 
 def require_no_live_locker(recovery_only=False):
@@ -1055,56 +1143,33 @@ def require_no_live_locker(recovery_only=False):
 
 
 def rollback(recovery_only=False):
-    state = load_state()
-    no_pending_recovery()
+    """Restore every managed file's rollback target. Accepts a schema-1 state from any
+    companion version: everything it needs is in the state."""
+    state = load_state(any_version=True)
     require_no_live_locker(recovery_only)
-    restore_managed_files(state)
-    print('Root managed files restored.')
-
-
-def undo_setup():
-    # A failed setup ran from a live session, so the locker check does not apply.
-    state = load_state()
-    no_pending_recovery()
-    if state.get('transaction', {}).get('kind') != 'setup':
-        raise Error('No interrupted setup to undo')
-    restore_managed_files(state)
-
-
-def restore_managed_files(state):
     # Validate every target first: never partly restore over unrecognized edits.
+    directories = [path for path in theme_directories(state['files']) if path.exists()]
     if COPY_THEME.is_dir():
         expected = {entry['path'] for entry in state['files']}
-        expected_directories = set(theme_directories(state['files']))
         for path in COPY_THEME.rglob('*'):
-            if (path.is_symlink() or (path.is_dir() and path not in expected_directories)
+            if (path.is_symlink() or (path.is_dir() and path not in directories)
                     or (not path.is_dir() and str(path) not in expected)):
                 raise Error('Unexpected companion theme entry; refusing rollback')
+    uid, gid = owner()
     for entry in state['files']:
-        data = read(Path(entry['path']))
-        original = base64.b64decode(entry['before']) if entry['before'] is not None else None
-        if data != original and (data is None or digest(data) != entry['after']):
+        current = file_record(Path(entry['path']))
+        restore = None if entry['restore'] is None else {
+            'data': entry['restore'], 'mode': entry['restore_mode'],
+            'uid': entry['restore_uid'], 'gid': entry['restore_gid']}
+        after = {'sha256': entry['after'], 'mode': entry['mode'], 'uid': uid, 'gid': gid}
+        if not matches_file(current, restore, after):
             raise Error(f'Rollback refuses managed drift: {entry["path"]}')
-    progress = {entry['path']: 'pending' for entry in state['files']}
-    state['transaction'] = {'kind': 'rollback', 'progress': progress}
-    save_state(state)
-    for entry in reversed(state['files']):
-        state['transaction']['progress'][entry['path']] = 'restoring'
-        save_state(state)
-        path = Path(entry['path'])
-        if entry['before'] is None:
-            unlink_durable(path, missing_ok=True)
-        else:
-            atomic(path, base64.b64decode(entry['before']), entry['before_mode'])
-            os.chown(path, entry['before_uid'], entry['before_gid'])
-        state['transaction']['progress'][entry['path']] = 'restored'
-        save_state(state)
-    # Only remove empty companion theme directories; never recursively delete others' data.
-    if COPY_THEME.is_dir():
-        for directory in sorted((p for p in COPY_THEME.rglob('*') if p.is_dir()), reverse=True):
-            rmdir_durable(directory)
-        rmdir_durable(COPY_THEME)
-    unlink_durable(STATE)
+    files = [(Path(entry['path']),
+              None if entry['restore'] is None else base64.b64decode(entry['restore']),
+              entry['restore_mode'], entry['restore_uid'], entry['restore_gid'])
+             for entry in reversed(state['files'])]
+    transact('rollback', None, files, [(path, None) for path in directories])
+    print('Root managed files restored.')
 
 
 def no_extended_acl(path):

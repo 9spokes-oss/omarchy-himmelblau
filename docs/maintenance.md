@@ -21,6 +21,9 @@ Releases and marketplace submission are currently draft/withdrawn while polishin
 
 ## Controlled upgrade to 0.5.3
 
+Historical: this `repair`-based upgrade no longer exists. Versions after `0.5.3` change
+by `rollback`, package upgrade, then `setup`.
+
 Version `0.5.3` with native `0.21.0-4` completed the controlled lab acceptance
 below on 2026-11-08. The `0.5.2` results above remain historical.
 
@@ -136,10 +139,16 @@ companion's accepted build. Trust the release source/checksums and package insta
 channel; the manifest is not a package signature and does not defend against root
 replacing both trusted packages. See [release builds](releasing.md).
 
-Configuration replacements fsync file contents and parent directories, and record
-per-entry transaction progress. If an operation is interrupted, preserve the root
-state/journal and run `sudo omarchy-himmelblau recover` from recovery access. It accepts
-only known before/after bytes; unknown edits need manual investigation. Default rollback
+Every root change (`setup`, `policy`, `repair`, `rollback`) first writes one journal,
+`/var/lib/omarchy-himmelblau/transaction.json` (root, `0600`), with each target's
+exact before bytes, owner and mode (or absence) and its expected after hash, owner and
+mode, plus the state file's before bytes and after hash. Replacements fsync file contents
+and parent directories. A failed operation undoes itself; if it is interrupted, every
+command except `recover` refuses while the journal exists. Preserve it and run
+`sudo omarchy-himmelblau recover` from recovery access. Recovery always undoes, never
+completes, the change, and accepts each target only at its before or after value,
+including owner and mode; unknown edits need manual investigation. Any other `*.json`
+in that directory makes every command refuse. Default rollback
 and recovery refuse live or indeterminate graphical/locker sessions. The explicit
 `--recovery-only` override is for an operator at an independent console who has ensured
 that restoring configuration cannot strand a dependent session. It does not stop sessions.

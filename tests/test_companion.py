@@ -293,14 +293,16 @@ class CompanionTest(unittest.TestCase):
             return original(path, data, mode)
         with patch.object(m, 'atomic', crash):
             with self.assertRaises(KeyboardInterrupt): self.setup()
-        state = m.load_state()
-        self.assertEqual(state['transaction']['kind'], 'setup')
-        self.assertIn('applied', state['transaction']['progress'].values())
-        self.assertIn('pending', state['transaction']['progress'].values())
-        with self.assertRaises(m.Error): m.doctor()
+        # Initial setup: no state file before, and none yet when it crashed.
+        self.assertFalse(m.STATE.exists())
+        self.assertTrue(m.journal_path().exists())
+        for action in (m.doctor, m.rollback, m.repair, self.setup):
+            with self.assertRaisesRegex(m.Error, 'run recover'): action()
         m.recover()
         self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        self.assertFalse(m.COPY_THEME.exists()); self.assertFalse(m.journal_path().exists())
         self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+        self.setup(); m.doctor()
 
     def test_policy_interruption_recovers_with_unchanged_or_committed_state(self):
         self.setup()
@@ -314,7 +316,7 @@ class CompanionTest(unittest.TestCase):
         self.assertIn(b'apply_policy = true', m.CONFIG.read_bytes())
         m.recover()
         self.assertEqual(m.CONFIG.read_bytes(), old_config); self.assertEqual(m.STATE.read_bytes(), old_state)
-        journal = m.STATE.parent / 'policy-backup.json'; unlink = Path.unlink
+        journal = m.journal_path(); unlink = Path.unlink
         def crash_unlink(path, *args, **kwargs):
             if path == journal: raise KeyboardInterrupt
             return unlink(path, *args, **kwargs)
@@ -367,17 +369,143 @@ class CompanionTest(unittest.TestCase):
         m.recover()
         self.assertFalse(m.PAM.exists()); self.assertEqual(m.STATE.read_bytes(), old_state)
         m.repair()
-        def crash_rollback(path, data, mode):
-            if path == m.STATE:
-                state = json.loads(data)
-                progress = state.get('transaction', {})
-                if progress.get('kind') == 'rollback' and 'restored' in progress['progress'].values():
-                    raise KeyboardInterrupt
-            return original(path, data, mode)
-        with patch.object(m, 'atomic', crash_rollback):
-            with self.assertRaises(KeyboardInterrupt): m.rollback()
-        m.recover()
+        m.rollback()
         self.assertFalse(m.STATE.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def crash_rollback_at_unlink(self, target):
+        unlink = m.unlink_durable
+        def crash(path, missing_ok=False):
+            if path == target:
+                if target != m.journal_path():
+                    unlink(path, missing_ok)
+                raise KeyboardInterrupt
+            return unlink(path, missing_ok)
+        with patch.object(m, 'unlink_durable', crash):
+            with self.assertRaises(KeyboardInterrupt): m.rollback()
+
+    def test_rollback_crash_after_deleting_a_managed_file(self):
+        self.setup()
+        pam, mode, state = m.PAM.read_bytes(), m.PAM.stat().st_mode, m.STATE.read_bytes()
+        self.crash_rollback_at_unlink(m.PAM)
+        self.assertFalse(m.PAM.exists())
+        with self.assertRaisesRegex(m.Error, 'run recover'): m.rollback()
+        m.recover()
+        self.assertEqual((m.PAM.read_bytes(), m.PAM.stat().st_mode), (pam, mode))
+        self.assertEqual(m.STATE.read_bytes(), state)
+        m.doctor(); m.rollback()
+        self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_rollback_crash_after_deleting_state_before_its_journal(self):
+        self.setup()
+        state = m.STATE.read_bytes()
+        self.crash_rollback_at_unlink(m.journal_path())
+        # The rollback finished everything but deleting its journal.
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        self.assertTrue(m.journal_path().exists())
+        m.recover()  # Recovery never loads state, and always undoes.
+        self.assertEqual(m.STATE.read_bytes(), state)
+        m.doctor(); m.rollback()
+        self.assertFalse(m.STATE.exists())
+
+    def interrupted_policy(self):
+        """A policy change that crashed at its state commit: CONFIG is at its after value."""
+        self.setup()
+        atomic = m.atomic
+        def crash(path, data, mode):
+            if path == m.STATE: raise KeyboardInterrupt
+            return atomic(path, data, mode)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): m.policy(True)
+        return json.loads(m.journal_path().read_text())
+
+    def assert_recover_refuses_untouched(self, message):
+        files = {path: path.read_bytes() for path in (m.CONFIG, m.STATE, m.journal_path())}
+        with self.assertRaisesRegex(m.Error, message): m.recover()
+        for path, data in files.items():
+            self.assertEqual(path.read_bytes(), data, path)
+
+    def test_recover_refuses_after_side_file_metadata_drift(self):
+        # A target with the expected bytes but another owner, group or mode is drift.
+        journal = self.interrupted_policy()
+        for key in ('uid', 'gid'):
+            with self.subTest(key=key):
+                edited = json.loads(json.dumps(journal))
+                edited['files'][0]['after'][key] += 1
+                m.journal_path().write_text(json.dumps(edited))
+                self.assert_recover_refuses_untouched('unknown target drift')
+        m.journal_path().write_text(json.dumps(journal))
+        m.CONFIG.chmod(0o600)
+        self.assert_recover_refuses_untouched('unknown target drift')
+        m.CONFIG.chmod(0o644)
+        m.recover()
+        self.assertFalse(m.load_state()['apply_policy'])
+
+    def test_recover_refuses_after_side_directory_metadata_drift(self):
+        atomic = m.atomic
+        def crash(path, data, mode):
+            if path == m.CONFIG: raise KeyboardInterrupt  # Theme directories already exist.
+            return atomic(path, data, mode)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        journal = json.loads(m.journal_path().read_text())
+        created = [entry for entry in journal['directories'] if entry['before'] is None]
+        self.assertTrue(created)
+        for key in ('uid', 'gid'):
+            with self.subTest(key=key):
+                edited = json.loads(json.dumps(journal))
+                edited['directories'][0]['after'][key] += 1
+                m.journal_path().write_text(json.dumps(edited))
+                with self.assertRaisesRegex(m.Error, 'directory drift'): m.recover()
+                self.assertTrue(m.COPY_THEME.is_dir())
+        m.journal_path().write_text(json.dumps(journal))
+        m.COPY_THEME.chmod(0o700)
+        with self.assertRaisesRegex(m.Error, 'directory drift'): m.recover()
+        self.assertTrue(m.COPY_THEME.is_dir())
+        m.COPY_THEME.chmod(0o755)
+        m.recover()
+        self.assertFalse(m.COPY_THEME.exists())
+
+    def test_recover_refuses_state_file_metadata_and_content_drift(self):
+        self.interrupted_policy()
+        m.STATE.chmod(0o640)
+        self.assert_recover_refuses_untouched('Unsafe state ownership/mode')
+        m.STATE.chmod(0o600)
+        m.STATE.write_bytes(m.STATE.read_bytes() + b' ')
+        self.assert_recover_refuses_untouched('unknown state drift')
+
+    def test_recover_refuses_unsafe_or_unknown_journals(self):
+        self.setup()
+        with self.assertRaisesRegex(m.Error, 'No interrupted root transaction'): m.recover()
+        m.rollback(); m.CONFIG.write_bytes(self.before[m.CONFIG])
+        journal = self.interrupted_policy()
+        m.journal_path().chmod(0o644)
+        with self.assertRaisesRegex(m.Error, 'Unsafe recovery journal'): m.recover()
+        m.journal_path().chmod(0o600)
+        for edit in ({'journal': 2}, {'operation': 'migrate'}, {'files': {}},
+                     {'directories': [{'path': '/etc', 'before': None, 'after': None}]}):
+            with self.subTest(edit=edit):
+                m.journal_path().write_text(json.dumps({**journal, **edit}))
+                with self.assertRaisesRegex(m.Error, 'Unsupported recovery journal'): m.recover()
+        m.journal_path().write_text(json.dumps(journal))
+        m.recover()
+
+    def test_state_from_another_version_only_rolls_back(self):
+        self.setup()
+        state = m.load_state(); state['version'] = '0.0.1'; m.save_state(state)
+        for action in (m.doctor, m.repair, lambda: m.policy(True), self.setup):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(m.Error, 'run rollback, then setup'): action()
+        m.rollback()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_state_without_schema_is_refused_by_every_command(self):
+        self.setup()
+        state = m.load_state(); del state['schema']; m.save_state(state)
+        for action in (m.doctor, m.repair, m.rollback, lambda: m.policy(True), self.setup):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(m.Error, 'predates this companion'): action()
+        self.assertTrue(m.PAM.exists())
 
     def test_state_access_refuses_writable_or_foreign_ancestors(self):
         self.setup()
@@ -535,7 +663,7 @@ class CompanionTest(unittest.TestCase):
             m.policy(False)
             m.doctor()
         changed = next(item for item in m.load_state()['files'] if Path(item['path']) == m.CONFIG)
-        self.assertEqual(changed['before'], original['before'])
+        self.assertEqual(changed['restore'], original['restore'])
         self.assertFalse(m.load_state()['apply_policy'])
         self.assertIn(b'connection_timeout = 17', m.CONFIG.read_bytes())
         self.assertEqual(m.CONFIG.stat().st_mode & 0o777, 0o644)
@@ -612,7 +740,7 @@ class CompanionTest(unittest.TestCase):
             self.assertTrue(failed)
             self.assertEqual(m.CONFIG.read_bytes(), old_config)
             self.assertEqual(m.STATE.read_bytes(), old_state)
-            self.assertFalse((m.STATE.parent / 'policy-backup.json').exists())
+            self.assertFalse(m.journal_path().exists())
 
     def test_policy_failed_restoration_retains_private_recovery_journal(self):
         m.setup('example.com', 'alice@example.com')
@@ -622,48 +750,53 @@ class CompanionTest(unittest.TestCase):
             if Path(path) == m.STATE: raise OSError('synthetic persistent state failure')
             return original(path, data, mode)
         with patch.object(m, 'atomic', failure):
-            with self.assertRaisesRegex(m.Error, 'originals are in'): m.policy(True)
-        journal = m.STATE.parent / 'policy-backup.json'
+            with self.assertRaisesRegex(m.Error, 'could not be undone; run recover'): m.policy(True)
+        journal = m.journal_path()
         saved = json.loads(journal.read_text())
-        self.assertEqual(m.base64.b64decode(saved['config']), old_config)
-        self.assertEqual(m.base64.b64decode(saved['state']), old_state)
+        self.assertEqual(m.base64.b64decode(saved['files'][0]['before']['data']), old_config)
+        self.assertEqual(m.base64.b64decode(saved['state_before']), old_state)
         self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
-        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.policy(True)
+        with self.assertRaisesRegex(m.Error, 'run recover'): m.policy(True)
+        m.recover()
+        self.assertEqual((m.CONFIG.read_bytes(), m.STATE.read_bytes()), (old_config, old_state))
 
-    def test_pending_recovery_journals_block_health_and_mutators(self):
+    def test_pending_journal_and_stray_files_block_health_and_mutators(self):
         m.setup('example.com', 'alice@example.com')
-        for operation in ('policy', 'repair'):
-            journal = m.STATE.parent / f'{operation}-backup.json'
+        state = m.load_state()
+        for name, message in (('transaction.json', 'Interrupted root transaction'),
+                              ('repair-backup.json', 'Unexpected file in state directory')):
+            journal = m.STATE.parent / name
             journal.write_text('{}'); journal.chmod(0o600)
             old_state = m.STATE.read_bytes(); old_config = m.CONFIG.read_bytes()
             def root_status():
-                state = m.load_state()
-                with patch.object(m.os, 'geteuid', return_value=0), patch.object(m, 'load_state', return_value=state):
+                with patch.object(m, 'root_required'), patch.object(m, 'load_state', return_value=state):
                     m.main(['doctor'])
             actions = (m.doctor, m.repair, m.rollback, lambda: m.policy(True),
                        lambda: m.setup('example.com', 'alice@example.com'), root_status)
             for action in actions:
-                with self.subTest(operation=operation, action=action):
-                    with self.assertRaisesRegex(m.Error, f'Pending {operation} recovery'):
+                with self.subTest(name=name, action=action):
+                    with self.assertRaisesRegex(m.Error, message):
                         action()
                     self.assertEqual(m.STATE.read_bytes(), old_state)
                     self.assertEqual(m.CONFIG.read_bytes(), old_config)
-            self.assertIn(f'Pending {operation} recovery', '\n'.join(m.root_issues(m.load_state())))
+            self.assertIn(message, '\n'.join(m.root_issues(state)))
             journal.unlink()
 
     def test_final_policy_journal_unlink_failure_is_not_reported_healthy(self):
         m.setup('example.com', 'alice@example.com')
-        journal = m.STATE.parent / 'policy-backup.json'
+        journal = m.journal_path()
         original = Path.unlink
         def fail_final_unlink(path, *args, **kwargs):
             if path == journal: raise OSError('synthetic journal unlink failure')
             return original(path, *args, **kwargs)
         with patch.object(Path, 'unlink', fail_final_unlink):
             with self.assertRaisesRegex(OSError, 'journal unlink failure'): m.policy(True)
-        self.assertTrue(m.load_state()['apply_policy'])
+        self.assertTrue(json.loads(m.STATE.read_text())['apply_policy'])
         self.assertTrue(journal.exists())
-        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.doctor()
-        with self.assertRaisesRegex(m.Error, 'Pending policy recovery'): m.repair()
+        with self.assertRaisesRegex(m.Error, 'Interrupted root transaction'): m.doctor()
+        with self.assertRaisesRegex(m.Error, 'Interrupted root transaction'): m.repair()
+        m.recover()
+        self.assertFalse(m.load_state()['apply_policy'])
 
     def test_doctor_is_root_only_and_status_is_user_only(self):
         with patch.object(m.os, 'geteuid', return_value=1000), patch.object(m, 'doctor') as doctor:
@@ -734,67 +867,6 @@ class CompanionTest(unittest.TestCase):
         m.PAM.unlink()
         return m.STATE.read_bytes()
 
-    def previous_release_root(self):
-        """A 0.5.2 install: its theme copy differs from 0.5.3 only in the failure notices."""
-        self.setup()
-        main = m.COPY_THEME / 'Main.qml'
-        current = main.read_bytes()
-        failure = ('      else {\n'
-                   '        // Keep what the daemon said (for example a PIN reset backoff) above the result.\n'
-                   '        var messages = root.notices.slice(-7)\n'
-                   '        messages.push(root.recovering ? "PIN change failed; sign in to check or retry."'
-                   ' : "Sign-in failed. Try again.")\n'
-                   '        root.notices = messages\n'
-                   '      }\n').encode()
-        old_failure = ('      else root.notices = [root.recovering ? "PIN change failed; sign in to check or retry."'
-                       ' : "Sign-in failed. Try again."]\n').encode()
-        self.assertEqual(current.count(failure), 1)
-        previous = current.replace(failure, old_failure)
-        self.assertEqual(m.digest(previous), m.manifest('previous-release')['sddm-conversation'])
-        main.write_bytes(previous)
-        state = m.load_state()
-        state['version'] = m.manifest('previous-release')['version']
-        for entry in state['files']:
-            if entry['path'] == str(main):
-                entry['after'] = m.digest(previous)
-        m.save_state(state)
-        return main, previous, m.STATE.read_bytes()
-
-    def test_previous_release_theme_upgrade_preserves_originals(self):
-        main, previous, old = self.previous_release_root()
-        old_state = json.loads(old)
-        unchanged = {Path(e['path']): Path(e['path']).read_bytes() for e in old_state['files'] if e['path'] != str(main)}
-        with self.assertRaisesRegex(m.Error, 'explicit root repair'): m.doctor()
-        with self.assertRaises(m.Error): self.setup()
-        self.assertEqual(main.read_bytes(), previous)
-        m.repair()
-        upgraded = m.load_state()
-        self.assertEqual(upgraded['version'], m.VERSION)
-        self.assertEqual(main.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
-        for before, after in zip(old_state['files'], upgraded['files']):
-            self.assertEqual({k:v for k,v in before.items() if k != 'after'}, {k:v for k,v in after.items() if k != 'after'})
-        for path, data in unchanged.items(): self.assertEqual(path.read_bytes(), data)
-        m.doctor()
-        m.rollback()
-        self.assertFalse(main.exists())
-        self.assertEqual(m.THEME.joinpath('Main.qml').read_bytes(), (ROOT / 'tests/fixtures/Main.qml').read_bytes())
-
-    def test_previous_release_theme_upgrade_refuses_drift_and_unknown_hashes(self):
-        main, previous, old = self.previous_release_root()
-        main.write_bytes(previous + b'// drift')
-        with self.assertRaisesRegex(m.Error, 'unsupported managed drift'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), old)
-        main.write_bytes(previous)
-        state = json.loads(old)
-        for entry in state['files']:
-            if entry['path'] == str(main):
-                entry['after'] = m.digest(previous + b'// older')
-        m.save_state(state); before = m.STATE.read_bytes()
-        with self.assertRaisesRegex(m.Error, 'Unsupported managed SDDM theme state'): m.repair()
-        self.assertEqual(m.STATE.read_bytes(), before)
-        self.assertEqual(main.read_bytes(), previous)
-        self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
-
     def test_repair_refuses_content_and_permission_drift_before_writes(self):
         old = self.missing_pam_root()
         main = m.COPY_THEME / 'Main.qml'
@@ -807,7 +879,7 @@ class CompanionTest(unittest.TestCase):
                     m.repair()
                 self.assertEqual(m.STATE.read_bytes(), old)
                 self.assertFalse(m.PAM.exists())
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+                self.assertFalse(m.journal_path().exists())
 
     def test_repair_refuses_extra_theme_files_before_writes(self):
         old = self.missing_pam_root()
@@ -834,7 +906,7 @@ class CompanionTest(unittest.TestCase):
                         m.repair()
                 self.assertFalse(m.PAM.exists())
                 self.assertEqual(m.STATE.read_bytes(), old)
-                self.assertFalse((m.STATE.parent / 'repair-backup.json').exists())
+                self.assertFalse(m.journal_path().exists())
 
     def test_repair_failed_rollback_retains_recoverable_journal(self):
         old = self.missing_pam_root()
@@ -844,14 +916,17 @@ class CompanionTest(unittest.TestCase):
                 raise OSError('state write and restore failure')
             return atomic(path, data, mode)
         with patch.object(m, 'atomic', injected):
-            with self.assertRaisesRegex(m.Error, 'originals are in'):
+            with self.assertRaisesRegex(m.Error, 'could not be undone; run recover'):
                 m.repair()
-        journal = json.loads((m.STATE.parent / 'repair-backup.json').read_text())
-        self.assertEqual(m.base64.b64decode(journal['state']), old)
-        self.assertEqual(journal['files'], [{'path': str(m.PAM), 'data': None, 'mode': 0o644,
-                                             'after': m.digest(m.patch_source('lock-pam', self.before[m.STOCK_PAM]))}])
-        with self.assertRaisesRegex(m.Error, 'Pending repair recovery'):
+        journal = json.loads(m.journal_path().read_text())
+        self.assertEqual(m.base64.b64decode(journal['state_before']), old)
+        self.assertEqual(journal['files'], [{'path': str(m.PAM), 'before': None, 'after': {
+            'sha256': m.digest(m.patch_source('lock-pam', self.before[m.STOCK_PAM])),
+            'mode': 0o644, 'uid': os.geteuid(), 'gid': os.getegid()}}])
+        with self.assertRaisesRegex(m.Error, 'run recover'):
             m.repair()
+        m.recover()
+        self.assertEqual(m.STATE.read_bytes(), old); self.assertFalse(m.PAM.exists())
 
     def test_repair_restores_deleted_recovery_account_and_pin_service(self):
         self.setup()
@@ -1135,7 +1210,7 @@ class CompanionTest(unittest.TestCase):
         state = m.load_state()
         cases = [b'not json', b'[]', json.dumps({**state, 'files': [{}]}).encode(),
                  json.dumps({**state, 'admin': 'no'}).encode(),
-                 json.dumps({**state, 'transaction': {'kind': 'setup'}}).encode()]
+                 json.dumps({**state, 'schema': '1'}).encode()]
         for data in cases:
             with self.subTest(data=data[:30]), patch.object(m, 'root_required'):
                 m.STATE.write_bytes(data)
