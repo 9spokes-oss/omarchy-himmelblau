@@ -1127,18 +1127,6 @@ def user_environment():
             'LOGNAME': account.pw_name, 'XDG_RUNTIME_DIR': f'/run/user/{os.getuid()}'}
 
 
-def unlocked():
-    result = run(['/usr/bin/omarchy-shell', 'lock', 'status'], text=True,
-                 env=user_environment(), timeout=5)
-    try:
-        state = json.loads(result.stdout)
-    except ValueError:
-        raise Error('Unable to verify unlocked Quickshell state') from None
-    keys = ('locked', 'requested', 'pending', 'sessionLocked', 'secure', 'authenticating')
-    if any(state.get(key) is not False for key in keys):
-        raise Error('Session is locked or its lock state is unknown')
-
-
 def native_plugins():
     result = run(['/usr/bin/omarchy', 'plugin', 'list', '--json'], text=True,
                  env=user_environment(), timeout=5)
@@ -1236,29 +1224,6 @@ def locker_preflight():
     plugin_status(quiet=True, allow_previous=True)
 
 
-def activate_plugin():
-    user_required()
-    unlocked()
-    lock_prerequisites()
-    info = fixed_plugin_files()
-    plugins = native_plugins()
-    fixed = [plugin for plugin in plugins if plugin['id'] == info['id']]
-    if (len(fixed) != 1 or fixed[0].get('firstParty') is not False
-            or fixed[0].get('clonedFrom') != 'omarchy.lock'):
-        raise Error('Fixed lock plugin is not installed as a clone of omarchy.lock')
-    enabled = lock_implementations(plugins)
-    if len(enabled) > 1 or any(plugin['id'] not in ('omarchy.lock', info['id']) for plugin in enabled):
-        raise Error('Another lock implementation is enabled; disable it first')
-    try:
-        unlocked()
-        run(['/usr/bin/omarchy', 'plugin', 'enable', info['id']], env=user_environment(), timeout=5)
-        plugin_status(quiet=True)
-    except Exception:
-        # Even a failed native command may have changed persisted selection.
-        raise Error('Plugin activation incomplete; the enabled lock plugin may have changed') from None
-    print('Fixed lock plugin enabled; restart the shell or log in again before locking.')
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--development', action='store_true',
@@ -1281,7 +1246,6 @@ def main(argv=None):
     policy_choice = policy_parser.add_mutually_exclusive_group(required=True)
     policy_choice.add_argument('--enable', dest='policy_enabled', action='store_true')
     policy_choice.add_argument('--disable', dest='policy_enabled', action='store_false')
-    sub.add_parser('activate-plugin')
     args = parser.parse_args(argv)
     if args.development:
         if os.geteuid() == 0:
@@ -1290,9 +1254,7 @@ def main(argv=None):
             raise Error('--development works only as python3 src/omarchy_himmelblau.py in a checkout')
         global ASSETS
         ASSETS = Path(__file__).resolve().parents[1] / 'assets'
-    if args.command == 'activate-plugin':
-        activate_plugin()
-    elif args.command in ('status', 'plugin-status'):
+    if args.command in ('status', 'plugin-status'):
         plugin_status()
     elif args.command == 'locker-preflight':
         locker_preflight()

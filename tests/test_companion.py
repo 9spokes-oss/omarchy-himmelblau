@@ -478,11 +478,11 @@ class CompanionTest(unittest.TestCase):
         manifest = m.manifest
         with patch.object(m, 'manifest', lambda name: previous if name == 'previous-release' else manifest(name)), \
                 patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing), \
-                patch.object(m, 'unlocked'), patch.object(m.subprocess, 'run') as run:
+                patch.object(m.subprocess, 'run') as run:
             m.locker_preflight()
             m.main(['locker-preflight'])
             needs = f'{previous["version"]} needs updating to {current["version"]}'
-            for action in (m.plugin_status, lambda: m.main(['status']), m.activate_plugin):
+            for action in (m.plugin_status, lambda: m.main(['status'])):
                 with self.assertRaisesRegex(m.Error, needs): action()
             run.assert_not_called()
             # Neither release: refused everywhere, the preflight included.
@@ -506,62 +506,15 @@ class CompanionTest(unittest.TestCase):
         extra.unlink(); extra.symlink_to(directory / 'plugin/Service.qml')
         with self.assertRaises(m.Error): m.fixed_plugin_files()
 
-    def test_fixed_plugin_activation_requires_native_exclusivity_and_no_root_actions(self):
-        directory, listing = self.fixed_plugin_fixture()
-        calls = []
-        def command(argv, **kwargs):
-            self.assertEqual(argv[:3], ['/usr/bin/omarchy','plugin','enable'])
-            calls.append(argv)
-            for plugin in listing: plugin['enabled'] = plugin['id'] == argv[3]
-            return SimpleNamespace(returncode=0)
-        with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-             patch.object(m, 'native_plugins', side_effect=lambda: json.loads(json.dumps(listing))), \
-             patch.object(m.subprocess, 'run', side_effect=command):
-            m.activate_plugin()
-        self.assertEqual(calls, [['/usr/bin/omarchy','plugin','enable','9spokes.himmelblau-lock']])
-        self.assertTrue(listing[1]['enabled']); self.assertFalse(listing[0]['enabled'])
-
-    def test_fixed_plugin_activation_works_for_any_username(self):
-        directory, listing = self.fixed_plugin_fixture()
-        account, home = m.canonical_user.return_value
-        for name in ('omarchy', 'alice@example.com'):
-            account.pw_name = name
-            listing[0]['enabled'] = True; listing[1]['enabled'] = False
-            def command(argv, **kwargs):
-                self.assertEqual(argv, ['/usr/bin/omarchy','plugin','enable','9spokes.himmelblau-lock'])
-                for plugin in listing: plugin['enabled'] = plugin['id'] == argv[3]
-                return SimpleNamespace(returncode=0)
-            with self.subTest(name=name), patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-                 patch.object(m, 'native_plugins', side_effect=lambda: json.loads(json.dumps(listing))), \
-                 patch.object(m.subprocess, 'run', side_effect=command):
-                m.activate_plugin()
-
-    def test_fixed_plugin_activation_refuses_old_user_clone(self):
+    def test_preflight_refuses_a_second_enabled_lock_clone(self):
         directory, listing = self.fixed_plugin_fixture()
         listing[0]['enabled'] = False
         listing.append({'id':'alice.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
-        with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-             patch.object(m, 'native_plugins', return_value=listing), patch.object(m.subprocess, 'run') as run:
-            with self.assertRaisesRegex(m.Error, 'Another lock implementation'): m.activate_plugin()
+        with patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing), \
+             patch.object(m.subprocess, 'run') as run:
             with self.assertRaisesRegex(m.Error, 'only enabled lock'): m.locker_preflight()
+            with self.assertRaisesRegex(m.Error, 'only enabled lock'): m.plugin_status()
             run.assert_not_called()
-
-    def test_fixed_plugin_refuses_locked_unknown_or_failed_switch(self):
-        directory, listing = self.fixed_plugin_fixture()
-        with patch.object(m, 'unlocked', side_effect=m.Error('locked')), patch.object(m.subprocess, 'run') as run:
-            with self.assertRaisesRegex(m.Error, 'locked'): m.activate_plugin()
-            run.assert_not_called()
-        listing[0]['enabled'] = False
-        listing.append({'id':'unknown.lock','firstParty':False,'enabled':True,'clonedFrom':'omarchy.lock'})
-        with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-             patch.object(m, 'native_plugins', return_value=listing), patch.object(m.subprocess, 'run') as run:
-            with self.assertRaisesRegex(m.Error, 'Another lock implementation'): m.activate_plugin()
-            run.assert_not_called()
-        listing.pop(); listing[0]['enabled'] = True
-        with patch.object(m, 'unlocked'), patch.object(m, 'lock_prerequisites'), \
-             patch.object(m, 'native_plugins', return_value=listing), \
-             patch.object(m.subprocess, 'run', return_value=SimpleNamespace(returncode=0)):
-            with self.assertRaisesRegex(m.Error, 'activation incomplete'): m.activate_plugin()
 
     def test_policy_toggle_and_repair_preserve_original(self):
         before = m.CONFIG.read_bytes()
@@ -998,10 +951,6 @@ class CompanionTest(unittest.TestCase):
         self.assertIn(b'"alice" ALL=(ALL:ALL) ALL', m.SUDOERS.read_bytes())
         self.assertNotIn(b'NOPASSWD', m.SUDOERS.read_bytes())
         self.assertEqual(m.SUDOERS.stat().st_mode & 0o777, 0o440)
-
-    def test_locked_user_clone_refused(self):
-        with patch.object(m.subprocess, 'run', return_value=SimpleNamespace(stdout='{"locked":true}')):
-            with self.assertRaises(m.Error): m.unlocked()
 
     def test_legitimate_nss_home_alias_and_descendant_symlink(self):
         home = self.base / 'actual-home'; home.mkdir()
