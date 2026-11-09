@@ -1,7 +1,7 @@
 PREFIX ?= /usr
 DESTDIR ?=
 
-.PHONY: test native-test install
+.PHONY: test native-test pam-stack-test install
 
 CC ?= cc
 CFLAGS ?= -O2 -Wall -Wextra -Werror
@@ -15,6 +15,10 @@ test:
 	python3 -m unittest discover -s tests -v
 	node tests/pam-conversation.mjs
 	node tests/sddm-conversation.mjs
+
+# PAM stack harness (podman): the proposed system-auth and lock service on Arch's libpam.
+pam-stack-test:
+	tests/pam-stack/run.sh
 
 native-test:
 	test -n "$(SDDM_SOURCE)" -a -n "$(SDDM_BUILD)"
