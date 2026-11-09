@@ -84,6 +84,9 @@ HOMED_OK = ' '.join('homed-' + item for item in ALL_OK.split())
 
 
 def tally(user):
+    # Check first: `faillock --user` creates a missing tally file as a side effect.
+    if not (Path('/run/faillock') / user).exists():
+        return 0
     out = subprocess.run(['faillock', '--user', user], capture_output=True, text=True).stdout
     return len(re.findall(r'^\d{4}-\d\d-\d\d ', out, re.M))
 
@@ -222,20 +225,9 @@ class NonLocalUnknown(StackTest):
             for service in SERVICES:
                 with self.subTest(service=service, user=user):
                     run = drive(service, user, 'auth')
-                    if (service, user) != (LOCK, HOMED):  # See the next test.
-                        self.assertRefused(run, 'auth')
+                    self.assertRefused(run, 'auth')
                     run = drive(service, user, 'account')
                     self.assertRefused(run, 'account')
-
-    def test_lock_screen_keeps_stock_homed_unlock(self):
-        # Known difference from system-auth, kept on purpose: the lock service's
-        # Himmelblau line passes IGNORE on, so a homed account still unlocks through
-        # pam_systemd_home as on stock Omarchy. The identity is fixed (the session
-        # owner), and a homed account can't sign in through system-auth to own a
-        # session. Its account stage, via system-auth, still refuses it.
-        stub(homer=HOMED_OK)
-        self.assertEqual(drive(LOCK, HOMED, 'auth')['auth'], 'SUCCESS')
-        self.assertRefused(drive(LOCK, HOMED, 'account'), 'account')
 
     def test_unresolvable_names_get_no_tally(self):
         for _ in range(3):
@@ -362,21 +354,33 @@ class AsCallingUser(StackTest):
         stub(carol='auth=AUTH_ERR')
         self.assertRefused(drive(LOCK, ENTRA, 'auth', uid=50001), 'auth')
 
-    def test_lock_screen_cannot_lock_out_as_the_locked_user(self):
-        # Known limit, as on stock Omarchy: the lock screen runs PAM as the locked
-        # user, who can't write root's /run/faillock (tmpfiles: 0755 root), so
-        # failures there are never counted and faillock never stops an attempt.
-        # The TPM's PIN anti-hammering is the only throttle on the lock screen.
-        Path('/run/faillock').mkdir(mode=0o755, exist_ok=True)
-        stub(carol='auth=AUTH_ERR')
-        for user, uid in (('alice', 1000), (ENTRA, 50001)):
+    def test_lock_screen_locks_out_after_a_normal_login(self):
+        # A successful login runs `faillock authsucc` as root, which leaves a tally
+        # file owned by the user (0660), so the lock screen, running as that user,
+        # can count failures and `requisite` preauth stops further attempts.
+        for user, uid, password in (('alice', 1000, 'alice-pw'), (ENTRA, 50001, 'x')):
             with self.subTest(user=user):
-                for _ in range(12):
+                stub(carol='auth=SUCCESS account=SUCCESS session=SUCCESS')
+                login = drive('sddm', user, 'auth', 'account', 'session', answers=password)
+                self.assertEqual(login['auth'], 'SUCCESS', login.out)
+                self.assertEqual((Path('/run/faillock') / user).stat().st_uid, uid)
+                stub(carol='auth=AUTH_ERR')
+                for _ in range(10):
                     self.assertRefused(drive(LOCK, user, 'auth', uid=uid), 'auth')
-                self.assertEqual(tally(user), 0)
-        stub(carol='auth=SUCCESS')
-        run = drive(LOCK, ENTRA, 'auth', uid=50001)
-        self.assertEqual(run['auth'], 'SUCCESS', run.out)
+                self.assertEqual(tally(user), 10)
+                stub(carol='auth=SUCCESS')
+                run = drive(LOCK, user, 'auth', answers=password, uid=uid)
+                self.assertRefused(run, 'auth')
+                self.assertEqual(run.stub('auth'), [])
+
+    def test_stock_autologin_leaves_the_lock_screen_without_lockout(self):
+        # Known gap: SDDM's stock autologin service has no `authsucc`, so no tally
+        # file exists and the lock screen can't record failures for that session.
+        login = drive('sddm-autologin', 'alice', 'auth', 'account', 'session')
+        self.assertEqual(login['auth'], 'SUCCESS', login.out)
+        for _ in range(12):
+            self.assertRefused(drive(LOCK, 'alice', 'auth', uid=1000), 'auth')
+        self.assertEqual(tally('alice'), 0)
 
     def test_setuid_sudo(self):
         stub(carol='auth=SUCCESS account=SUCCESS')
@@ -422,6 +426,11 @@ MUTANTS = {
         (SYSTEM_AUTH, 'session    [success=1 perm_denied=ignore default=die]',
          'session    [success=1 default=ignore]',
          ['GuardErrors.test_every_stage_dies_and_himmelblau_is_never_called']),
+    ],
+    'lock-passes-ignore-to-homed': [
+        (LOCK_FILE, '[success=3 default=bad]     pam_himmelblau.so',
+         '[success=3 ignore=ignore default=bad] pam_himmelblau.so',
+         ['NonLocalUnknown.test_homed_shaped_and_unknown_names_are_refused']),
     ],
     'lock-guard-0.5.3': [
         (LOCK_FILE, '[success=1 perm_denied=ignore default=die] pam_localuser.so',
