@@ -1395,7 +1395,12 @@ class CompanionTest(unittest.TestCase):
                  self.aad_tool('system-login'), self.pristine('system-auth')),
                 ('omarchy', 'omarchy', self.omarchy(), self.pristine('system-login'), self.omarchy()),
                 ('aad-tool on omarchy', 'omarchy', self.omarchy(aad_tool=True),
-                 self.aad_tool('system-login'), self.omarchy())]
+                 self.aad_tool('system-login'), self.omarchy()),
+                # aad-tool with himmelblau-idm/himmelblau#1995: system-login left pristine.
+                ('fixed aad-tool on pambase', 'pambase', self.aad_tool('system-auth'),
+                 self.pristine('system-login'), self.pristine('system-auth')),
+                ('fixed aad-tool on omarchy', 'omarchy', self.omarchy(aad_tool=True),
+                 self.pristine('system-login'), self.omarchy())]
 
     def fake_pambase_release(self, change=b'# pambase 2027\n', version='20270101-1', omarchy=None):
         """A supported release whose pristine system-auth has one more line between
@@ -1503,10 +1508,10 @@ class CompanionTest(unittest.TestCase):
     def test_setup_refuses_unrecognised_pam_before_any_change(self):
         golden = (PAM_STACK / 'stacks/system-auth').read_bytes()
         cases = [
-            ('mixed', {m.SYSTEM_AUTH: self.aad_tool('system-auth')}, 'both'),
-            ('mixed', {m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
-            ('mixed omarchy', {m.SYSTEM_AUTH: self.omarchy(aad_tool=True)}, 'both'),
-            ('mixed omarchy', {m.SYSTEM_AUTH: self.omarchy(), m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
+            ('aad-tool on system-login only', {m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
+            ('aad-tool on system-login only', {m.SYSTEM_AUTH: self.omarchy(), m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
+            ('fixed aad-tool lines moved', {m.SYSTEM_AUTH: self.pristine('system-auth') + b''.join(m.AAD_TOOL_LINES)}, 'both'),
+            ('fixed aad-tool twice', {m.SYSTEM_AUTH: self.aad_tool('system-auth') + m.AAD_TOOL_LINES[3]}, 'both'),
             ('patched', {m.SYSTEM_AUTH: golden}, 'both'),
             ('edited', {m.SYSTEM_AUTH: self.pristine('system-auth') + b'# local\n'}, 'both'),
             ('edited omarchy', {m.SYSTEM_AUTH: self.omarchy() + b'# local\n'}, 'both'),
@@ -1541,6 +1546,7 @@ class CompanionTest(unittest.TestCase):
         release = m.pambase_release('20260616-1')
         for label, auth, login in [
                 ('system-auth', self.aad_tool('system-auth') + b'# extra\n', self.aad_tool('system-login')),
+                ('system-auth alone', self.aad_tool('system-auth') + b'# extra\n', self.pristine('system-login')),
                 ('system-login', self.aad_tool('system-auth'), self.aad_tool('system-login') + b'# extra\n')]:
             with self.subTest(label):
                 lying = json.loads(json.dumps(release))

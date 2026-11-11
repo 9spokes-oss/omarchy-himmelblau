@@ -843,8 +843,9 @@ def without_aad_tool(data):
 def pambase_baseline(release):
     """(baseline kind, system-auth baseline bytes, pristine system-login bytes), from the
     files as they are now. Accepts a baseline system-auth with pristine system-login, or
-    both files exactly aad-tool's output on them (proved by hash, and by stripping its
-    lines back to the baseline and pristine hashes)."""
+    aad-tool's output on them: in both files (4.0.8), or in system-auth alone (aad-tool
+    once it skips a file that includes another configured one). aad-tool output is proved
+    by hash, and by stripping its lines back to the baseline and pristine hashes."""
     auth, login = read(SYSTEM_AUTH), read(SYSTEM_LOGIN)
     if auth is None or login is None:
         raise Error('Missing pambase PAM files')
@@ -853,6 +854,11 @@ def pambase_baseline(release):
         for kind in BASELINES:
             if digest(auth) == baselines[kind]['system-auth']:
                 return kind, auth, login
+            if digest(auth) == baselines[kind]['aad-tool']:
+                auth = without_aad_tool(auth)
+                if auth is not None and digest(auth) == baselines[kind]['system-auth']:
+                    return kind, auth, login
+                break
     elif digest(login) == release['aad-tool-system-login']:
         for kind in BASELINES:
             if digest(auth) == baselines[kind]['aad-tool']:
@@ -863,7 +869,7 @@ def pambase_baseline(release):
                     return kind, auth, login
                 break
     raise Error(f'{SYSTEM_AUTH} and {SYSTEM_LOGIN} must both be pambase as installed (with or '
-                "without Omarchy's lockout tuning), or both exactly aad-tool configure-pam "
+                "without Omarchy's lockout tuning), or exactly aad-tool configure-pam "
                 'output on it; refusing')
 
 

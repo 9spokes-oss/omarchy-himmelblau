@@ -114,7 +114,9 @@ patched stack on Arch's libpam.
   patch to the same output: pristine pambase, and pambase with Omarchy's install-time
   lockout tuning (`install/config/increase-lockout-limit.sh`: `preauth silent deny=10
   unlock_time=120`, `authfail deny=10 unlock_time=120`). It also lists the hashes of
-  `aad-tool configure-pam`'s output on each. The state's `restore_kind` records which
+  `aad-tool configure-pam`'s output on each. `setup` accepts that output in both files
+  (aad-tool 4.0.8) or in `system-auth` alone (aad-tool once it skips `system-login`,
+  which includes `system-auth`). The state's `restore_kind` records which
   baseline setup found. The installed version comes from pacman's database; a `.pacnew`
   name is never evidence on its own.
 - **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
