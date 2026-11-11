@@ -3,7 +3,7 @@
 # artifact; a local build has none, so build() pins the installed
 # sddm-himmelblau files instead (see tools/pin-installed-native.py).
 pkgname=omarchy-himmelblau
-pkgver=0.5.3
+pkgver=0.6.0
 pkgrel=1
 _native=0.21.0-4
 _commit=@RELEASE_COMMIT@
