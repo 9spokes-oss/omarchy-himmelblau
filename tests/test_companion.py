@@ -1599,13 +1599,25 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaisesRegex(m.Error, 'rollback target is not its omarchy baseline'): m.doctor()
         m.STATE.write_bytes(good)
 
-    def test_repair_repatches_pristine_system_auth_and_refuses_other_drift(self):
+    def test_repair_repatches_the_recorded_baseline_only(self):
+        for kind, own, other in (('pambase', self.pristine('system-auth'), self.omarchy()),
+                                 ('omarchy', self.omarchy(), self.pristine('system-auth'))):
+            with self.subTest(kind):
+                self.start_from(kind)
+                golden = m.SYSTEM_AUTH.read_bytes(); state = m.STATE.read_bytes()
+                m.SYSTEM_AUTH.write_bytes(own)
+                with self.assertRaisesRegex(m.Error, 'drift'): m.doctor()
+                m.repair()
+                self.assertEqual(m.SYSTEM_AUTH.read_bytes(), golden); self.assertEqual(m.STATE.read_bytes(), state)
+                m.SYSTEM_AUTH.write_bytes(other)
+                with self.assertRaisesRegex(m.Error, 'unsupported managed drift'): m.repair()
+                self.assertEqual(m.SYSTEM_AUTH.read_bytes(), other); self.assertEqual(m.STATE.read_bytes(), state)
+                m.SYSTEM_AUTH.write_bytes(golden)
+                m.rollback()
+
+    def test_repair_refuses_other_system_pam_drift(self):
         self.setup()
         golden = m.SYSTEM_AUTH.read_bytes(); state = m.STATE.read_bytes()
-        m.SYSTEM_AUTH.write_bytes(self.pristine('system-auth'))
-        with self.assertRaisesRegex(m.Error, 'drift'): m.doctor()
-        m.repair()
-        self.assertEqual(m.SYSTEM_AUTH.read_bytes(), golden); self.assertEqual(m.STATE.read_bytes(), state)
         for label, path, data in [('aad-tool on ours', m.SYSTEM_AUTH, m.AAD_TOOL_LINES[0] + golden),
                                   ('deleted', m.SYSTEM_AUTH, None),
                                   ('aad-tool system-login', m.SYSTEM_LOGIN, self.aad_tool('system-login')),
