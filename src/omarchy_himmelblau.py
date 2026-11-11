@@ -850,14 +850,17 @@ def pambase_upgrade(state, installed):
     if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine {hint}')
     record = file_record(pacnew(SYSTEM_AUTH))
-    if record is None:
+    if record is not None:
+        if digest(base64.b64decode(record['data'])) != release['system-auth']:
+            raise Error(f'{pacnew(SYSTEM_AUTH)} is not pristine {hint}')
+    else:
         entry = system_auth_entry(state)
         record = {'data': entry['restore'], 'mode': entry['restore_mode'],
                   'uid': entry['restore_uid'], 'gid': entry['restore_gid']}
-    pristine = base64.b64decode(record['data'])
-    if digest(pristine) != release['system-auth']:
-        raise Error(f'{pacnew(SYSTEM_AUTH)} is not pristine {hint}')
-    return release, pristine, record
+        if digest(base64.b64decode(record['data'])) != release['system-auth']:
+            raise Error(f'No {pacnew(SYSTEM_AUTH)}, and the stored pristine {SYSTEM_AUTH} '
+                        f'is not {hint}')
+    return release, base64.b64decode(record['data']), record
 
 
 def pambase_issues(state):
@@ -875,9 +878,11 @@ def pambase_issues(state):
     for entry in state['watched']:
         if digest(read(Path(entry['path'])) or b'') != entry['sha256']:
             issues.append(f'Watched file changed: {entry["path"]} (was aad-tool configure-pam run?)')
-    for path in (SYSTEM_AUTH, SYSTEM_LOGIN):
-        if read(pacnew(path)) is not None:
-            issues.append(f'Pending pambase update: {pacnew(path)}; run repair')
+    if read(pacnew(SYSTEM_AUTH)) is not None:
+        issues.append(f'Pending pambase update: {pacnew(SYSTEM_AUTH)}; run repair')
+    if read(pacnew(SYSTEM_LOGIN)) is not None:
+        issues.append(f'Pending pambase update: {pacnew(SYSTEM_LOGIN)}; {SYSTEM_LOGIN} must be '
+                      'pristine pambase: merge it by hand, then run doctor')
     return issues
 
 

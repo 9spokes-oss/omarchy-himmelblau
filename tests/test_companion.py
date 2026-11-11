@@ -1513,6 +1513,9 @@ class CompanionTest(unittest.TestCase):
         m.pacnew(m.SYSTEM_AUTH).write_bytes(self.pristine('system-auth'))
         with self.assertRaisesRegex(m.Error, 'Pending pambase update'): m.doctor()
         m.pacnew(m.SYSTEM_AUTH).unlink()
+        m.pacnew(m.SYSTEM_LOGIN).write_bytes(self.pristine('system-login'))
+        with self.assertRaisesRegex(m.Error, 'merge it by hand'): m.doctor()
+        m.pacnew(m.SYSTEM_LOGIN).unlink()
         self.pambase = '20270101-1'
         with self.assertRaisesRegex(m.Error, 'pambase 20270101-1 is installed'): m.doctor()
         self.pambase = '20260616-1'
@@ -1591,6 +1594,15 @@ class CompanionTest(unittest.TestCase):
                 for action in (m.repair, m.rollback):
                     with self.assertRaisesRegex(m.Error, f'pambase {version}.*by hand'): action()
                     self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
+
+    def test_upgrade_without_pacnew_needs_matching_stored_pristine(self):
+        self.setup()
+        auth, login, _ = self.fake_pambase_release()
+        self.upgrade_pambase(auth, login, keep_system_auth=True)
+        state = m.STATE.read_bytes(); files = self.pam_files()
+        for action in (m.repair, m.rollback):
+            with self.assertRaisesRegex(m.Error, 'No .*pacnew.*stored pristine'): action()
+            self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
 
     def test_rollback_with_unchanged_pambase_needs_no_supported_list(self):
         self.setup()
