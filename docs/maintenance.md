@@ -99,6 +99,36 @@ Before privileged rollback, disable the user clone and log out of **all sessions
 
 Native SDDM replacement has its own package rollback. The companion's root rollback does not remove or downgrade the native display manager. Restore compatible SDDM/companion packages and their matching configuration together using the separate SDDM procedure; do not mix a conversation theme with an incompatible daemon.
 
+## System PAM and pambase upgrades
+
+`setup` owns `/etc/pam.d/system-auth` and watches `/etc/pam.d/system-login`; the design
+is in the PAM ordering notes and the container harness (`make pam-stack-test`) checks the
+patched stack on Arch's libpam.
+
+- **Accounts.** Local accounts (in `/etc/passwd`) go through pambase's stack as before.
+  Every other name goes to Himmelblau, and any result but success ends the stack: it
+  never falls through to `pam_unix` or `systemd-homed`. Homed accounts aren't supported.
+  `pam_faillock` locks every non-root account for 120 s after 10 failures.
+- **Supported baselines.** `assets/patches.json` lists the exact pristine hashes of both
+  files per supported pambase release, and the hashes of `aad-tool configure-pam`'s
+  output. The installed version comes from pacman's database; a `.pacnew` name is never
+  evidence on its own.
+- **Don't run `aad-tool configure-pam`** after setup. `doctor` reports the changed
+  `system-login`; `repair` and `rollback` refuse it. Restore `system-login` from the
+  pambase package by hand, then run `doctor`.
+- **pambase upgrade.** pacman leaves `system-auth.pacnew` (our file is modified) and
+  replaces the pristine `system-login`. `doctor` reports the new version and the
+  `.pacnew`. `repair` accepts the upgrade only if the installed release is in the
+  running companion's supported list, the `.pacnew` and `system-login` match its pristine
+  hashes, and our `system-auth` is unchanged. It writes the new release's patched
+  `system-auth`, removes the `.pacnew` and records the new rollback target, in one
+  journalled transaction. Otherwise it names the version: review and merge the
+  `.pacnew` by hand, or upgrade the companion.
+- **Rollback** writes pristine pambase `system-auth` and never touches `system-login`.
+  While pambase is unchanged it uses only the stored state, so a newer companion that no
+  longer lists that release can still roll back. After an upgrade it installs the
+  `.pacnew` only under the same hash checks as `repair`.
+
 ## Testing recovery without ending the desktop
 
 Record the graphical session ID, compositor PID/start time, and an existing application's PID/start time before upgrading. Keep a local recovery console or SSH session available. Use Omarchy's Stay Awake mode during activation, record its original setting, and restore it after testing.

@@ -2,7 +2,7 @@
   "lock-pam": {
     "filename": "omarchy-lock-password",
     "before": "1740b095412602a0db96fb810e0782ce9f3f155d489da4cb98db36d5b592baac",
-    "after": "f5a466b42b617af8191d2d944505917e904e3db5cf0b025085ca3ce9527b2f77"
+    "after": "7dc5349694f27d65f8a4fc1c542336d53602e571847d7447acfb3e699dcde73e"
   },
   "lock-conversation": {
     "filename": "Service.qml",
@@ -18,6 +18,22 @@
     "filename": "Main.qml",
     "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
     "after": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a"
+  },
+  "system-auth-20260616-1": {
+    "filename": "system-auth",
+    "before": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
+    "after": "9fd5edca2380f655fd0f6253a21154af6bc5349eea2487ceeada0331dc6dd17e"
+  },
+  "pambase": {
+    "20260616-1": {
+      "system-auth": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
+      "system-login": "7272120f0ee937cbe6ba0a6e748ea234ab6799e1e2966c83ee85f97d9f254fd9",
+      "patch": "system-auth-20260616-1",
+      "aad-tool": {
+        "system-auth": "9a35e64fbddee2fac2333ba684df5ec9f00194216f19d2ea23e310e72fa2cccd",
+        "system-login": "d1d96f06377539dcd88c2f1f0a666b41644c5a8a5e2af6cfbab85fb13e870a25"
+      }
+    }
   },
   "previous-release": {
     "version": "0.5.2",

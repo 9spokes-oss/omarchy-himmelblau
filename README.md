@@ -54,10 +54,16 @@ Do not run the template PKGBUILDs directly or build packages as root.
 
 Install Himmelblau 4.0.8 or later from the [AUR](https://aur.archlinux.org/packages/himmelblau).
 Its install script configures NSS, and the package supplies browser policies, native
-messaging and broker services. It leaves PAM to you: run
-`sudo aad-tool configure-pam --really` and read the package's install message first,
-because that layout lets a successful Entra sign-in skip `pam_shells`, `pam_nologin`
-and `pam_faillock` in the auth stage. This companion's package installation does not run setup, join
+messaging and broker services. On Omarchy, don't run `aad-tool configure-pam`: its
+layout lets a successful Entra sign-in skip `pam_shells`, `pam_nologin` and
+`pam_faillock`. `setup` configures system PAM instead. It patches
+`/etc/pam.d/system-auth` so Entra users get the same lockout and account checks as local
+ones, and requires `/etc/pam.d/system-login` to stay pristine. It accepts pristine
+pambase `20260616-1`, or exactly `aad-tool configure-pam` 4.0.8's output on it, which it
+undoes; anything else is refused. `rollback` restores pristine pambase, never aad-tool's
+layout. After a pambase upgrade, `doctor` reports the `.pacnew` and `repair` moves to a
+supported release; see [maintenance](docs/maintenance.md#system-pam-and-pambase-upgrades).
+This companion's package installation does not run setup, join
 Entra, enroll Intune, restart services or alter a user's home. The native SDDM package
 replaces stock SDDM; coordinate it with the companion and preserve matching rollback
 packages/configuration. See [SDDM installation](docs/sddm.md).
