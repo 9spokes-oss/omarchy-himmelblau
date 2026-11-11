@@ -109,10 +109,17 @@ patched stack on Arch's libpam.
   Every other name goes to Himmelblau, and any result but success ends the stack: it
   never falls through to `pam_unix` or `systemd-homed`. Homed accounts aren't supported.
   `pam_faillock` locks every non-root account for 120 s after 10 failures.
-- **Supported baselines.** `assets/patches.json` lists the exact pristine hashes of both
-  files per supported pambase release, and the hashes of `aad-tool configure-pam`'s
-  output. The installed version comes from pacman's database; a `.pacnew` name is never
-  evidence on its own.
+- **Supported baselines.** `assets/patches.json` lists, per supported pambase release,
+  the pristine `system-login` hash and two `system-auth` baselines, each with its own
+  patch to the same output: pristine pambase, and pambase with Omarchy's install-time
+  lockout tuning (`install/config/increase-lockout-limit.sh`: `preauth silent deny=10
+  unlock_time=120`, `authfail deny=10 unlock_time=120`). It also lists the hashes of
+  `aad-tool configure-pam`'s output on each. The state's `restore_kind` records which
+  baseline setup found. The installed version comes from pacman's database; a `.pacnew`
+  name is never evidence on its own.
+- **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
+  locked-out user is told why. The dedicated lock service keeps it. Re-running
+  Omarchy's lockout sed on the patched file changes nothing.
 - **Don't run `aad-tool configure-pam`** after setup. `doctor` reports the changed
   `system-login`; `repair` and `rollback` refuse it. Restore `system-login` from the
   pambase package by hand, then run `doctor`.
@@ -120,11 +127,13 @@ patched stack on Arch's libpam.
   replaces the pristine `system-login`. `doctor` reports the new version and the
   `.pacnew`. `repair` accepts the upgrade only if the installed release is in the
   running companion's supported list, the `.pacnew` and `system-login` match its pristine
-  hashes, and our `system-auth` is unchanged. It writes the new release's patched
-  `system-auth`, removes the `.pacnew` and records the new rollback target, in one
+  hashes, and our `system-auth` is unchanged. On the Omarchy baseline the new rollback
+  target is the `.pacnew` with Omarchy's lockout tuning applied, which must match the
+  release's recorded hash. It writes the new release's patched `system-auth`, removes
+  the `.pacnew` and records the new rollback target, in one
   journalled transaction. Otherwise it names the version: review and merge the
   `.pacnew` by hand, or upgrade the companion.
-- **Rollback** writes pristine pambase `system-auth` and never touches `system-login`.
+- **Rollback** writes the recorded baseline `system-auth` and never touches `system-login`.
   While pambase is unchanged it uses only the stored state, so a newer companion that no
   longer lists that release can still roll back. After an upgrade it installs the
   `.pacnew` only under the same hash checks as `repair`.

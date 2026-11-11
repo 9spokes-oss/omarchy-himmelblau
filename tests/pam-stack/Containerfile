@@ -7,7 +7,7 @@ FROM docker.io/library/archlinux:latest
 # A corporate TLS proxy's CA, when run.sh mounts one; harmless otherwise.
 RUN if [ -s /hostca.pem ]; then cp /hostca.pem /etc/ca-certificates/trust-source/anchors/host-ca.crt && update-ca-trust; fi
 
-RUN pacman -Sy --noconfirm --needed gcc python >/dev/null \
+RUN pacman -Syu --noconfirm --needed gcc python >/dev/null \
  && pacman -Sddw --noconfirm sddm sudo polkit openssh >/dev/null \
  && for p in sddm sudo openssh; do bsdtar -xf /var/cache/pacman/pkg/$p-[0-9]*.pkg.tar.zst -C / etc/pam.d; done \
  && bsdtar -xf /var/cache/pacman/pkg/polkit-[0-9]*.pkg.tar.zst -C / usr/lib/pam.d \

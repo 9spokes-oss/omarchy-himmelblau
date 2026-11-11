@@ -1382,27 +1382,50 @@ class CompanionTest(unittest.TestCase):
     def aad_tool(self, name):
         return (PAM_STACK / 'aad-tool' / name).read_bytes()
 
-    def fake_pambase_release(self, change=b'# pambase 2027\n', version='20270101-1'):
+    def omarchy(self, aad_tool=False):
+        """system-auth after Omarchy's install-time lockout tuning (captured with its sed),
+        optionally followed by aad-tool configure-pam 4.0.8."""
+        return (PAM_STACK / ('omarchy-aad-tool' if aad_tool else 'omarchy') / 'system-auth').read_bytes()
+
+    def baselines(self):
+        """Each supported starting layout: (label, kind, system-auth, system-login, baseline)."""
+        return [('pambase', 'pambase', self.pristine('system-auth'), self.pristine('system-login'),
+                 self.pristine('system-auth')),
+                ('aad-tool on pambase', 'pambase', self.aad_tool('system-auth'),
+                 self.aad_tool('system-login'), self.pristine('system-auth')),
+                ('omarchy', 'omarchy', self.omarchy(), self.pristine('system-login'), self.omarchy()),
+                ('aad-tool on omarchy', 'omarchy', self.omarchy(aad_tool=True),
+                 self.aad_tool('system-login'), self.omarchy())]
+
+    def fake_pambase_release(self, change=b'# pambase 2027\n', version='20270101-1', omarchy=None):
         """A supported release whose pristine system-auth has one more line between
-        the patch's two hunks (none if change is empty)."""
+        the patches' two hunks (none if change is empty). omarchy overrides the hash
+        recorded for its Omarchy baseline."""
         assets = self.base / 'assets'
         shutil.copytree(ROOT / 'assets', assets)
         lines = self.pristine('system-auth').splitlines(keepends=True)
         auth = b''.join(lines[:23]) + change + b''.join(lines[23:])
         login = self.pristine('system-login') + b'# pambase 2027\n'
-        work = self.base / 'patchwork'; work.mkdir()
-        (work / 'system-auth').write_bytes(auth)
-        subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-d', str(work)], check=True,
-                       capture_output=True, input=(assets / 'system-auth-20260616-1.patch').read_bytes())
-        patched = (work / 'system-auth').read_bytes()
-        shutil.copy(assets / 'system-auth-20260616-1.patch', assets / f'system-auth-{version}.patch')
         data = json.loads((assets / 'patches.json').read_text())
-        data[f'system-auth-{version}'] = {'filename': 'system-auth', 'before': m.digest(auth),
-                                          'after': m.digest(patched)}
-        data['pambase'][version] = {'system-auth': m.digest(auth), 'system-login': m.digest(login),
-                                    'patch': f'system-auth-{version}',
-                                    'aad-tool': {'system-auth': '0' * 64, 'system-login': '0' * 64}}
+        baselines, results = {}, []
+        for kind, suffix, source in (('pambase', '', auth), ('omarchy', '-omarchy', m.omarchy_tuned(auth))):
+            work = self.base / f'patchwork{suffix}'; work.mkdir()
+            (work / 'system-auth').write_bytes(source)
+            subprocess.run(['patch', '--batch', '--fuzz=0', '-p1', '-d', str(work)], check=True, capture_output=True,
+                           input=(assets / f'system-auth-20260616-1{suffix}.patch').read_bytes())
+            results.append((work / 'system-auth').read_bytes())
+            shutil.copy(assets / f'system-auth-20260616-1{suffix}.patch', assets / f'system-auth-{version}{suffix}.patch')
+            data[f'system-auth-{version}{suffix}'] = {'filename': 'system-auth', 'before': m.digest(source),
+                                                      'after': m.digest(results[-1])}
+            baselines[kind] = {'system-auth': m.digest(source), 'aad-tool': '0' * 64,
+                               'patch': f'system-auth-{version}{suffix}'}
+        self.assertEqual(results[0], results[1])
+        if omarchy is not None:
+            baselines['omarchy']['system-auth'] = omarchy
+        data['pambase'][version] = {'system-login': m.digest(login), 'aad-tool-system-login': '0' * 64,
+                                    'baselines': baselines}
         (assets / 'patches.json').write_text(json.dumps(data))
+        patched = results[0]
         assets_patch = patch.object(m, 'ASSETS', assets)
         assets_patch.start(); self.addCleanup(assets_patch.stop)
         return auth, login, patched
@@ -1421,19 +1444,29 @@ class CompanionTest(unittest.TestCase):
 
     def test_patched_pam_files_equal_the_pam_stack_golden_files(self):
         release = m.pambase_release('20260616-1')
-        self.assertEqual(m.patched_system_auth(release, self.pristine('system-auth')),
-                         (PAM_STACK / 'stacks/system-auth').read_bytes())
+        golden = (PAM_STACK / 'stacks/system-auth').read_bytes()
+        for kind, baseline in (('pambase', self.pristine('system-auth')), ('omarchy', self.omarchy())):
+            self.assertEqual(m.digest(baseline), release['baselines'][kind]['system-auth'])
+            self.assertEqual(m.patched_system_auth(release, kind, baseline), golden)
         self.assertEqual(self.before[m.STOCK_PAM], self.pristine('omarchy-lock-password'))
         self.assertEqual(m.patch_source('lock-pam', self.before[m.STOCK_PAM]),
                          (PAM_STACK / 'stacks/omarchy-himmelblau-lock-password').read_bytes())
 
-    def test_aad_tool_fixtures_are_pristine_plus_exactly_four_lines(self):
+    def test_omarchy_tuning_matches_its_sed_and_leaves_our_output_alone(self):
+        self.assertEqual(m.omarchy_tuned(self.pristine('system-auth')), self.omarchy())
+        self.assertEqual(m.omarchy_tuned(self.omarchy()), self.omarchy())
+        golden = (PAM_STACK / 'stacks/system-auth').read_bytes()
+        self.assertEqual(m.omarchy_tuned(golden), golden)  # Omarchy re-running its sed changes nothing.
+
+    def test_aad_tool_fixtures_are_their_baseline_plus_exactly_four_lines(self):
         release = m.pambase_release('20260616-1')
-        for name in ('system-auth', 'system-login'):
-            aad = self.aad_tool(name)
-            self.assertEqual(m.digest(aad), release['aad-tool'][name])
-            self.assertEqual(m.without_aad_tool(aad), self.pristine(name))
-            self.assertIsNone(m.without_aad_tool(self.pristine(name)))
+        cases = [(release['baselines']['pambase']['aad-tool'], self.aad_tool('system-auth'), self.pristine('system-auth')),
+                 (release['baselines']['omarchy']['aad-tool'], self.omarchy(aad_tool=True), self.omarchy()),
+                 (release['aad-tool-system-login'], self.aad_tool('system-login'), self.pristine('system-login'))]
+        for wanted, aad, baseline in cases:
+            self.assertEqual(m.digest(aad), wanted)
+            self.assertEqual(m.without_aad_tool(aad), baseline)
+            self.assertIsNone(m.without_aad_tool(baseline))
             self.assertIsNone(m.without_aad_tool(aad + m.AAD_TOOL_LINES[0]))
 
     def test_setup_patches_system_auth_and_watches_system_login(self):
@@ -1451,24 +1484,36 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.SYSTEM_AUTH.read_bytes(), self.pristine('system-auth'))
         self.assertEqual(m.SYSTEM_LOGIN.read_bytes(), self.pristine('system-login'))
 
-    def test_setup_from_aad_tool_layout_never_rolls_back_to_it(self):
-        for name, path in (('system-auth', m.SYSTEM_AUTH), ('system-login', m.SYSTEM_LOGIN)):
-            path.write_bytes(self.aad_tool(name))
-        self.setup()
-        self.assertEqual(m.SYSTEM_AUTH.read_bytes(), (PAM_STACK / 'stacks/system-auth').read_bytes())
-        self.assertEqual(m.SYSTEM_LOGIN.read_bytes(), self.pristine('system-login'))
-        self.assertNotIn(str(m.SYSTEM_LOGIN), [entry['path'] for entry in m.load_state()['files']])
-        m.doctor(); m.rollback()
-        self.assertEqual(m.SYSTEM_AUTH.read_bytes(), self.pristine('system-auth'))
-        self.assertEqual(m.SYSTEM_LOGIN.read_bytes(), self.pristine('system-login'))
+    def test_setup_from_each_baseline_rolls_back_to_the_baseline_never_aad_tool(self):
+        golden = (PAM_STACK / 'stacks/system-auth').read_bytes()
+        for label, kind, auth, login, baseline in self.baselines():
+            with self.subTest(label):
+                m.SYSTEM_AUTH.write_bytes(auth); m.SYSTEM_LOGIN.write_bytes(login)
+                self.setup()
+                self.assertEqual(m.SYSTEM_AUTH.read_bytes(), golden)
+                self.assertEqual(m.SYSTEM_LOGIN.read_bytes(), self.pristine('system-login'))
+                state = m.load_state()
+                self.assertNotIn(str(m.SYSTEM_LOGIN), [entry['path'] for entry in state['files']])
+                entry = m.system_auth_entry(state)
+                self.assertEqual((entry['restore_kind'], m.base64.b64decode(entry['restore'])), (kind, baseline))
+                m.doctor(); m.rollback()
+                self.assertEqual(m.SYSTEM_AUTH.read_bytes(), baseline)
+                self.assertEqual(m.SYSTEM_LOGIN.read_bytes(), self.pristine('system-login'))
 
     def test_setup_refuses_unrecognised_pam_before_any_change(self):
         golden = (PAM_STACK / 'stacks/system-auth').read_bytes()
         cases = [
             ('mixed', {m.SYSTEM_AUTH: self.aad_tool('system-auth')}, 'both'),
             ('mixed', {m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
+            ('mixed omarchy', {m.SYSTEM_AUTH: self.omarchy(aad_tool=True)}, 'both'),
+            ('mixed omarchy', {m.SYSTEM_AUTH: self.omarchy(), m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
             ('patched', {m.SYSTEM_AUTH: golden}, 'both'),
             ('edited', {m.SYSTEM_AUTH: self.pristine('system-auth') + b'# local\n'}, 'both'),
+            ('edited omarchy', {m.SYSTEM_AUTH: self.omarchy() + b'# local\n'}, 'both'),
+            ('half omarchy', {m.SYSTEM_AUTH: self.pristine('system-auth').replace(
+                b'pam_faillock.so      authfail', b'pam_faillock.so authfail deny=10 unlock_time=120')}, 'both'),
+            ('aad-tool lines on omarchy moved', {m.SYSTEM_AUTH: self.omarchy() + b''.join(m.AAD_TOOL_LINES),
+                                                 m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
             ('aad-tool lines moved', {m.SYSTEM_AUTH: self.pristine('system-auth') + b''.join(m.AAD_TOOL_LINES),
                                       m.SYSTEM_LOGIN: self.aad_tool('system-login')}, 'both'),
             ('aad-tool twice', {m.SYSTEM_AUTH: self.aad_tool('system-auth') + m.AAD_TOOL_LINES[3],
@@ -1489,6 +1534,34 @@ class CompanionTest(unittest.TestCase):
         self.pambase = '20990101-1'
         with self.assertRaisesRegex(m.Error, 'Unsupported pambase 20990101-1'): self.setup()
         self.assertFalse(m.STATE.exists())
+
+    def test_aad_tool_hash_must_strip_back_to_the_baseline_and_pristine_login(self):
+        """A recorded aad-tool hash alone is not enough: stripping its lines must land on
+        the recorded baseline and pristine system-login too."""
+        release = m.pambase_release('20260616-1')
+        for label, auth, login in [
+                ('system-auth', self.aad_tool('system-auth') + b'# extra\n', self.aad_tool('system-login')),
+                ('system-login', self.aad_tool('system-auth'), self.aad_tool('system-login') + b'# extra\n')]:
+            with self.subTest(label):
+                lying = json.loads(json.dumps(release))
+                lying['baselines']['pambase']['aad-tool'] = m.digest(auth)
+                lying['aad-tool-system-login'] = m.digest(login)
+                m.SYSTEM_AUTH.write_bytes(auth); m.SYSTEM_LOGIN.write_bytes(login)
+                with patch.object(m, 'pambase_release', return_value=lying):
+                    with self.assertRaisesRegex(m.Error, 'both'): self.setup()
+                self.assertFalse(m.STATE.exists())
+
+    def test_release_needs_both_baselines(self):
+        manifest = m.manifest
+        for label, change in [('no omarchy', lambda r: r['baselines'].pop('omarchy')),
+                              ('extra', lambda r: r['baselines'].update(stock=r['baselines']['pambase'])),
+                              ('no patch', lambda r: r['baselines']['omarchy'].pop('patch')),
+                              ('no aad-tool login', lambda r: r.pop('aad-tool-system-login'))]:
+            with self.subTest(label):
+                data = json.loads(json.dumps(manifest('pambase'))); change(data['20260616-1'])
+                with patch.object(m, 'manifest', lambda name: data if name == 'pambase' else manifest(name)):
+                    with self.assertRaisesRegex(m.Error, 'Unsupported pambase 20260616-1'):
+                        m.pambase_release('20260616-1')
 
     def test_interrupted_setup_from_aad_tool_layout_recovers_its_exact_bytes(self):
         for name, path in (('system-auth', m.SYSTEM_AUTH), ('system-login', m.SYSTEM_LOGIN)):
@@ -1520,6 +1593,11 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaisesRegex(m.Error, 'pambase 20270101-1 is installed'): m.doctor()
         self.pambase = '20260616-1'
         m.doctor()
+        good = m.STATE.read_bytes()
+        state = json.loads(good); m.system_auth_entry(state)['restore_kind'] = 'omarchy'
+        m.STATE.write_text(json.dumps(state))
+        with self.assertRaisesRegex(m.Error, 'rollback target is not its omarchy baseline'): m.doctor()
+        m.STATE.write_bytes(good)
 
     def test_repair_repatches_pristine_system_auth_and_refuses_other_drift(self):
         self.setup()
@@ -1543,42 +1621,65 @@ class CompanionTest(unittest.TestCase):
                 else: path.write_bytes(before)
         m.doctor()
 
-    def test_repair_moves_to_a_supported_pambase_upgrade(self):
+    def start_from(self, baseline):
+        """Set up at 20260616-1 from the pambase or Omarchy baseline."""
+        self.pambase = '20260616-1'
+        m.SYSTEM_AUTH.write_bytes(self.omarchy() if baseline == 'omarchy' else self.pristine('system-auth'))
+        m.SYSTEM_LOGIN.write_bytes(self.pristine('system-login'))
         self.setup()
+
+    def test_repair_moves_to_a_supported_pambase_upgrade(self):
         auth, login, patched = self.fake_pambase_release()
-        self.upgrade_pambase(auth, login)
-        with self.assertRaisesRegex(m.Error, 'run repair'): m.doctor()
-        m.repair()
-        self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: patched, m.SYSTEM_LOGIN: login,
-                                            m.pacnew(m.SYSTEM_AUTH): None})
-        state = m.load_state()
-        self.assertEqual(state['pambase'], '20270101-1')
-        self.assertEqual(state['watched'][0]['sha256'], m.digest(login))
-        self.assertEqual(m.base64.b64decode(m.system_auth_entry(state)['restore']), auth)
-        m.doctor(); m.rollback()
-        self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: auth, m.SYSTEM_LOGIN: login,
-                                            m.pacnew(m.SYSTEM_AUTH): None})
+        for kind, target in (('pambase', auth), ('omarchy', m.omarchy_tuned(auth))):
+            with self.subTest(kind):
+                self.start_from(kind)
+                self.upgrade_pambase(auth, login)
+                with self.assertRaisesRegex(m.Error, 'run repair'): m.doctor()
+                m.repair()
+                self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: patched, m.SYSTEM_LOGIN: login,
+                                                    m.pacnew(m.SYSTEM_AUTH): None})
+                state = m.load_state()
+                self.assertEqual(state['pambase'], '20270101-1')
+                self.assertEqual(state['watched'][0]['sha256'], m.digest(login))
+                entry = m.system_auth_entry(state)
+                self.assertEqual((entry['restore_kind'], m.base64.b64decode(entry['restore'])), (kind, target))
+                m.doctor(); m.rollback()
+                self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: target, m.SYSTEM_LOGIN: login,
+                                                    m.pacnew(m.SYSTEM_AUTH): None})
 
     def test_repair_accepts_an_upgrade_that_kept_system_auth(self):
-        self.setup()
-        golden = m.SYSTEM_AUTH.read_bytes()
         auth, login, patched = self.fake_pambase_release(change=b'')
-        self.assertEqual(patched, golden)
-        self.upgrade_pambase(auth, login, keep_system_auth=True)
-        m.repair()
-        self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: golden, m.SYSTEM_LOGIN: login,
-                                            m.pacnew(m.SYSTEM_AUTH): None})
-        self.assertEqual(m.load_state()['pambase'], '20270101-1')
-        m.doctor()
+        for kind in ('pambase', 'omarchy'):
+            with self.subTest(kind):
+                self.start_from(kind)
+                golden = m.SYSTEM_AUTH.read_bytes()
+                self.assertEqual(patched, golden)
+                self.upgrade_pambase(auth, login, keep_system_auth=True)
+                m.repair()
+                self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: golden, m.SYSTEM_LOGIN: login,
+                                                    m.pacnew(m.SYSTEM_AUTH): None})
+                self.assertEqual(m.load_state()['pambase'], '20270101-1')
+                m.doctor(); m.rollback()
 
     def test_rollback_after_a_supported_pambase_upgrade_installs_the_pacnew(self):
-        self.setup()
         auth, login, _ = self.fake_pambase_release()
+        for kind, target in (('pambase', auth), ('omarchy', m.omarchy_tuned(auth))):
+            with self.subTest(kind):
+                self.start_from(kind)
+                self.upgrade_pambase(auth, login)
+                m.rollback()
+                self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: target, m.SYSTEM_LOGIN: login,
+                                                    m.pacnew(m.SYSTEM_AUTH): None})
+                self.assertFalse(m.STATE.exists())
+
+    def test_upgrade_refuses_when_omarchy_tuning_of_the_pacnew_is_not_supported(self):
+        auth, login, _ = self.fake_pambase_release(omarchy='0' * 64)
+        self.start_from('omarchy')
         self.upgrade_pambase(auth, login)
-        m.rollback()
-        self.assertEqual(self.pam_files(), {m.SYSTEM_AUTH: auth, m.SYSTEM_LOGIN: login,
-                                            m.pacnew(m.SYSTEM_AUTH): None})
-        self.assertFalse(m.STATE.exists())
+        state = m.STATE.read_bytes(); files = self.pam_files()
+        for action in (m.repair, m.rollback):
+            with self.assertRaisesRegex(m.Error, "Omarchy's lockout tuning.*by hand"): action()
+            self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
 
     def test_upgrade_with_unrecognised_pacnew_or_release_is_refused(self):
         self.setup()
@@ -1601,7 +1702,7 @@ class CompanionTest(unittest.TestCase):
         self.upgrade_pambase(auth, login, keep_system_auth=True)
         state = m.STATE.read_bytes(); files = self.pam_files()
         for action in (m.repair, m.rollback):
-            with self.assertRaisesRegex(m.Error, 'No .*pacnew.*stored pristine'): action()
+            with self.assertRaisesRegex(m.Error, 'No .*pacnew.*stored .*rollback target'): action()
             self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
 
     def test_rollback_with_unchanged_pambase_needs_no_supported_list(self):
@@ -1634,6 +1735,8 @@ class CompanionTest(unittest.TestCase):
                 ('no watched', broken(lambda s: s.pop('watched'))),
                 ('bad watched', broken(lambda s: s['watched'][0].pop('sha256'))),
                 ('original kind', broken(lambda s: s['files'][auth].update(restore_kind='original'))),
+                ('unknown kind', broken(lambda s: s['files'][auth].update(restore_kind='stock'))),
+                ('omarchy kind elsewhere', broken(lambda s: s['files'][0 if auth else 1].update(restore_kind='omarchy'))),
                 ('no restore', broken(lambda s: s['files'][auth].update(
                     restore=None, restore_mode=None, restore_uid=None, restore_gid=None))),
                 ('pambase kind elsewhere', broken(lambda s: s['files'][0 if auth else 1].update(restore_kind='pambase'))),

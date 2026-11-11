@@ -58,10 +58,11 @@ messaging and broker services. On Omarchy, don't run `aad-tool configure-pam`: i
 layout lets a successful Entra sign-in skip `pam_shells`, `pam_nologin` and
 `pam_faillock`. `setup` configures system PAM instead. It patches
 `/etc/pam.d/system-auth` so Entra users get the same lockout and account checks as local
-ones, and requires `/etc/pam.d/system-login` to stay pristine. It accepts pristine
-pambase `20260616-1`, or exactly `aad-tool configure-pam` 4.0.8's output on it, which it
-undoes; anything else is refused. `rollback` restores pristine pambase, never aad-tool's
-layout. After a pambase upgrade, `doctor` reports the `.pacnew` and `repair` moves to a
+ones, and requires `/etc/pam.d/system-login` to stay pristine. It accepts pambase
+`20260616-1` as installed, with or without the lockout tuning Omarchy's installer applies
+to `system-auth`, or exactly `aad-tool configure-pam` 4.0.8's output on either, which it
+undoes; anything else is refused. `rollback` restores the version setup found, never
+aad-tool's layout. After a pambase upgrade, `doctor` reports the `.pacnew` and `repair` moves to a
 supported release; see [maintenance](docs/maintenance.md#system-pam-and-pambase-upgrades).
 This companion's package installation does not run setup, join
 Entra, enroll Intune, restart services or alter a user's home. The native SDDM package

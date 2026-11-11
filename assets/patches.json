@@ -22,16 +22,28 @@
   "system-auth-20260616-1": {
     "filename": "system-auth",
     "before": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
-    "after": "9fd5edca2380f655fd0f6253a21154af6bc5349eea2487ceeada0331dc6dd17e"
+    "after": "51e155166a52a05cee61fff3f079169cbb8f70c4231fb3f3e9a8ea71a94a529b"
+  },
+  "system-auth-20260616-1-omarchy": {
+    "filename": "system-auth",
+    "before": "787275ed1430895610a4360425443884e6ba3c696c2d7087fcc97f73771c806b",
+    "after": "51e155166a52a05cee61fff3f079169cbb8f70c4231fb3f3e9a8ea71a94a529b"
   },
   "pambase": {
     "20260616-1": {
-      "system-auth": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
       "system-login": "7272120f0ee937cbe6ba0a6e748ea234ab6799e1e2966c83ee85f97d9f254fd9",
-      "patch": "system-auth-20260616-1",
-      "aad-tool": {
-        "system-auth": "9a35e64fbddee2fac2333ba684df5ec9f00194216f19d2ea23e310e72fa2cccd",
-        "system-login": "d1d96f06377539dcd88c2f1f0a666b41644c5a8a5e2af6cfbab85fb13e870a25"
+      "aad-tool-system-login": "d1d96f06377539dcd88c2f1f0a666b41644c5a8a5e2af6cfbab85fb13e870a25",
+      "baselines": {
+        "pambase": {
+          "system-auth": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
+          "aad-tool": "9a35e64fbddee2fac2333ba684df5ec9f00194216f19d2ea23e310e72fa2cccd",
+          "patch": "system-auth-20260616-1"
+        },
+        "omarchy": {
+          "system-auth": "787275ed1430895610a4360425443884e6ba3c696c2d7087fcc97f73771c806b",
+          "aad-tool": "cc5e3fd3040cb5799d15fe8e119fae7c963225cbfd4342ed2c2b2e5cd0a0bf0f",
+          "patch": "system-auth-20260616-1-omarchy"
+        }
       }
     }
   },

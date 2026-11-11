@@ -26,8 +26,19 @@ STATE = Path('/var/lib/omarchy-himmelblau/state.json')
 SCHEMA = 1  # Persistent state format.
 JOURNAL_FORMAT = 1
 STOCK_PAM = Path('/etc/pam.d/omarchy-lock-password')
-SYSTEM_AUTH = Path('/etc/pam.d/system-auth')  # Owned: patched from pristine pambase.
+SYSTEM_AUTH = Path('/etc/pam.d/system-auth')  # Owned: patched from its baseline (below).
 SYSTEM_LOGIN = Path('/etc/pam.d/system-login')  # Watched: must stay pristine pambase.
+# system-auth baselines: pristine pambase, or Omarchy's install-time lockout tuning of it
+# (install/config/increase-lockout-limit.sh). The state's restore_kind names the one setup
+# found; rollback restores it.
+BASELINES = ('pambase', 'omarchy')
+# Omarchy's two sed substitutions on system-auth, line by line.
+OMARCHY_LOCKOUT = (
+    (re.compile(rb'(auth\s+required\s+pam_faillock.so)\s+preauth.*'),
+     rb'\1 preauth silent deny=10 unlock_time=120'),
+    (re.compile(rb'(auth\s+\[default=die\]\s+pam_faillock.so)\s+authfail.*'),
+     rb'\1 authfail deny=10 unlock_time=120'),
+)
 # Exactly the lines `aad-tool configure-pam` 4.0.8 adds to each pambase file.
 AAD_TOOL_LINES = (
     b'auth\tsufficient\tpam_himmelblau.so ignore_unknown_user set_authtok\n',
@@ -534,9 +545,9 @@ def check_state(state):
             fields.update(restore=str, restore_mode=int, restore_uid=int, restore_gid=int)
         if not all(type(entry.get(key)) is kind for key, kind in fields.items()):
             return False
-        # system-auth alone rolls back to pristine pambase, never to its pre-setup bytes.
+        # system-auth alone rolls back to its baseline, never to its pre-setup bytes.
         if Path(entry['path']) == SYSTEM_AUTH:
-            return entry['restore_kind'] == 'pambase' and entry['restore'] is not None
+            return entry['restore_kind'] in BASELINES and entry['restore'] is not None
         return entry['restore_kind'] == 'original'
     def valid_watched(entry):
         return (isinstance(entry, dict)
@@ -656,7 +667,7 @@ def setup(domain, user, admin=False):
     for path in (SYSTEM_AUTH, SYSTEM_LOGIN):
         if read(pacnew(path)) is not None or pacnew(path).is_symlink():
             raise Error(f'Pending pambase update: {pacnew(path)}; merge it first')
-    pristine_auth, pristine_login = pristine_pambase(release)
+    kind, baseline_auth, pristine_login = pambase_baseline(release)
     principal = administrator(user)
     recovery_parent()
     if read(RECOVERY_ACCOUNT) is not None:
@@ -675,10 +686,10 @@ def setup(domain, user, admin=False):
     if read(PIN_PAM) is not None:
         raise Error(f'{PIN_PAM} exists but is not managed')
     add(PIN_PAM, PIN_PAM_CONTENT)
-    # system-auth rolls back to pristine pambase, even when setup started from aad-tool's
+    # system-auth rolls back to its baseline, even when setup started from aad-tool's
     # layout, so rollback can never bring that layout back.
-    auth = planned(SYSTEM_AUTH, patched_system_auth(release, pristine_auth), 0o644)
-    auth.update(restore=base64.b64encode(pristine_auth).decode(), restore_kind='pambase')
+    auth = planned(SYSTEM_AUTH, patched_system_auth(release, kind, baseline_auth), 0o644)
+    auth.update(restore=base64.b64encode(baseline_auth).decode(), restore_kind=kind)
     changes.append(auth)
     # Validate source, but never write Omarchy's packaged lock QML.
     lock = read(LOCK)
@@ -793,15 +804,32 @@ def installed_pambase():
 
 
 def pambase_release(version):
-    """The running package's pristine hashes and patch for one pambase release."""
+    """The running package's hashes and patches for one pambase release: system-login,
+    aad-tool's system-login, and each system-auth baseline with its aad-tool output and patch."""
     entry = manifest('pambase').get(version)
-    aad_tool = entry.get('aad-tool') if isinstance(entry, dict) else None
-    if (not isinstance(aad_tool, dict)
-            or any(type(entry.get(key)) is not str for key in ('system-auth', 'system-login', 'patch'))
-            or any(type(aad_tool.get(key)) is not str for key in ('system-auth', 'system-login'))):
+    baselines = entry.get('baselines') if isinstance(entry, dict) else None
+    if (not isinstance(baselines, dict) or set(baselines) != set(BASELINES)
+            or any(type(entry.get(key)) is not str for key in ('system-login', 'aad-tool-system-login'))
+            or any(not isinstance(baseline, dict)
+                   or any(type(baseline.get(key)) is not str for key in ('system-auth', 'aad-tool', 'patch'))
+                   for baseline in baselines.values())):
         raise Error(f'Unsupported pambase {version}: review and merge '
                     f'{pacnew(SYSTEM_AUTH)} by hand')
     return entry
+
+
+def omarchy_tuned(data):
+    """data with Omarchy's lockout substitutions applied, as its sed would."""
+    lines = []
+    for line in data.splitlines(keepends=True):
+        body = line.rstrip(b'\n')
+        end = line[len(body):]
+        for pattern, replacement in OMARCHY_LOCKOUT:
+            match = pattern.fullmatch(body)
+            if match:
+                body = match.expand(replacement)
+        lines.append(body + end)
+    return b''.join(lines)
 
 
 def without_aad_tool(data):
@@ -812,28 +840,37 @@ def without_aad_tool(data):
     return b''.join(line for line in lines if line not in AAD_TOOL_LINES)
 
 
-def pristine_pambase(release):
-    """Pristine system-auth and system-login bytes, from the files as they are now.
-    Accepts both files pristine, or both exactly aad-tool's output on pristine
-    pambase (proved by hash, and by stripping its lines back to the pristine hash)."""
-    files = {name: read(path) for name, path in
-             (('system-auth', SYSTEM_AUTH), ('system-login', SYSTEM_LOGIN))}
-    if any(data is None for data in files.values()):
+def pambase_baseline(release):
+    """(baseline kind, system-auth baseline bytes, pristine system-login bytes), from the
+    files as they are now. Accepts a baseline system-auth with pristine system-login, or
+    both files exactly aad-tool's output on them (proved by hash, and by stripping its
+    lines back to the baseline and pristine hashes)."""
+    auth, login = read(SYSTEM_AUTH), read(SYSTEM_LOGIN)
+    if auth is None or login is None:
         raise Error('Missing pambase PAM files')
-    if all(digest(data) == release[name] for name, data in files.items()):
-        return files['system-auth'], files['system-login']
-    if all(digest(data) == release['aad-tool'][name] for name, data in files.items()):
-        stripped = {name: without_aad_tool(data) for name, data in files.items()}
-        if all(data is not None and digest(data) == release[name] for name, data in stripped.items()):
-            return stripped['system-auth'], stripped['system-login']
-    raise Error(f'{SYSTEM_AUTH} and {SYSTEM_LOGIN} must both be pristine pambase, or both '
-                'exactly aad-tool configure-pam output; refusing')
+    baselines = release['baselines']
+    if digest(login) == release['system-login']:
+        for kind in BASELINES:
+            if digest(auth) == baselines[kind]['system-auth']:
+                return kind, auth, login
+    elif digest(login) == release['aad-tool-system-login']:
+        for kind in BASELINES:
+            if digest(auth) == baselines[kind]['aad-tool']:
+                auth, login = without_aad_tool(auth), without_aad_tool(login)
+                if (auth is not None and login is not None
+                        and digest(auth) == baselines[kind]['system-auth']
+                        and digest(login) == release['system-login']):
+                    return kind, auth, login
+                break
+    raise Error(f'{SYSTEM_AUTH} and {SYSTEM_LOGIN} must both be pambase as installed (with or '
+                "without Omarchy's lockout tuning), or both exactly aad-tool configure-pam "
+                'output on it; refusing')
 
 
-def patched_system_auth(release, pristine):
-    if digest(pristine) != release['system-auth']:
-        raise Error(f'Unsupported pristine {SYSTEM_AUTH}')
-    return patch_source(release['patch'], pristine)
+def patched_system_auth(release, kind, baseline):
+    if digest(baseline) != release['baselines'][kind]['system-auth']:
+        raise Error(f'Unsupported {SYSTEM_AUTH} baseline')
+    return patch_source(release['baselines'][kind]['patch'], baseline)
 
 
 def system_auth_entry(state):
@@ -841,26 +878,37 @@ def system_auth_entry(state):
 
 
 def pambase_upgrade(state, installed):
-    """After a pambase upgrade, the installed release and its pristine system-auth
-    (bytes and file record). pacman leaves the new copy as a .pacnew; it keeps our
-    file without one only if the package's copy didn't change. Hashes decide; the
-    .pacnew name alone proves nothing."""
+    """After a pambase upgrade, the installed release and the new system-auth baseline of
+    the state's kind (bytes and file record). pacman leaves the new copy as a .pacnew; it
+    keeps our file without one only if the package's copy didn't change. An Omarchy
+    baseline is the .pacnew with Omarchy's lockout tuning. Hashes decide; the .pacnew
+    name alone proves nothing."""
     release = pambase_release(installed)
+    kind = system_auth_entry(state)['restore_kind']
+    wanted = release['baselines'][kind]['system-auth']
     hint = f'pambase {installed}: review and merge {pacnew(SYSTEM_AUTH)} by hand'
     if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine {hint}')
     record = file_record(pacnew(SYSTEM_AUTH))
     if record is not None:
-        if digest(base64.b64decode(record['data'])) != release['system-auth']:
+        data = base64.b64decode(record['data'])
+        if digest(data) != release['baselines']['pambase']['system-auth']:
             raise Error(f'{pacnew(SYSTEM_AUTH)} is not pristine {hint}')
+        if kind == 'omarchy':
+            data = omarchy_tuned(data)
+            record = dict(record, data=b64(data))
+            if digest(data) != wanted:
+                raise Error(f"Omarchy's lockout tuning of {pacnew(SYSTEM_AUTH)} is not the "
+                            f'supported {hint}')
     else:
         entry = system_auth_entry(state)
         record = {'data': entry['restore'], 'mode': entry['restore_mode'],
                   'uid': entry['restore_uid'], 'gid': entry['restore_gid']}
-        if digest(base64.b64decode(record['data'])) != release['system-auth']:
-            raise Error(f'No {pacnew(SYSTEM_AUTH)}, and the stored pristine {SYSTEM_AUTH} '
-                        f'is not {hint}')
-    return release, base64.b64decode(record['data']), record
+        data = base64.b64decode(record['data'])
+        if digest(data) != wanted:
+            raise Error(f'No {pacnew(SYSTEM_AUTH)}, and the stored {SYSTEM_AUTH} rollback '
+                        f'target is not {hint}')
+    return release, data, record
 
 
 def pambase_issues(state):
@@ -871,8 +919,11 @@ def pambase_issues(state):
             issues.append(f'pambase {installed} is installed, but setup verified '
                           f'{state["pambase"]}; run repair')
         release = pambase_release(state['pambase'])
-        if digest(base64.b64decode(system_auth_entry(state)['restore'])) != release['system-auth']:
-            issues.append(f'Stored {SYSTEM_AUTH} rollback target is not pristine pambase')
+        entry = system_auth_entry(state)
+        if (digest(base64.b64decode(entry['restore']))
+                != release['baselines'][entry['restore_kind']]['system-auth']):
+            issues.append(f'Stored {SYSTEM_AUTH} rollback target is not its {entry["restore_kind"]} '
+                          'baseline')
     except Error as error:
         issues.append(str(error))
     for entry in state['watched']:
@@ -1098,18 +1149,19 @@ def repair():
     installed = installed_pambase()
     if installed != state['pambase']:
         # Accept a pambase upgrade only as the installed release's exact pristine files.
-        release, pristine_auth, record = pambase_upgrade(state, installed)
+        release, baseline_auth, record = pambase_upgrade(state, installed)
         upgrade = True
     else:
         release = pambase_release(installed)
-        pristine_auth = base64.b64decode(system_auth_entry(state)['restore'])
+        baseline_auth = base64.b64decode(system_auth_entry(state)['restore'])
         record, upgrade = None, False
         if read(pacnew(SYSTEM_AUTH)) is not None:
             raise Error(f'{pacnew(SYSTEM_AUTH)} exists but pambase is unchanged; review it by hand')
     if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine pambase {installed}; '
                     'repair never rewrites it (run rollback, then setup)')
-    desired_auth = patched_system_auth(release, pristine_auth)
+    desired_auth = patched_system_auth(release, system_auth_entry(state)['restore_kind'],
+                                       baseline_auth)
     repairs = []
     # Full file/source/configuration preflight precedes journal or managed writes.
     for entry in state['files']:
@@ -1125,10 +1177,10 @@ def repair():
             repairs.append((path, identity_file(principal), entry['mode'], *owner()))
             continue
         if path == SYSTEM_AUTH:
-            # Same release: our output, or pristine pambase to re-patch. Upgrade: our
+            # Same release: our output, or the baseline to re-patch. Upgrade: our
             # output for the old release, replaced by the new release's patch.
             current = None if data is None else digest(data)
-            allowed = (entry['after'],) if upgrade else (entry['after'], digest(pristine_auth))
+            allowed = (entry['after'],) if upgrade else (entry['after'], digest(baseline_auth))
             if current != digest(desired_auth):
                 if current not in allowed:
                     raise Error(f'Repair refuses unsupported managed drift: {path}')
@@ -1444,10 +1496,10 @@ def rollback(recovery_only=False):
                         'unchanged; review it by hand')
     else:
         try:
-            _, pristine, record = pambase_upgrade(state, installed)
+            _, baseline, record = pambase_upgrade(state, installed)
         except Error as error:
             raise Error(f'Rollback refuses: {error}') from None
-        auth_target = (pristine, record['mode'], record['uid'], record['gid'])
+        auth_target = (baseline, record['mode'], record['uid'], record['gid'])
         if read(pacnew(SYSTEM_AUTH)) is not None:
             extra.append((pacnew(SYSTEM_AUTH), None, 0, 0, 0))
     uid, gid = owner()
