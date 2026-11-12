@@ -545,9 +545,12 @@ def check_state(state):
             fields.update(restore=str, restore_mode=int, restore_uid=int, restore_gid=int)
         if not all(type(entry.get(key)) is kind for key, kind in fields.items()):
             return False
-        # system-auth alone rolls back to its baseline, never to its pre-setup bytes.
+        # system-auth alone rolls back to its baseline, never to its pre-setup bytes, and
+        # never to metadata a non-root user could write.
         if Path(entry['path']) == SYSTEM_AUTH:
-            return entry['restore_kind'] in BASELINES and entry['restore'] is not None
+            return (entry['restore_kind'] in BASELINES and entry['restore'] is not None
+                    and safe_pam_metadata(entry['restore_mode'], entry['restore_uid'],
+                                          entry['restore_gid']))
         return entry['restore_kind'] == 'original'
     def valid_watched(entry):
         return (isinstance(entry, dict)
@@ -566,7 +569,10 @@ def check_state(state):
     if not (all(type(state.get(key)) is kind for key, kind in fields.items())
             and all(valid_entry(entry) for entry in state['files'])
             and sum(Path(entry['path']) == SYSTEM_AUTH for entry in state['files']) == 1
-            and all(valid_watched(entry) for entry in state['watched'])):
+            # Exactly system-login, for the recorded release: an empty list would watch nothing.
+            and len(state['watched']) == 1 and valid_watched(state['watched'][0])
+            and Path(state['watched'][0]['path']) == SYSTEM_LOGIN
+            and state['watched'][0]['pambase'] == state['pambase']):
         raise Error(f'Invalid state file: {STATE}')
     return state
 
@@ -840,6 +846,26 @@ def without_aad_tool(data):
     return b''.join(line for line in lines if line not in AAD_TOOL_LINES)
 
 
+def safe_pam_metadata(mode, uid, gid):
+    """Owner and mode a system PAM file (or its rollback target) must have: the companion's
+    owner (root) for user and group, no group or other write, no special bits."""
+    return (uid, gid) == owner() and not mode & 0o7022
+
+
+def require_safe_pam_file(path):
+    """Refuse a system PAM file, or a .pacnew about to become one, that a non-root user could
+    change: its bytes alone prove nothing about who can rewrite it."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        raise Error(f'Missing {path}') from None
+    if (not stat.S_ISREG(metadata.st_mode)
+            or not safe_pam_metadata(stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid)):
+        raise Error(f'Unsafe ownership/mode on {path}: it must be a regular file owned by root, '
+                    'writable only by root')
+    no_extended_acl(path)
+
+
 def pambase_baseline(release):
     """(baseline kind, system-auth baseline bytes, pristine system-login bytes), from the
     files as they are now. Accepts a baseline system-auth with pristine system-login, or
@@ -849,6 +875,9 @@ def pambase_baseline(release):
     auth, login = read(SYSTEM_AUTH), read(SYSTEM_LOGIN)
     if auth is None or login is None:
         raise Error('Missing pambase PAM files')
+    # setup keeps system-auth's metadata as its rollback target and system-login's as is.
+    require_safe_pam_file(SYSTEM_AUTH)
+    require_safe_pam_file(SYSTEM_LOGIN)
     baselines = release['baselines']
     if digest(login) == release['system-login']:
         for kind in BASELINES:
@@ -895,8 +924,11 @@ def pambase_upgrade(state, installed):
     hint = f'pambase {installed}: review and merge {pacnew(SYSTEM_AUTH)} by hand'
     if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine {hint}')
+    require_safe_pam_file(SYSTEM_LOGIN)
     record = file_record(pacnew(SYSTEM_AUTH))
     if record is not None:
+        # Its owner and mode become system-auth's on rollback.
+        require_safe_pam_file(pacnew(SYSTEM_AUTH))
         data = base64.b64decode(record['data'])
         if digest(data) != release['baselines']['pambase']['system-auth']:
             raise Error(f'{pacnew(SYSTEM_AUTH)} is not pristine {hint}')
@@ -930,8 +962,15 @@ def pambase_issues(state):
                 != release['baselines'][entry['restore_kind']]['system-auth']):
             issues.append(f'Stored {SYSTEM_AUTH} rollback target is not its {entry["restore_kind"]} '
                           'baseline')
+        if state['watched'][0]['sha256'] != release['system-login']:
+            issues.append(f'Stored {SYSTEM_LOGIN} hash is not pristine pambase {state["pambase"]}')
     except Error as error:
         issues.append(str(error))
+    for path in (SYSTEM_AUTH, SYSTEM_LOGIN):
+        try:
+            require_safe_pam_file(path)
+        except Error as error:
+            issues.append(str(error))
     for entry in state['watched']:
         if digest(read(Path(entry['path'])) or b'') != entry['sha256']:
             issues.append(f'Watched file changed: {entry["path"]} (was aad-tool configure-pam run?)')
@@ -1166,6 +1205,7 @@ def repair():
     if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine pambase {installed}; '
                     'repair never rewrites it (run rollback, then setup)')
+    require_safe_pam_file(SYSTEM_LOGIN)
     desired_auth = patched_system_auth(release, system_auth_entry(state)['restore_kind'],
                                        baseline_auth)
     repairs = []
@@ -1500,6 +1540,10 @@ def rollback(recovery_only=False):
         if read(pacnew(SYSTEM_AUTH)) is not None:
             raise Error(f'Rollback refuses: {pacnew(SYSTEM_AUTH)} exists but pambase is '
                         'unchanged; review it by hand')
+        try:
+            require_safe_pam_file(SYSTEM_LOGIN)
+        except Error as error:
+            raise Error(f'Rollback refuses: {error}; fix it by hand') from None
     else:
         try:
             _, baseline, record = pambase_upgrade(state, installed)

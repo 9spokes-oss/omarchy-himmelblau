@@ -1742,6 +1742,70 @@ class CompanionTest(unittest.TestCase):
                 if before is None: path.unlink()
                 else: path.write_bytes(before)
 
+    def test_unsafe_pam_metadata_is_refused(self):
+        uid, gid = m.owner()
+        for mode, ids, safe in [(0o644, (uid, gid), True), (0o600, (uid, gid), True),
+                                (0o666, (uid, gid), False), (0o664, (uid, gid), False),
+                                (0o4644, (uid, gid), False), (0o644, (uid + 1, gid), False),
+                                (0o644, (uid, gid + 1), False)]:
+            with self.subTest(oct(mode), ids=ids):
+                self.assertEqual(m.safe_pam_metadata(mode, *ids), safe)
+        directory = self.base / 'not-a-file'; directory.mkdir(); directory.chmod(0o755)
+        with self.assertRaisesRegex(m.Error, 'regular file'): m.require_safe_pam_file(directory)
+        real = os.getxattr
+        def acl(path, attribute, **kwargs):
+            if Path(path) == m.SYSTEM_LOGIN and attribute == 'system.posix_acl_access': return b'acl'
+            return real(path, attribute, **kwargs)
+        with patch.object(m.os, 'getxattr', acl):
+            with self.assertRaisesRegex(m.Error, 'Extended ACL'): m.require_safe_pam_file(m.SYSTEM_LOGIN)
+            with self.assertRaisesRegex(m.Error, 'Extended ACL'): self.setup()
+        self.assertFalse(m.STATE.exists())
+
+    def test_setup_refuses_writable_system_pam_files(self):
+        for path in (m.SYSTEM_AUTH, m.SYSTEM_LOGIN):
+            for mode in (0o666, 0o664):
+                with self.subTest(path.name, mode=oct(mode)):
+                    path.chmod(mode)
+                    with self.assertRaisesRegex(m.Error, f'Unsafe ownership/mode on {path}'): self.setup()
+                    self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+                    self.assertEqual(path.stat().st_mode & 0o7777, mode)
+                    path.chmod(0o644)
+
+    def test_writable_system_login_is_reported_and_blocks_repair_and_rollback(self):
+        self.setup()
+        state = m.STATE.read_bytes(); files = self.pam_files()
+        m.SYSTEM_LOGIN.chmod(0o666)
+        with self.assertRaisesRegex(m.Error, f'Unsafe ownership/mode on {m.SYSTEM_LOGIN}'): m.doctor()
+        for action in (m.repair, m.rollback):
+            with self.assertRaisesRegex(m.Error, f'Unsafe ownership/mode on {m.SYSTEM_LOGIN}'): action()
+            self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
+            self.assertEqual(m.SYSTEM_LOGIN.stat().st_mode & 0o777, 0o666)
+        m.SYSTEM_LOGIN.chmod(0o644)
+        m.doctor()
+
+    def test_upgrade_refuses_a_writable_pacnew_or_system_login(self):
+        auth, login, _ = self.fake_pambase_release()
+        self.start_from('pambase')
+        self.upgrade_pambase(auth, login)
+        state = m.STATE.read_bytes()
+        for path in (m.pacnew(m.SYSTEM_AUTH), m.SYSTEM_LOGIN):
+            with self.subTest(path.name):
+                path.chmod(0o666); files = self.pam_files()
+                for action in (m.repair, m.rollback):
+                    with self.assertRaisesRegex(m.Error, f'Unsafe ownership/mode on {path}'): action()
+                    self.assertEqual(self.pam_files(), files); self.assertEqual(m.STATE.read_bytes(), state)
+                path.chmod(0o644)
+        m.repair()
+        self.assertEqual(m.SYSTEM_AUTH.stat().st_mode & 0o777, 0o644)
+
+    def test_doctor_checks_system_login_against_the_release_not_only_the_watch(self):
+        self.setup()
+        m.SYSTEM_LOGIN.write_bytes(self.aad_tool('system-login'))
+        state = json.loads(m.STATE.read_text())
+        state['watched'][0]['sha256'] = m.digest(self.aad_tool('system-login'))
+        m.STATE.write_text(json.dumps(state))
+        with self.assertRaisesRegex(m.Error, 'Stored .*system-login hash is not pristine pambase'): m.doctor()
+
     def test_state_requires_pambase_fields_and_a_pambase_system_auth_entry(self):
         self.setup()
         good = json.loads(m.STATE.read_text())
@@ -1752,6 +1816,15 @@ class CompanionTest(unittest.TestCase):
                 ('no pambase', broken(lambda s: s.pop('pambase'))),
                 ('no watched', broken(lambda s: s.pop('watched'))),
                 ('bad watched', broken(lambda s: s['watched'][0].pop('sha256'))),
+                ('empty watched', broken(lambda s: s.update(watched=[]))),
+                ('two watched', broken(lambda s: s['watched'].append(dict(s['watched'][0])))),
+                ('other watched path', broken(lambda s: s['watched'][0].update(path=str(m.SYSTEM_AUTH)))),
+                ('other watched release', broken(lambda s: s['watched'][0].update(pambase='20270101-1'))),
+                ('writable restore', broken(lambda s: s['files'][auth].update(restore_mode=0o666))),
+                ('restore owned by a user', broken(lambda s: s['files'][auth].update(
+                    restore_uid=s['files'][auth]['restore_uid'] + 1))),
+                ('restore group', broken(lambda s: s['files'][auth].update(
+                    restore_gid=s['files'][auth]['restore_gid'] + 1))),
                 ('original kind', broken(lambda s: s['files'][auth].update(restore_kind='original'))),
                 ('unknown kind', broken(lambda s: s['files'][auth].update(restore_kind='stock'))),
                 ('omarchy kind elsewhere', broken(lambda s: s['files'][0 if auth else 1].update(restore_kind='omarchy'))),

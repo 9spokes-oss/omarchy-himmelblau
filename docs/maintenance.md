@@ -119,6 +119,11 @@ patched stack on Arch's libpam.
   which includes `system-auth`). The state's `restore_kind` records which
   baseline setup found. The installed version comes from pacman's database; a `.pacnew`
   name is never evidence on its own.
+- **Ownership.** Hashes say nothing about who can rewrite a file. `setup`, `repair`,
+  `rollback` and `doctor` refuse `system-auth`, `system-login` or an adopted `.pacnew`
+  unless it is a regular file owned by root:root, writable only by root, with no special
+  bits or POSIX ACL. The state must hold the same for `system-auth`'s stored rollback
+  owner and mode, and must watch exactly `system-login` for the recorded release.
 - **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
   locked-out user is told why. The dedicated lock service keeps it. Re-running
   Omarchy's lockout sed on the patched file changes nothing.
