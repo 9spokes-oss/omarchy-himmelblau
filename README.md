@@ -33,6 +33,9 @@ and a user-confirmed current-PIN lock/unlock while preserving the desktop and te
 Version `0.5.3` with native `0.21.0-4` completed controlled lab acceptance on
 2026-11-08, including separate locker and fresh-SDDM PIN/MFA recovery cycles. See
 the [version-specific results and limits](docs/maintenance.md#plugin-053-acceptance).
+Version `0.6.0` passed a fresh-install acceptance on 2026-11-18, from a new Omarchy
+install through setup, greeter sign-in and PIN lock/unlock. See its
+[results and limits](docs/maintenance.md#060-fresh-install-acceptance).
 
 To prefill M365 Background SSO permissions for your company, use the installed generator with its actual SharePoint and OneDrive hostnames (they need not match your
 email domain):

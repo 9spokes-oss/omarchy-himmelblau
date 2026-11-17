@@ -79,6 +79,33 @@ above. These results do not establish offline sign-in or every MFA method/policy
 Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3` and `0.6.0` are unpublished.
 Marketplace submission remains withdrawn.
 
+## 0.6.0 fresh-install acceptance
+
+On 2026-11-18, in a new lab VM installed from the Omarchy 4.5.0 ISO (unencrypted, no
+SDDM autologin) and brought current with `omarchy update`, using companion source
+`9f8f23d` and native `0.21.0-4`:
+
+- Packages built in the guest the way an Omarchy user gets them: `himmelblau` 4.0.8-2
+  from the AUR with `yay`, then both recipes in `packaging/aur/` with `makepkg`. The native
+  `check()` proofs passed in the guest. Omarchy's stable repository still ships OpenSSL
+  3.6, so an Arch-built `himmelblau` linked against OpenSSL 4 would not load there.
+- `system-auth` was the Omarchy baseline and `system-login` pristine pambase 20260616-1.
+  Replacing `sddm` moved Omarchy's edited `/etc/pam.d/sddm` and `sddm-autologin` to
+  `.pacsave`; they were restored (see [SDDM installation](sddm.md)).
+- Before the first sign-in, `setup` passed every check up to the identity lookup and
+  wrote nothing: Himmelblau answers a forward lookup for an unknown account, but not the
+  reverse one. `aad-tool auth-test` then completed number-matching MFA and Hello PIN
+  enrolment.
+- `setup` and `doctor` passed. `system-auth` became the reviewed output with
+  `restore_kind` `omarchy`; `system-login` was unchanged.
+- The user signed in at the native greeter with the account and PIN, added the plugin
+  from a local copy of the same commit, locked, entered a wrong PIN, then unlocked with
+  the right one. The lock authenticated through `omarchy-himmelblau-lock-password`, the
+  faillock tally was empty after the success, and `doctor` stayed clean.
+
+Not covered: disk-encrypted installs (where Omarchy enables autologin), PIN reset,
+rollback and upgrade on this VM, and the published GitHub plugin source.
+
 ## Validation procedure
 
 This integration changes authentication-sensitive system configuration and a user-owned lock plugin. Keep a local recovery account and an independent console available throughout setup and testing. Backups and rollback protect only the files owned or changed by this integration; preserve other local customizations and review conflicts.
