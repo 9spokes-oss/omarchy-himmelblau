@@ -28,6 +28,9 @@ JOURNAL_FORMAT = 1
 STOCK_PAM = Path('/etc/pam.d/omarchy-lock-password')
 SYSTEM_AUTH = Path('/etc/pam.d/system-auth')  # Owned: patched from its baseline (below).
 SYSTEM_LOGIN = Path('/etc/pam.d/system-login')  # Watched: must stay pristine pambase.
+# Omarchy's installer edits SDDM's PAM files. Replacing sddm with the native package saves
+# those edits as .pacsave and installs the defaults; setup puts Omarchy's edits back.
+SDDM_PAMS = (Path('/etc/pam.d/sddm'), Path('/etc/pam.d/sddm-autologin'))
 # system-auth baselines: pristine pambase, or Omarchy's install-time lockout tuning of it
 # (install/config/increase-lockout-limit.sh). The state's restore_kind names the one setup
 # found; rollback restores it.
@@ -365,10 +368,17 @@ def managed_config(data, domain, user, apply_policy=False):
 def administrator(user):
     try:
         account = pwd.getpwnam(user)
+    except KeyError:
+        raise Error(f'{user} does not resolve through NSS; check that himmelblaud is running '
+                    f'and {CONFIG} sets its domain') from None
+    try:
         canonical = pwd.getpwnam(account.pw_name)
         reverse = pwd.getpwuid(account.pw_uid)
     except KeyError:
-        raise Error(f'{user} does not resolve through NSS') from None
+        # Before its first sign-in, Himmelblau answers a forward lookup with a computed
+        # entry but not the reverse one.
+        raise Error(f'{user} has not signed in on this machine yet: run '
+                    f'"aad-tool auth-test --name {user}" once, then retry') from None
     name, uid = account.pw_name, account.pw_uid
     reserved = ('ALL', 'DEFAULTS', 'USER_ALIAS', 'RUNAS_ALIAS', 'HOST_ALIAS', 'CMND_ALIAS', 'ROOT')
     if (uid < 1000 or name.upper() in reserved
@@ -674,6 +684,7 @@ def setup(domain, user, admin=False):
         if read(pacnew(path)) is not None or pacnew(path).is_symlink():
             raise Error(f'Pending pambase update: {pacnew(path)}; merge it first')
     kind, baseline_auth, pristine_login = pambase_baseline(release)
+    sddm_pams = omarchy_sddm_restores()
     principal = administrator(user)
     recovery_parent()
     if read(RECOVERY_ACCOUNT) is not None:
@@ -744,6 +755,8 @@ def setup(domain, user, admin=False):
         metadata = SYSTEM_LOGIN.stat()
         files.append((SYSTEM_LOGIN, pristine_login, stat.S_IMODE(metadata.st_mode),
                       metadata.st_uid, metadata.st_gid))
+    # Restored, not owned: rollback leaves Omarchy's SDDM PAM edits in place.
+    files += sddm_pams
     # A failed setup runs from a live session, so its undo skips the locker check.
     transact('setup', state, files,
              [(directory, 0o755) for directory in theme_directories(changes)])  # Public greeter assets.
@@ -822,6 +835,48 @@ def pambase_release(version):
         raise Error(f'Unsupported pambase {version}: review and merge '
                     f'{pacnew(SYSTEM_AUTH)} by hand')
     return entry
+
+
+def pacsave(path):
+    return path.with_name(path.name + '.pacsave')
+
+
+def omarchy_sddm_pam(path, data):
+    """data with the edits Omarchy's installer makes to SDDM's PAM files, as its sed
+    would: install/login/sddm.sh drops gnome-keyring's auth and password lines, and
+    install/config/increase-lockout-limit.sh moves sddm-autologin's faillock reset to
+    after pam_permit."""
+    lines = data.splitlines(keepends=True)
+    if path.name == 'sddm':
+        return b''.join(line for line in lines
+                        if not re.search(rb'-(auth|password).*pam_gnome_keyring\.so', line))
+    result = []
+    for line in lines:
+        if re.search(rb'pam_faillock\.so (preauth|authsucc)', line):
+            continue
+        result.append(line)
+        if re.search(rb'auth.*pam_permit\.so', line):
+            result.append(b'auth        required    pam_faillock.so authsucc\n')
+    return b''.join(result)
+
+
+def omarchy_sddm_restores():
+    """Writes that put back Omarchy's SDDM PAM edits after the native package replaced
+    sddm: each .pacsave must be exactly Omarchy's edit of the installed file."""
+    writes = []
+    for path in SDDM_PAMS:
+        saved = read(pacsave(path))
+        if saved is None:
+            continue
+        current = read(path)
+        if current is None or omarchy_sddm_pam(path, current) != saved:
+            raise Error(f"{pacsave(path)} is not Omarchy's edit of {path}; review and merge "
+                        'it by hand, then remove it')
+        require_safe_pam_file(path)
+        metadata = path.stat()
+        writes += [(path, saved, stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid),
+                   (pacsave(path), None, 0, 0, 0)]
+    return writes
 
 
 def omarchy_tuned(data):
@@ -979,6 +1034,10 @@ def pambase_issues(state):
     if read(pacnew(SYSTEM_LOGIN)) is not None:
         issues.append(f'Pending pambase update: {pacnew(SYSTEM_LOGIN)}; {SYSTEM_LOGIN} must be '
                       'pristine pambase: merge it by hand, then run doctor')
+    for path in SDDM_PAMS:
+        if read(pacsave(path)) is not None:
+            issues.append(f"{pacsave(path)} exists: replacing sddm set aside Omarchy's edits "
+                          f'to {path}; restore them by hand (docs/sddm.md), then run doctor')
     return issues
 
 

@@ -43,6 +43,7 @@ class CompanionTest(unittest.TestCase):
             self.paths[name] = self.base / path
         self.paths['ASSETS'] = ROOT / 'assets'
         self.paths['CONFIG_LAYERS'] = (self.base / 'vendor/config.conf', self.base / 'run/config.conf')
+        self.paths['SDDM_PAMS'] = (self.base / 'etc/pam.d/sddm', self.base / 'etc/pam.d/sddm-autologin')
         self.paths['SDDM_CONF'] = self.base / 'etc/sddm.conf'
         self.paths['SDDM_CONF_DIRS'] = (self.base / 'usr/lib/sddm/sddm.conf.d', self.base / 'etc/sddm.conf.d')
         self.mock_paths = patch.multiple(m, **self.paths)
@@ -1805,6 +1806,86 @@ class CompanionTest(unittest.TestCase):
         state['watched'][0]['sha256'] = m.digest(self.aad_tool('system-login'))
         m.STATE.write_text(json.dumps(state))
         with self.assertRaisesRegex(m.Error, 'Stored .*system-login hash is not pristine pambase'): m.doctor()
+
+    def sddm_fixture(self, kind, name):
+        return (PAM_STACK / 'sddm' / kind / name).read_bytes()
+
+    def replace_sddm(self, omarchy=None):
+        """What pacman does when the native package replaces Omarchy's sddm: Omarchy's
+        edited files become .pacsave and the package's defaults are installed."""
+        for path in m.SDDM_PAMS:
+            path.write_bytes(self.sddm_fixture('native', path.name)); path.chmod(0o644)
+            saved = m.pacsave(path)
+            saved.write_bytes((omarchy or {}).get(path.name, self.sddm_fixture('omarchy', path.name)))
+            saved.chmod(0o644)
+
+    def test_omarchy_sddm_pam_edits_match_its_installer(self):
+        for name in ('sddm', 'sddm-autologin'):
+            with self.subTest(name):
+                path = m.SDDM_PAMS[0].with_name(name)
+                native, omarchy = self.sddm_fixture('native', name), self.sddm_fixture('omarchy', name)
+                self.assertNotEqual(native, omarchy)
+                self.assertEqual(m.omarchy_sddm_pam(path, native), omarchy)
+                self.assertEqual(m.omarchy_sddm_pam(path, omarchy), omarchy)
+
+    def test_setup_restores_omarchy_sddm_pam_edits_and_rollback_keeps_them(self):
+        self.replace_sddm()
+        for path in m.SDDM_PAMS: path.chmod(0o640)
+        self.setup()
+        for path in m.SDDM_PAMS:
+            self.assertEqual(path.read_bytes(), self.sddm_fixture('omarchy', path.name))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertFalse(m.pacsave(path).exists())
+        state = m.load_state()
+        self.assertFalse({str(path) for path in m.SDDM_PAMS} & {entry['path'] for entry in state['files']})
+        m.doctor(); m.rollback()
+        for path in m.SDDM_PAMS:
+            self.assertEqual(path.read_bytes(), self.sddm_fixture('omarchy', path.name))
+
+    def test_setup_refuses_an_sddm_pacsave_that_is_not_omarchys_edit(self):
+        for name in ('sddm', 'sddm-autologin'):
+            with self.subTest(name):
+                self.replace_sddm({name: self.sddm_fixture('omarchy', name) + b'# local\n'})
+                files = {path: path.read_bytes() for path in (*m.SDDM_PAMS, *map(m.pacsave, m.SDDM_PAMS))}
+                with self.assertRaisesRegex(m.Error, f"pacsave is not Omarchy's edit of .*{name}; review"):
+                    self.setup()
+                self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+                self.assertEqual({path: path.read_bytes() for path in files}, files)
+        self.replace_sddm(); m.SDDM_PAMS[1].chmod(0o666)
+        with self.assertRaisesRegex(m.Error, 'Unsafe ownership/mode'): self.setup()
+        self.assertFalse(m.STATE.exists())
+
+    def test_interrupted_sddm_pam_restore_recovers_the_package_files(self):
+        self.replace_sddm()
+        before = {path: path.read_bytes() for path in (*m.SDDM_PAMS, *map(m.pacsave, m.SDDM_PAMS))}
+        original = m.atomic
+        def crash(path, data, mode, *owner):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode, *owner)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        m.recover()
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.assertFalse(m.STATE.exists())
+
+    def test_doctor_reports_an_sddm_pacsave_after_setup(self):
+        self.setup()
+        for path in m.SDDM_PAMS:
+            with self.subTest(path.name):
+                m.pacsave(path).write_bytes(self.sddm_fixture('omarchy', path.name))
+                with self.assertRaisesRegex(m.Error, f'{m.pacsave(path)} exists: replacing sddm'): m.doctor()
+                m.pacsave(path).unlink()
+        m.doctor()
+
+    def test_setup_says_when_the_account_has_not_signed_in(self):
+        with patch.object(m.pwd, 'getpwuid', side_effect=KeyError(123456)):
+            with self.assertRaisesRegex(m.Error, '^alice@example.com has not signed in on this machine yet: run '
+                                        '"aad-tool auth-test --name alice@example.com"'):
+                self.setup()
+        with patch.object(m.pwd, 'getpwnam', side_effect=KeyError('alice@example.com')):
+            with self.assertRaisesRegex(m.Error, 'does not resolve through NSS; check that himmelblaud'):
+                self.setup()
+        self.assertFalse(m.STATE.exists())
 
     def test_state_requires_pambase_fields_and_a_pambase_system_auth_entry(self):
         self.setup()

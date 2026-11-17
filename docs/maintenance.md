@@ -91,7 +91,8 @@ SDDM autologin) and brought current with `omarchy update`, using companion sourc
   3.6, so an Arch-built `himmelblau` linked against OpenSSL 4 would not load there.
 - `system-auth` was the Omarchy baseline and `system-login` pristine pambase 20260616-1.
   Replacing `sddm` moved Omarchy's edited `/etc/pam.d/sddm` and `sddm-autologin` to
-  `.pacsave`; they were restored (see [SDDM installation](sddm.md)).
+  `.pacsave`; they were restored by hand. `setup` now does this itself (see
+  [SDDM installation](sddm.md)).
 - Before the first sign-in, `setup` passed every check up to the identity lookup and
   wrote nothing: Himmelblau answers a forward lookup for an unknown account, but not the
   reverse one. `aad-tool auth-test` then completed number-matching MFA and Hello PIN

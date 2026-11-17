@@ -75,21 +75,32 @@ packages/configuration. See [SDDM installation](docs/sddm.md).
 
 SDDM autologin is unsupported: it skips the sign-in screen, so the Entra user never gets
 to sign in, and an autologin session's lock screen has no failed-attempt lockout.
-Omarchy's installer turns it on in `/etc/sddm.conf.d/autologin.conf`; remove the
+Omarchy's installer turns it on for disk-encrypted installs, in
+`/etc/sddm.conf.d/autologin.conf`; remove the
 `[Autologin]` `User=` line before setup. `setup` refuses while autologin is configured,
 and `doctor` reports it if it returns.
 
-After reviewing the effective configuration and preparing independent recovery access:
+Before setup, the account must have signed in once through Himmelblau: until then
+Himmelblau answers a name lookup with a computed entry but not the reverse lookup, and
+`setup` refuses. Set `domain` in `/etc/himmelblau/himmelblau.conf` (setup adds the rest),
+then:
+
+```sh
+sudo systemctl enable --now himmelblaud himmelblaud-tasks
+aad-tool auth-test --name alice@example.com
+```
+
+The user completes MFA and enrols a Hello PIN. This first sign-in can create a tenant
+device. Then, after reviewing the effective configuration and preparing independent
+recovery access:
 
 ```sh
 sudo omarchy-himmelblau setup --domain example.com --user alice@example.com
 sudo omarchy-himmelblau doctor
 ```
 
-Use `setup --help` for the explicit administrator option. Authenticate the intended
-account through Himmelblau to establish its identity before setup requires NSS
-resolution. The first successful cloud authentication can create a tenant device.
-Do not clear caches or rejoin an existing device to work around a setup failure.
+Use `setup --help` for the explicit administrator option. Do not clear caches or rejoin
+an existing device to work around a setup failure.
 
 After setup, [install the plugin](#install-the-omarchy-plugin), then log out and back
 in before testing the lock. Setup does not restart daemons, authenticate,
