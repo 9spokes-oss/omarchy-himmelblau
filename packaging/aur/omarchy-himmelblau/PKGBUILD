@@ -1,0 +1,40 @@
+# Maintainer: @MAINTAINER@
+# AUR recipe. The release recipe (packaging/PKGBUILD) pins a published native
+# artifact; a local build has none, so build() pins the installed
+# sddm-himmelblau files instead (see tools/pin-installed-native.py).
+pkgname=omarchy-himmelblau
+pkgver=0.6.0
+pkgrel=1
+_native=0.21.0-4
+_commit=@RELEASE_COMMIT@
+pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau installation'
+arch=('x86_64')
+url='https://github.com/9spokes-oss/omarchy-himmelblau'
+license=('MIT')
+# Unlike the release recipe, no 'omarchy' dependency: that package is only in
+# Omarchy's own repository, not Arch's or the AUR. setup refuses to run without
+# Omarchy's lock source, and doctor reports it missing.
+depends=("sddm-himmelblau=$_native" 'himmelblau>=4.0.8' 'python' 'patch' 'pam')
+makedepends=('make' 'git' "sddm-himmelblau=$_native")
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('@RELEASE_SHA256@')
+
+prepare() {
+  # The tag must still point at the commit this recipe was reviewed against.
+  local _actual
+  _actual=$(gzip -dc "$srcdir/$pkgname-$pkgver.tar.gz" | git get-tar-commit-id)
+  [[ $_actual == "$_commit" ]] || { error "Release archive is commit $_actual, expected $_commit"; return 1; }
+}
+
+build() {
+  local _repo="$srcdir/$pkgname-$pkgver"
+  make -B -C "$_repo" build/pin-change
+  python3 "$_repo/tools/pin-installed-native.py" "$_native" "$_commit" "$srcdir/native-payload.json"
+}
+
+package() {
+  local _repo="$srcdir/$pkgname-$pkgver"
+  install -Dm644 "$srcdir/native-payload.json" "$pkgdir/usr/share/omarchy-himmelblau/native-payload.json"
+  make -C "$_repo" DESTDIR="$pkgdir" install
+  install -Dm644 "$_repo/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

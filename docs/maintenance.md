@@ -21,6 +21,9 @@ Releases and marketplace submission are currently draft/withdrawn while polishin
 
 ## Controlled upgrade to 0.5.3
 
+Historical: this `repair`-based upgrade no longer exists. Versions after `0.5.3` change
+by `rollback`, package upgrade, then `setup`.
+
 Version `0.5.3` with native `0.21.0-4` completed the controlled lab acceptance
 below on 2026-11-08. The `0.5.2` results above remain historical.
 
@@ -73,8 +76,36 @@ observations. Local recovery SSH/sudo worked, but local recovery GUI login was n
 repeated on this build. A silent MFA wait longer than 60 seconds was not
 independently timed. Core-limit runtime causality remains inconclusive as described
 above. These results do not establish offline sign-in or every MFA method/policy.
-Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3` is unpublished.
+Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3` and `0.6.0` are unpublished.
 Marketplace submission remains withdrawn.
+
+## 0.6.0 fresh-install acceptance
+
+On 2026-11-18, in a new lab VM installed from the Omarchy 4.5.0 ISO (unencrypted, no
+SDDM autologin) and brought current with `omarchy update`, using companion source
+`9f8f23d` and native `0.21.0-4`:
+
+- Packages built in the guest the way an Omarchy user gets them: `himmelblau` 4.0.8-2
+  from the AUR with `yay`, then both recipes in `packaging/aur/` with `makepkg`. The native
+  `check()` proofs passed in the guest. Omarchy's stable repository still ships OpenSSL
+  3.6, so an Arch-built `himmelblau` linked against OpenSSL 4 would not load there.
+- `system-auth` was the Omarchy baseline and `system-login` pristine pambase 20260616-1.
+  Replacing `sddm` moved Omarchy's edited `/etc/pam.d/sddm` and `sddm-autologin` to
+  `.pacsave`; they were restored by hand. `setup` now does this itself (see
+  [SDDM installation](sddm.md)).
+- Before the first sign-in, `setup` passed every check up to the identity lookup and
+  wrote nothing: Himmelblau answers a forward lookup for an unknown account, but not the
+  reverse one. `aad-tool auth-test` then completed number-matching MFA and Hello PIN
+  enrolment.
+- `setup` and `doctor` passed. `system-auth` became the reviewed output with
+  `restore_kind` `omarchy`; `system-login` was unchanged.
+- The user signed in at the native greeter with the account and PIN, added the plugin
+  from a local copy of the same commit, locked, entered a wrong PIN, then unlocked with
+  the right one. The lock authenticated through `omarchy-himmelblau-lock-password`, the
+  faillock tally was empty after the success, and `doctor` stayed clean.
+
+Not covered: disk-encrypted installs (where Omarchy enables autologin), PIN reset,
+rollback and upgrade on this VM, and the published GitHub plugin source.
 
 ## Validation procedure
 
@@ -95,6 +126,75 @@ Omarchy supports user hooks, including `post-update`, and menu entries in a user
 Before privileged rollback, disable the user clone and log out of **all sessions loading it**. Disabling alone does not stop `keepLoaded` code. Keep an independent local recovery console or SSH session open, and run root rollback there before any new clone session: removing the dedicated PAM service while its locker remains loaded can strand the next lock.
 
 Native SDDM replacement has its own package rollback. The companion's root rollback does not remove or downgrade the native display manager. Restore compatible SDDM/companion packages and their matching configuration together using the separate SDDM procedure; do not mix a conversation theme with an incompatible daemon.
+
+## System PAM and pambase upgrades
+
+`setup` owns `/etc/pam.d/system-auth` and watches `/etc/pam.d/system-login`; the design
+is in the PAM ordering notes and the container harness (`make pam-stack-test`) checks the
+patched stack on Arch's libpam.
+
+- **Accounts.** Local accounts (in `/etc/passwd`) go through pambase's stack as before.
+  Every other name goes to Himmelblau, and any result but success ends the stack: it
+  never falls through to `pam_unix` or `systemd-homed`. Homed accounts aren't supported.
+  `pam_faillock` locks every non-root account for 120 s after 10 failures.
+- **Supported baselines.** `assets/patches.json` lists, per supported pambase release,
+  the pristine `system-login` hash and two `system-auth` baselines, each with its own
+  patch to the same output: pristine pambase, and pambase with Omarchy's install-time
+  lockout tuning (`install/config/increase-lockout-limit.sh`: `preauth silent deny=10
+  unlock_time=120`, `authfail deny=10 unlock_time=120`). It also lists the hashes of
+  `aad-tool configure-pam`'s output on each. `setup` accepts that output in both files
+  (aad-tool 4.0.8) or in `system-auth` alone (aad-tool once it skips `system-login`,
+  which includes `system-auth`). The state's `restore_kind` records which
+  baseline setup found. The installed version comes from pacman's database; a `.pacnew`
+  name is never evidence on its own.
+- **Ownership.** Hashes say nothing about who can rewrite a file. `setup`, `repair`,
+  `rollback` and `doctor` refuse `system-auth`, `system-login` or an adopted `.pacnew`
+  unless it is a regular file owned by root:root, writable only by root, with no special
+  bits or POSIX ACL, and every parent directory is owned by root and writable only by
+  root, with no access ACL (and no default ACL on `/etc/pam.d`, which a replacement
+  would inherit). The state must hold the same for `system-auth`'s stored rollback
+  owner and mode, must watch exactly `system-login` for the recorded release, and must
+  list each managed path once, never a watched one. `repair` accepts `system-auth` put
+  back to its baseline with the baseline's recorded mode, and rewrites it at 0644.
+- **ACLs and the journal.** The journal records bytes, owner and mode, never an ACL.
+  Before writing the journal, every root change (and `recover`, before its first
+  write) refuses:
+  - a file or directory it would replace, chmod or remove that carries an ACL
+    (`state.json` included);
+  - a file or directory that it, or its undo, would create where a default ACL would
+    be inherited.
+
+  As a backstop, `atomic()` checks each temporary file before renaming it into place.
+  `make_directory()` checks a new directory just after creating it, so for that moment a
+  directory with an inherited ACL exists before the change is undone.
+- **Changes during a command.** `setup`, `policy`, `repair` and `rollback` snapshot every
+  file they may write or delete (bytes, owner and mode, or absence) before their checks.
+  The transaction refuses to start if any of them changed since, including a file that
+  appeared or a permission-only change. The comparison runs just before the journal is
+  written: an edit landing between that comparison and the write it races is not
+  detected. `/etc` offers no lock that would close that window.
+- **State paths.** Every managed and watched path must be absolute and canonical (no
+  `.`, `..`, repeated or leading `//`), and `system-auth`'s managed mode must be 0644.
+- **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
+  locked-out user is told why. The dedicated lock service keeps it. Re-running
+  Omarchy's lockout sed on the patched file changes nothing.
+- **Don't run `aad-tool configure-pam`** after setup. `doctor` reports the changed
+  `system-login`; `repair` and `rollback` refuse it. Restore `system-login` from the
+  pambase package by hand, then run `doctor`.
+- **pambase upgrade.** pacman leaves `system-auth.pacnew` (our file is modified) and
+  replaces the pristine `system-login`. `doctor` reports the new version and the
+  `.pacnew`. `repair` accepts the upgrade only if the installed release is in the
+  running companion's supported list, the `.pacnew` and `system-login` match its pristine
+  hashes, and our `system-auth` is unchanged. On the Omarchy baseline the new rollback
+  target is the `.pacnew` with Omarchy's lockout tuning applied, which must match the
+  release's recorded hash. It writes the new release's patched `system-auth`, removes
+  the `.pacnew` and records the new rollback target, in one
+  journalled transaction. Otherwise it names the version: review and merge the
+  `.pacnew` by hand, or upgrade the companion.
+- **Rollback** writes the recorded baseline `system-auth` and never touches `system-login`.
+  While pambase is unchanged it uses only the stored state, so a newer companion that no
+  longer lists that release can still roll back. After an upgrade it installs the
+  `.pacnew` only under the same hash checks as `repair`.
 
 ## Testing recovery without ending the desktop
 
@@ -136,10 +236,20 @@ companion's accepted build. Trust the release source/checksums and package insta
 channel; the manifest is not a package signature and does not defend against root
 replacing both trusted packages. See [release builds](releasing.md).
 
-Configuration replacements fsync file contents and parent directories, and record
-per-entry transaction progress. If an operation is interrupted, preserve the root
-state/journal and run `sudo omarchy-himmelblau recover` from recovery access. It accepts
-only known before/after bytes; unknown edits need manual investigation. Default rollback
+Every root change (`setup`, `policy`, `repair`, `rollback`) first writes one journal,
+`/var/lib/omarchy-himmelblau/transaction.json` (root, `0600`), with each target's
+exact before bytes, owner and mode (or absence) and its expected after hash, owner and
+mode, plus the state file's before bytes and after hash. Replacements fsync file contents
+and parent directories. A failed operation undoes itself; if it is interrupted, every
+command except `recover` refuses while the journal exists. Preserve it and run
+`sudo omarchy-himmelblau recover` from recovery access. Recovery always undoes, never
+completes, the change, and accepts each target only at its before or after value,
+including owner and mode; unknown edits need manual investigation. Any other `*.json`
+in that directory makes every command refuse. `setup`, `policy`, `repair`, `rollback` and
+`recover` each hold an exclusive lock (`.lock` in the same directory) for their whole run,
+so a second one is refused rather than interleaved, and the journal is created without
+ever replacing an existing one. File owners are set on the temporary file before it
+replaces the target, so a crash never leaves a file with new contents and an old owner. Default rollback
 and recovery refuse live or indeterminate graphical/locker sessions. The explicit
 `--recovery-only` override is for an operator at an independent console who has ensured
 that restoring configuration cannot strand a dependent session. It does not stop sessions.

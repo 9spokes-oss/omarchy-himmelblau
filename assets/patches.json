@@ -2,12 +2,12 @@
   "lock-pam": {
     "filename": "omarchy-lock-password",
     "before": "1740b095412602a0db96fb810e0782ce9f3f155d489da4cb98db36d5b592baac",
-    "after": "f5a466b42b617af8191d2d944505917e904e3db5cf0b025085ca3ce9527b2f77"
+    "after": "7dc5349694f27d65f8a4fc1c542336d53602e571847d7447acfb3e699dcde73e"
   },
   "lock-conversation": {
     "filename": "Service.qml",
     "before": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
-    "after": "04d3e875e5609f45d11ae711612cefac5dfbf6d5d89670c9832a1afbb4fb4f81"
+    "after": "1aeae646fe2fe8dc59e6b25969b1c89aecf573e1df5b44a3b4daa97bb4d32e4c"
   },
   "lock-view": {
     "filename": "LockView.qml",
@@ -19,32 +19,38 @@
     "before": "aa578ec8a6269079e2141842073821fa24940fa4495a13815fa0754652e6027f",
     "after": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a"
   },
-  "previous-release": {
-    "version": "0.5.2",
-    "sddm-conversation": "62494a7fb39f02518b6281dc1b757c2d0244c4f729d083f5e79eabca8623993e",
-    "plugin-files": {
-      "manifest.json": "e3fcd54a832dbdc532bedebf5af515324f89d026857e9f5501f45a70a538717a",
-      "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
-      "plugin/generate.py": "6dd5d9475205a7dce42140d21edef1473a5ef1eab96b723ecb5975022053506b",
-      "plugin/Service.qml": "c058d2b233840dcb40ba17a6c7d6e0103ef136a309822bfd74d485d6c8f158ee",
-      "plugin/LockView.qml": "c545760032375064d400a11b030b48f1f85a94f371d3d1d97548b4d8e13be3a4",
-      "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
-      "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
-      "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
-      "plugin/provenance.json": "60ce65b43efa137cb336f4542ce738b46aa8a36bd4420ca5d91e25076e5e548f"
+  "system-auth-20260616-1": {
+    "filename": "system-auth",
+    "before": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
+    "after": "51e155166a52a05cee61fff3f079169cbb8f70c4231fb3f3e9a8ea71a94a529b"
+  },
+  "system-auth-20260616-1-omarchy": {
+    "filename": "system-auth",
+    "before": "787275ed1430895610a4360425443884e6ba3c696c2d7087fcc97f73771c806b",
+    "after": "51e155166a52a05cee61fff3f079169cbb8f70c4231fb3f3e9a8ea71a94a529b"
+  },
+  "pambase": {
+    "20260616-1": {
+      "system-login": "7272120f0ee937cbe6ba0a6e748ea234ab6799e1e2966c83ee85f97d9f254fd9",
+      "aad-tool-system-login": "d1d96f06377539dcd88c2f1f0a666b41644c5a8a5e2af6cfbab85fb13e870a25",
+      "baselines": {
+        "pambase": {
+          "system-auth": "2bb19ead55a7b9014d107eec63cc015426c39d93ddc8af3322649ff5f8b45d5b",
+          "aad-tool": "9a35e64fbddee2fac2333ba684df5ec9f00194216f19d2ea23e310e72fa2cccd",
+          "patch": "system-auth-20260616-1"
+        },
+        "omarchy": {
+          "system-auth": "787275ed1430895610a4360425443884e6ba3c696c2d7087fcc97f73771c806b",
+          "aad-tool": "cc5e3fd3040cb5799d15fe8e119fae7c963225cbfd4342ed2c2b2e5cd0a0bf0f",
+          "patch": "system-auth-20260616-1-omarchy"
+        }
+      }
     }
   },
-  "fixed-plugin": {
-    "id": "9spokes.himmelblau-lock",
+  "previous-release": {
     "version": "0.5.3",
-    "upstream": {
-      "Service.qml": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
-      "LockView.qml": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
-      "FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
-      "poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
-      "manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
-    },
-    "files": {
+    "sddm-conversation": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a",
+    "plugin-files": {
       "manifest.json": "a273ce2fe38bd19348267e40e3e9a4ebdc6169b62777f631a551991c709f817f",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
       "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
@@ -54,6 +60,28 @@
       "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
       "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
       "plugin/provenance.json": "14c33bfaaba79a772abce02a855fb278a490a3da91e998ba092d88fdde383e23"
+    }
+  },
+  "fixed-plugin": {
+    "id": "9spokes.himmelblau-lock",
+    "version": "0.6.0",
+    "upstream": {
+      "Service.qml": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
+      "LockView.qml": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
+      "FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
+      "poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
+      "manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
+    },
+    "files": {
+      "manifest.json": "609ecb1f6da7f1be12ec6c84b408b5f26c652dd0f8d96656b5e0b32419eae789",
+      "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
+      "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
+      "plugin/Service.qml": "1aeae646fe2fe8dc59e6b25969b1c89aecf573e1df5b44a3b4daa97bb4d32e4c",
+      "plugin/LockView.qml": "8369f3e5ada978ac16966c178dccb820c267e69e38c42351aea5b0e5e4bf5397",
+      "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
+      "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
+      "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
+      "plugin/provenance.json": "383fad5634e9403d27de8333e969dc5f7a8fc1b3aef41e499eae90888f55bcc5"
     }
   }
 }

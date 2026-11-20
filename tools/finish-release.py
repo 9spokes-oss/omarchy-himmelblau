@@ -15,6 +15,9 @@ import subprocess
 import sys
 import tarfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from native_payload import PayloadError, collect  # noqa: E402
+
 if len(sys.argv) != 3:
     raise SystemExit('Usage: finish-release.py RELEASE_DIRECTORY NATIVE_PACKAGE')
 directory, package = (Path(value).resolve() for value in sys.argv[1:3])
@@ -30,10 +33,6 @@ if not all(fields):
     raise SystemExit('native/PKGBUILD has no pkgver or pkgrel')
 version = '-'.join(field[1] for field in fields)
 data = subprocess.check_output(['/usr/bin/zstd', '-d', '-q', '-c', str(package)], timeout=120)
-required = {'/usr/bin/sddm', '/usr/bin/sddm-greeter', '/usr/bin/sddm-greeter-qt6',
-            '/usr/lib/sddm/sddm-helper', '/usr/lib/sddm/sddm-helper-start-wayland',
-            '/usr/lib/sddm/sddm-helper-start-x11user'}
-files = {}
 with tarfile.open(fileobj=io.BytesIO(data)) as archive:
     members = archive.getmembers()
     canonical = [str(PurePosixPath(m.name.removeprefix('./'))) for m in members]
@@ -47,27 +46,14 @@ with tarfile.open(fileobj=io.BytesIO(data)) as archive:
     info = archive.extractfile(pkginfo).read().decode()
     if not re.search(r'^pkgname = sddm-himmelblau$', info, re.M) or not re.search(rf'^pkgver = {re.escape(version)}$', info, re.M):
         raise SystemExit('Unexpected native package identity')
-    for member in members:
-        path = '/' + member.name.removeprefix('./')
-        if '..' in PurePosixPath(path).parts:
-            raise SystemExit('Unsafe archive path')
-        selected = path in required or any(path.startswith(prefix) for prefix in (
-            '/usr/lib/qt/qml/SddmComponents/', '/usr/lib/qt6/qml/SddmComponents/'))
-        if not selected or member.isdir():
-            continue
-        if not member.isfile() or member.uid != 0 or member.gid != 0 or member.mode & 0o7022:
-            raise SystemExit('Unsafe native payload entry: ' + path)
-        if path in required and member.mode != 0o755:
-            raise SystemExit('Unexpected executable mode: ' + path)
-        files[path] = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
-if not required.issubset(files):
-    raise SystemExit('Native package is missing authentication executables')
-for prefix in ('/usr/lib/qt/qml/SddmComponents/', '/usr/lib/qt6/qml/SddmComponents/'):
-    if prefix + 'qmldir' not in files or not any(path.startswith(prefix) and path.endswith('.qml') for path in files):
-        raise SystemExit('Native package is missing a complete QML component tree: ' + prefix)
+    try:
+        files = collect(('/' + m.name.removeprefix('./'), m.isdir(), m.isfile(), m.mode, m.uid, m.gid,
+                         lambda m=m: archive.extractfile(m).read()) for m in members)
+    except PayloadError as error:
+        raise SystemExit(str(error)) from None
 manifest = {'package': 'sddm-himmelblau', 'version': version,
             'artifact_sha256': hashlib.sha256(package.read_bytes()).hexdigest(),
-            'source_commit': record['commit'], 'files': dict(sorted(files.items()))}
+            'source_commit': record['commit'], 'files': files}
 payload = (json.dumps(manifest, indent=2) + '\n').encode()
 (directory / 'companion/native-payload.json').write_bytes(payload)
 recipe.write_text(recipe.read_text().replace('@NATIVE_PAYLOAD_SHA256@', hashlib.sha256(payload).hexdigest()))

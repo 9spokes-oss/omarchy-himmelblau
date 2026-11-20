@@ -14,6 +14,7 @@ const CONVERSATION_FUNCTIONS = [
   'completePasswordAttempt', 'beginPinRecovery', 'currentPinRecovery', 'handlePinRecoveryLine',
   'stopPinRecovery', 'escalatePinRecoveryStop', 'finishPinRecovery', 'currentlyLocked',
   'resetAuthenticationState', 'finishUnlock', 'promptStateChanged', 'authenticationStateChanged', 'idlePromptTriggered',
+  'passwordPamService',
 ];
 
 function stoppedTimer() {
@@ -24,6 +25,7 @@ function stoppedTimer() {
 function harness() {
   const state = {
     lockRequested: true,
+    passwordPamConfigured: true,
     pinRecoveryAvailable: true,
     authenticatingPassword: false,
     passwordPam: null,
@@ -140,6 +142,7 @@ s.submitPassword('must-not-silently-discard');
 assert.equal(s.contexts.length, 0);
 s.submitPassword('');
 c = s.passwordPam;
+assert.equal(c.config, 'omarchy-himmelblau-lock-password');
 assert.equal(c.replies.length, 0);
 c.prompt('PIN:');
 assert.equal(s.awaitingPasswordResponse, true);
@@ -453,9 +456,11 @@ assert.equal(wake.conversationIdleTimer.running, false);
 
 // Only a missing PAM file refuses a lock, and it says so; the setup check
 // runs after locking and never blocks it.
-function lockHarness(pamConfigured) {
+function lockHarness(pamConfigured, stockPamConfigured = false) {
   const state = {
     passwordPamConfigured: pamConfigured,
+    stockPasswordPamConfigured: stockPamConfigured,
+    get lockPamAvailable() { return this.passwordPamConfigured || this.stockPasswordPamConfigured; },
     lockRequested: false,
     lockWarning: 'stale',
     events: [],
@@ -473,7 +478,7 @@ function lockHarness(pamConfigured) {
     refreshFingerprintStatus() {},
   };
   state.root = state;
-  return loadFunctions(service, ['refuseLock', 'checkLockSetup', 'beginLock'], state);
+  return loadFunctions(service, ['refuseLock', 'checkLockSetup', 'warnLockSetup', 'passwordPamService', 'beginLock'], state);
 }
 let lock = lockHarness(false);
 assert.equal(lock.beginLock(), false);
@@ -491,6 +496,26 @@ assert.equal(lock.lockPreflightTimeout.running, true);
 assert.equal(lock.pinHelperCheck.running, true);
 assert.equal(lock.lockWarning, '');
 assert.equal(lock.lockRefusedNotice.running, false);
+// Without the work service, the stock service still locks, and the lock says why
+// (Astra #1: a missing work configuration never leaves the screen open).
+lock = lockHarness(false, true);
+assert.equal(lock.beginLock(), true);
+assert.equal(lock.lockRequested, true);
+assert.equal(lock.lockRefusedNotice.running, false);
+assert.equal(lock.passwordPamService(), 'omarchy-lock-password');
+assert.match(lock.lockWarning, /accepts only a local password/);
+lock.warnLockSetup();
+assert.match(lock.lockWarning, /accepts only a local password/);
+// With the work service present, it is always the one used.
+lock = lockHarness(true, true);
+assert.equal(lock.passwordPamService(), 'omarchy-himmelblau-lock-password');
+lock.beginLock();
+lock.warnLockSetup();
+assert.match(lock.lockWarning, /Lock setup check failed/);
+// Neither service: refuse, as stock Omarchy does.
+lock = lockHarness(false, false);
+assert.equal(lock.beginLock(), false);
+assert.equal(lock.lockRefusedNotice.running, true);
 // A check still running from the last lock does not keep its old warning.
 lock = lockHarness(true);
 lock.lockPreflight.running = true;
@@ -500,6 +525,8 @@ assert.equal(lock.lockPreflightTimeout.running, false);
 
 // Contracts with the companion and with the PAM text rendering.
 assert.match(service, /path: "\/etc\/pam.d\/omarchy-himmelblau-lock-password"/);
+assert.match(service, /path: "\/etc\/pam.d\/omarchy-lock-password"/);
+assert.match(service, /createObject\(root, \{ attemptId: passwordAttempt, config: passwordPamService\(\) \}\)/);
 assert.match(service, /command: \["\/usr\/bin\/omarchy-himmelblau", "locker-preflight"\]/);
 assert.ok(view.includes('textFormat: Text.PlainText'));
 assert.ok(view.includes('root.responseVisible ? TextInput.Normal : TextInput.Password'));

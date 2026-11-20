@@ -10,7 +10,18 @@
    property var shell: null
    property string omarchyPath: ""
  
-@@ -47,7 +50,20 @@
+@@ -23,6 +26,10 @@
+   property bool authenticatingPassword: false
+   property bool fingerprintAuthenticating: false
+   property bool passwordPamConfigured: false
++  // Omarchy's own password service: used only when the work service is missing,
++  // so a machine without setup still locks rather than staying open.
++  property bool stockPasswordPamConfigured: false
++  readonly property bool lockPamAvailable: passwordPamConfigured || stockPasswordPamConfigured
+   property bool fingerprintConfigured: false
+   property int fingerprintUnreachedStreak: 0
+   property bool fingerprintAttemptReachedDevice: false
+@@ -47,7 +54,20 @@
    property int knownScreenCount: 0
    property bool previewVisible: false
    property string enteredPassword: ""
@@ -32,7 +43,16 @@
    property string failureMessage: ""
    property int failedAttempts: 0
    property string backgroundPath: ""
-@@ -192,7 +208,9 @@
+@@ -132,7 +152,7 @@
+   }
+ 
+   function recoverStrandedLock() {
+-    if (!strandedLock || currentlyLocked() || !passwordPamConfigured) return
++    if (!strandedLock || currentlyLocked() || !lockPamAvailable) return
+ 
+     strandedLock = false
+     logEvent("lock-stranded: recovering")
+@@ -192,7 +212,9 @@
  
    function resetAuthenticationState() {
      enteredPassword = ""
@@ -43,7 +63,7 @@
      failureMessage = ""
      failedAttempts = 0
      authenticatingPassword = false
-@@ -210,13 +228,30 @@
+@@ -210,13 +232,37 @@
      fingerprintRetryTimer.stop()
      fingerprintReachTimer.stop()
      fingerprintResumeTimer.stop()
@@ -60,23 +80,31 @@
 +  function checkLockSetup() {
 +    if (!pinHelperCheck.running) pinHelperCheck.running = true
 +    lockWarning = ""
++    if (!passwordPamConfigured)
++      lockWarning = "Work sign-in isn't set up; this lock accepts only a local password. Run: sudo omarchy-himmelblau setup"
 +    if (lockPreflight.running) return
 +    lockPreflightTimeout.restart()
 +    lockPreflight.running = true
 +  }
 +
 +  function warnLockSetup() {
-+    if (lockRequested) lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
++    if (lockRequested && passwordPamConfigured)
++      lockWarning = "Lock setup check failed. After unlocking, run: omarchy-himmelblau status"
++  }
++
++  function passwordPamService() {
++    return passwordPamConfigured ? "omarchy-himmelblau-lock-password" : "omarchy-lock-password"
 +  }
 +
    function beginLock() {
-     if (!passwordPamConfigured) {
+-    if (!passwordPamConfigured) {
 -      logEvent("lock-denied: missing-pam")
++    if (!lockPamAvailable) {
 +      refuseLock()
        return false
      }
  
-@@ -225,6 +260,7 @@
+@@ -225,6 +271,7 @@
      armBlankTimer()
      logEvent("lock-requested")
      queueSessionLock()
@@ -84,7 +112,7 @@
  
      Qt.callLater(function() {
        root.refreshBackground()
-@@ -237,7 +273,10 @@
+@@ -237,7 +284,10 @@
    function finishUnlock() {
      if (!root.currentlyLocked()) return
  
@@ -95,7 +123,7 @@
      pendingSessionLock = false
      sessionLockStabilizeTimer.stop()
      pendingSessionLockTimer.stop()
-@@ -257,6 +296,7 @@
+@@ -257,6 +307,7 @@
    function runWake() {
      if (!wakeProcess.running) wakeProcess.running = true
      if (lockRequested) armBlankTimer()
@@ -103,7 +131,7 @@
      resumeFingerprint()
      nudgeFingerprint()
    }
-@@ -353,36 +393,226 @@
+@@ -353,36 +404,226 @@
      if (!blankProcess.running) blankProcess.running = true
    }
  
@@ -153,7 +181,7 @@
      failureMessage = ""
      authenticatingPassword = true
 +    passwordAttempt += 1
-+    var context = passwordPamFactory.createObject(root, { attemptId: passwordAttempt })
++    var context = passwordPamFactory.createObject(root, { attemptId: passwordAttempt, config: passwordPamService() })
 +    passwordPam = context
 +    if (!context || !context.start()) handlePasswordFailure(context, passwordAttempt)
 +  }
@@ -347,7 +375,7 @@
      runWake()
    }
  
-@@ -514,6 +744,14 @@
+@@ -514,6 +755,14 @@
          fingerprintConfigured: root.fingerprintConfigured || root.fingerprintUnavailable
          fingerprintUnavailable: root.fingerprintUnavailable
          authenticatingPassword: root.authenticatingPassword
@@ -362,7 +390,7 @@
          failureMessage: root.failureMessage
          failedAttempts: root.failedAttempts
          inputEnabled: root.lockRequested
-@@ -564,25 +802,40 @@
+@@ -564,25 +813,40 @@
      }
    }
  
@@ -420,7 +448,7 @@
      }
    }
  
-@@ -710,7 +963,7 @@
+@@ -710,7 +974,7 @@
    Process {
      id: posterProc
      property string sourcePath: ""
@@ -429,7 +457,7 @@
      stdout: StdioCollector { id: posterOutput; waitForEnd: true }
      onExited: function(exitCode) {
        if (sourcePath !== root.backgroundPath) {
-@@ -782,10 +1035,11 @@
+@@ -782,10 +1046,11 @@
          root.armBlankTimer(resumeMs)
          return
        }
@@ -443,7 +471,7 @@
      }
    }
  
-@@ -839,14 +1093,31 @@
+@@ -839,14 +1104,31 @@
      }
    }
  
@@ -476,13 +504,22 @@
      watchChanges: true
      printErrors: false
      onLoaded: root.passwordPamConfigured = true
-@@ -854,6 +1125,37 @@
+@@ -854,10 +1136,50 @@
      onFileChanged: reload()
    }
  
++  FileView {
++    path: "/etc/pam.d/omarchy-lock-password"
++    watchChanges: true
++    printErrors: false
++    onLoaded: root.stockPasswordPamConfigured = true
++    onLoadFailed: root.stockPasswordPamConfigured = false
++    onFileChanged: reload()
++  }
++
 +  Process {
 +    id: lockRefusedNotice
-+    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password"]
++    command: ["notify-send", "-u", "critical", "Screen not locked", "Missing /etc/pam.d/omarchy-himmelblau-lock-password and /etc/pam.d/omarchy-lock-password"]
 +  }
 +
 +  Process {
@@ -513,23 +550,30 @@
 +
    // No lock before PAM is known good. An answer from before then may be stale --
    // the failsafe can be cleared from a TTY -- so re-ask rather than act on it.
-   onPasswordPamConfiguredChanged: {
-@@ -876,7 +1178,10 @@
+-  onPasswordPamConfiguredChanged: {
+-    if (!passwordPamConfigured) return
++  onLockPamAvailableChanged: {
++    if (!lockPamAvailable) return
+ 
+     strandedLock = false
+     strandedLockResolved = false
+@@ -876,7 +1198,10 @@
      target: "lock"
  
      function lock(): string {
 -      if (!root.passwordPamConfigured) return "missing-pam"
-+      if (!root.passwordPamConfigured) {
++      if (!root.lockPamAvailable) {
 +        root.refuseLock()
 +        return "missing-pam"
 +      }
        // omarchy-system-sleep-lock asks for the lock before every suspend.
        if (root.currentlyLocked()) root.noteSleepRequested()
        if (!root.currentlyLocked() && !root.beginLock()) return "failed"
-@@ -896,9 +1201,13 @@
+@@ -896,9 +1221,14 @@
          secure: sessionLock.secure,
          realScreens: root.realScreenCount(),
          passwordPam: root.passwordPamConfigured,
++        passwordPamService: root.passwordPamService(),
 +        lockWarning: root.lockWarning,
 +        recoveryAvailable: root.pinRecoveryAvailable,
          fingerprint: root.fingerprintConfigured,

@@ -1,0 +1,48 @@
+# PAM stack harness image: Arch's real libpam and service files, with stub
+# Himmelblau PAM and NSS modules. pam_systemd_home.so is replaced by the same
+# stub so a systemd-homed account can be made to succeed there (no homed runs in
+# a container). Built and run by tests/pam-stack/run.sh.
+FROM docker.io/library/archlinux:latest
+
+# A corporate TLS proxy's CA, when run.sh mounts one; harmless otherwise.
+RUN if [ -s /hostca.pem ]; then cp /hostca.pem /etc/ca-certificates/trust-source/anchors/host-ca.crt && update-ca-trust; fi
+
+RUN pacman -Syu --noconfirm --needed gcc python >/dev/null \
+ && pacman -Sddw --noconfirm sddm sudo polkit openssh >/dev/null \
+ && for p in sddm sudo openssh; do bsdtar -xf /var/cache/pacman/pkg/$p-[0-9]*.pkg.tar.zst -C / etc/pam.d; done \
+ && bsdtar -xf /var/cache/pacman/pkg/polkit-[0-9]*.pkg.tar.zst -C / usr/lib/pam.d \
+ && rm -rf /var/cache/pacman/pkg/*
+
+COPY pristine/ /harness/pristine/
+COPY stacks/ /harness/stacks/
+COPY *.c test_stack.py /harness/
+
+# The proposed files are edits of this exact pambase; fail loudly if it moved.
+RUN for f in system-auth system-login; do \
+      [ "$(sha256sum < /etc/pam.d/$f)" = "$(sha256sum < /harness/pristine/$f)" ] \
+        || { echo "pambase $f differs from tests/pam-stack/pristine/$f" >&2; exit 1; }; \
+    done \
+ && pacman -Q pam pambase
+
+RUN cd /harness \
+ && gcc -O2 -Wall -Wextra -Werror -fPIC -shared -o /usr/lib/security/pam_himmelblau.so pam_himmelblau_stub.c -lpam \
+ && gcc -O2 -Wall -Wextra -Werror -fPIC -shared -o /usr/lib/security/pam_systemd_home.so \
+      -DSTAGE_PREFIX='"homed-"' -DLOG_PATH='"/run/pamstub/homed-calls"' pam_himmelblau_stub.c -lpam \
+ && gcc -O2 -Wall -Wextra -Werror -fPIC -shared -o /usr/lib/libnss_entrastub.so.2 nss_entrastub.c \
+ && gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/pamdrive pamdrive.c -lpam \
+ && install -m 4755 /usr/local/bin/pamdrive /usr/local/bin/pamdrive-suid
+
+RUN sed -i -E 's/^(passwd|shadow):.*/\1: files entrastub/' /etc/nsswitch.conf \
+ && mkdir -p /etc/entrastub /etc/pamstub \
+ && printf '%s\n' \
+    'carol@example.test:x:50001:100:Entra user:/home/carol@example.test:/bin/bash' \
+    'dave@example.test:x:50002:100:Entra user without a valid shell:/home/dave@example.test:/usr/bin/nosuchshell' \
+    'homer:x:50003:100:systemd-homed-shaped user:/home/homer:/bin/bash' \
+    > /etc/entrastub/passwd \
+ && useradd -m -u 1000 alice \
+ && printf 'alice:alice-pw\nroot:root-pw\n' | chpasswd \
+ && install -m 644 /harness/stacks/system-auth /etc/pam.d/system-auth \
+ && install -m 644 /harness/pristine/omarchy-lock-password /etc/pam.d/omarchy-lock-password \
+ && install -m 644 /harness/stacks/omarchy-himmelblau-lock-password /etc/pam.d/omarchy-himmelblau-lock-password
+
+CMD ["python3", "/harness/test_stack.py", "-v"]

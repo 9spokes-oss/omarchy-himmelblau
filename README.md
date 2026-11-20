@@ -33,6 +33,9 @@ and a user-confirmed current-PIN lock/unlock while preserving the desktop and te
 Version `0.5.3` with native `0.21.0-4` completed controlled lab acceptance on
 2026-11-08, including separate locker and fresh-SDDM PIN/MFA recovery cycles. See
 the [version-specific results and limits](docs/maintenance.md#plugin-053-acceptance).
+Version `0.6.0` passed a fresh-install acceptance on 2026-11-18, from a new Omarchy
+install through setup, greeter sign-in and PIN lock/unlock. See its
+[results and limits](docs/maintenance.md#060-fresh-install-acceptance).
 
 To prefill M365 Background SSO permissions for your company, use the installed generator with its actual SharePoint and OneDrive hostnames (they need not match your
 email domain):
@@ -47,94 +50,108 @@ pending permission request. See [configuration and validation](docs/intune-sso.m
 
 ## Packages and setup
 
-The `0.5.3` companion requires `sddm-himmelblau=0.21.0-4`. This is a reviewed native
+The `0.6.0` companion requires `sddm-himmelblau=0.21.0-4`. This is a reviewed native
 backport, not a theme-only change or an official upstream SDDM release. Build both
 packages from a clean committed source export using [the release procedure](docs/releasing.md).
 Do not run the template PKGBUILDs directly or build packages as root.
 
-Install Himmelblau separately after reviewing its [Arch package](https://github.com/himmelblau-idm/himmelblau/blob/4.0.8/platform/arch/PKGBUILD).
-Its install hooks configure PAM/NSS, and it supplies browser policies, native messaging
-and broker services. This companion's package installation does not run setup, join
+Install Himmelblau 4.0.8 or later from the [AUR](https://aur.archlinux.org/packages/himmelblau).
+Its install script configures NSS, and the package supplies browser policies, native
+messaging and broker services. On Omarchy, don't run `aad-tool configure-pam`: its
+layout lets a successful Entra sign-in skip `pam_shells`, `pam_nologin` and
+`pam_faillock`. `setup` configures system PAM instead. It patches
+`/etc/pam.d/system-auth` so Entra users get the same lockout and account checks as local
+ones, and requires `/etc/pam.d/system-login` to stay pristine. Both files, and any
+`.pacnew` it adopts, must be owned by root, writable only by root and free of ACLs, in a
+`/etc/pam.d` only root can write. It accepts pambase
+`20260616-1` as installed, with or without the lockout tuning Omarchy's installer applies
+to `system-auth`, or exactly `aad-tool configure-pam`'s output on either (4.0.8's in both
+files, or in `system-auth` alone once aad-tool skips `system-login`), which it undoes; anything else is refused. `rollback` restores the version setup found, never
+aad-tool's layout. After a pambase upgrade, `doctor` reports the `.pacnew` and `repair` moves to a
+supported release; see [maintenance](docs/maintenance.md#system-pam-and-pambase-upgrades).
+This companion's package installation does not run setup, join
 Entra, enroll Intune, restart services or alter a user's home. The native SDDM package
 replaces stock SDDM; coordinate it with the companion and preserve matching rollback
 packages/configuration. See [SDDM installation](docs/sddm.md).
 
-After reviewing the effective configuration and preparing independent recovery access:
+SDDM autologin is unsupported: it skips the sign-in screen, so the Entra user never gets
+to sign in, and an autologin session's lock screen has no failed-attempt lockout.
+Omarchy's installer turns it on for disk-encrypted installs, in
+`/etc/sddm.conf.d/autologin.conf`; remove the
+`[Autologin]` `User=` line before setup. `setup` refuses while autologin is configured,
+and `doctor` reports it if it returns.
+
+Before setup, the account must have signed in once through Himmelblau: until then
+Himmelblau answers a name lookup with a computed entry but not the reverse lookup, and
+`setup` refuses. Set `domain` in `/etc/himmelblau/himmelblau.conf` (setup adds the rest),
+then:
+
+```sh
+sudo systemctl enable --now himmelblaud himmelblaud-tasks
+aad-tool auth-test --name alice@example.com
+```
+
+The user completes MFA and enrols a Hello PIN. This first sign-in can create a tenant
+device. Then, after reviewing the effective configuration and preparing independent
+recovery access:
 
 ```sh
 sudo omarchy-himmelblau setup --domain example.com --user alice@example.com
 sudo omarchy-himmelblau doctor
 ```
 
-Use `setup --help` for the explicit administrator option. Authenticate the intended
-account through Himmelblau to establish its identity before setup requires NSS
-resolution. The first successful cloud authentication can create a tenant device.
-Do not clear caches or rejoin an existing device to work around a setup failure.
+Use `setup --help` for the explicit administrator option. Do not clear caches or rejoin
+an existing device to work around a setup failure.
 
-After setup, install and activate the plugin from an unlocked desktop, then log out
-and back in before testing the lock. Setup does not restart daemons, authenticate,
+After setup, [install the plugin](#install-the-omarchy-plugin), then log out and back
+in before testing the lock. Setup does not restart daemons, authenticate,
 join a tenant or reload sessions. Root `doctor` checks files and sources; it does not
 test daemon negotiation, authentication or sessions. User `status` performs the same
 checks as `plugin-status`; each command refuses the wrong privilege level.
 
-For a controlled `0.5.2` upgrade, install companion `0.5.3` and native SDDM
-`0.21.0-4` together, run `sudo omarchy-himmelblau repair`, then update the plugin
-while unlocked and restart the shell. Until repair, `doctor`, `setup` and `policy`
-refuse the old theme. The old `0.5.2` plugin can still lock during this transition;
-`status` and `plugin-status` report that it needs updating. See [maintenance](docs/maintenance.md).
+This is a prototype with no in-place upgrades. To change companion versions, run
+`sudo omarchy-himmelblau rollback`, upgrade the packages, then run `setup` again.
+`doctor`, `setup`, `repair` and `policy` refuse state written by another version;
+`rollback` accepts it. State from `0.5.3` and earlier predates the current format and is
+refused by every command: roll it back with the companion that wrote it before
+upgrading. See [maintenance](docs/maintenance.md).
 
 ## Install the Omarchy plugin
 
-After installing and configuring the matching companion packages, run as the target
-user while the desktop is unlocked. Run native `plugin add` **without `--enable`**,
-review its trust prompt, and **answer No when asked to enable the plugin**. Omitting
-`--enable` alone does not suppress that interactive prompt. Do not use `--yes` to
-bypass the trust prompts.
+Run `setup` first. Then, as the target user:
 
 ```sh
-omarchy plugin add https://github.com/9spokes-oss/omarchy-himmelblau.git
-omarchy plugin list --json
+omarchy plugin add https://github.com/9spokes-oss/omarchy-himmelblau.git --enable
+omarchy-himmelblau status
 ```
 
-Confirm the `9spokes.himmelblau-lock` entry has `enabled: false` before proceeding.
-Then use the companion activation flow so dependency and conflict checks run first:
+Review the trust prompt rather than passing `--yes`. Log out and back in before relying
+on the lock.
 
-```sh
-omarchy-himmelblau activate-plugin
-omarchy-restart-shell
-omarchy-himmelblau plugin-status
-```
+- **One lock plugin at a time.** Disable any other lock plugin first
+  (`omarchy plugin disable <id>`): when two are enabled, Omarchy picks one arbitrarily.
+  `status` reports a second one.
+- **Before setup, it's a local-password lock.** Until `setup` has installed
+  `/etc/pam.d/omarchy-himmelblau-lock-password`, the plugin locks with Omarchy's stock
+  password service and says so on the lock screen. An Entra account can't unlock it
+  that way, so run `setup` before relying on it.
+- **Lock-time check.** After locking, a setup check runs once with a 15 s timeout; a
+  failure shows a warning on the locked screen.
 
-If another lock clone is enabled, activation is refused. Disable it with
-`omarchy plugin disable <id>` while unlocked, then run `activate-plugin`.
-If activation fails, stay unlocked, inspect `omarchy plugin list`, disable the fixed
-plugin ID and restore the previous locker before restarting the shell.
-Keep the session unlocked and Stay Awake during activation. A rescan alone does not
-replace `keepLoaded` code; verify the shell is ready before locking.
-
-The published plugin is `9spokes.himmelblau-lock`, a native clone of `omarchy.lock`.
-It does not install packages, request sudo, join a tenant or overwrite existing user
-configuration on installation. If the dedicated PAM file cannot be loaded
-(`/etc/pam.d/omarchy-himmelblau-lock-password`), locking is refused with a desktop
-notification. Idle/suspend callers can remain unlocked in this case; verify lock state.
-After locking, a setup check runs once with a 15 s timeout; failure shows a warning
-on the locked screen. Inspect that warning from recovery access before relying on it.
-
-Plugin and companion versions must match; unreviewed Omarchy source or plugin
-changes are refused. Update them together and repeat the unlocked activation checks.
-The former `enable-user`, `enable-user --upgrade` and `activate-plugin --migrate`
-commands are removed. Disable any old `<user>.lock` clone before activation.
+The plugin `9spokes.himmelblau-lock` is a clone of `omarchy.lock`. It doesn't install
+packages, ask for sudo, join a tenant or overwrite user configuration. Plugin and
+companion versions must match, and `status` refuses unreviewed Omarchy source or plugin
+changes, so update them together.
 
 To remove the plugin, first arrange a verified replacement locker for the work
 account, or end the work desktop and use the local recovery account for the remaining
 rollback. The unmodified stock PAM locker does **not** authenticate a Himmelblau PIN;
 switching a live work desktop straight back to it can strand the next lock.
 
-From an unlocked session, disable `9spokes.himmelblau-lock` through Omarchy, select
-and verify the replacement, and restart the shell before removing the disabled plugin
-with `omarchy plugin remove 9spokes.himmelblau-lock`. Old user clones must be
-checked against the current companion before reuse. Do not remove system dependencies while any session still uses them. Plugin
-removal does not remove credentials, undo a PIN change or delete tenant objects.
+From an unlocked session, disable `9spokes.himmelblau-lock`, enable and verify the
+replacement, and restart the shell before `omarchy plugin remove 9spokes.himmelblau-lock`.
+Don't remove system packages while a session still uses them. Removing the plugin doesn't
+remove credentials, undo a PIN change or delete tenant objects.
 
 ## Login, lock and PIN recovery
 
@@ -174,7 +191,8 @@ independent security principals by this integration.
 
 Before root rollback, disable the clone and exit every session loading it. The command
 refuses live or indeterminate graphical sessions by default. From independent recovery
-access, `recover` restores only known interrupted transaction states. Root rollback
+access, `recover` undoes an interrupted root change, restoring each file's exact bytes,
+owner and mode only if every target is still at its journalled before or after value. Root rollback
 does not remove user clones or hooks, and disabling a plugin leaves loaded code alive
 until the shell exits. Package removal
 alone does not reverse setup, PIN changes, tenant objects or Himmelblau's package hooks.
