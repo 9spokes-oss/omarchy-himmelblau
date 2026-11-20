@@ -1784,6 +1784,74 @@ class CompanionTest(unittest.TestCase):
         m.SYSTEM_LOGIN.chmod(0o644)
         m.doctor()
 
+    def acl_on(self, *targets):
+        """getxattr reporting an ACL for each (path, attribute) in targets."""
+        real = os.getxattr
+        def getxattr(path, attribute, **kwargs):
+            if (Path(path), attribute) in targets: return b'acl'
+            return real(path, attribute, **kwargs)
+        return patch.object(m.os, 'getxattr', getxattr)
+
+    def test_pam_parent_directories_must_be_root_only(self):
+        # A non-root user who can write /etc/pam.d can replace a root-owned 0644 file.
+        def guard(path):
+            if path == m.SYSTEM_LOGIN: raise m.Error('Unsafe state ancestor ownership/mode')
+        with patch.object(m, 'check_state_ancestors', guard):
+            with self.assertRaisesRegex(m.Error, f'parent directory of {m.SYSTEM_LOGIN}: each must be owned by root'):
+                self.setup()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+        pam_d, etc = m.SYSTEM_AUTH.parent, m.SYSTEM_AUTH.parent.parent
+        access, default = 'system.posix_acl_access', 'system.posix_acl_default'
+        # A default ACL on /etc/pam.d is inherited by the file setup writes there.
+        for target in ((pam_d, default), (pam_d, access), (etc, access)):
+            with self.subTest(target), self.acl_on(target):
+                with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {target[0]}$'): self.setup()
+                self.assertFalse(m.STATE.exists())
+        with self.acl_on((etc, default)):
+            self.setup()  # Only the destination directory's default ACL is inherited.
+        with patch.object(m, 'check_state_ancestors', guard):
+            with self.assertRaisesRegex(m.Error, 'parent directory of'): m.doctor()
+        with self.acl_on((pam_d, default)):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {pam_d}'): m.doctor()
+
+    def test_root_changes_refuse_to_drop_an_acl(self):
+        # The journal records bytes, owner and mode: an ACL on a file a root command would
+        # replace or delete could never be put back.
+        self.setup()
+        state = m.STATE.read_bytes(); managed = m.SYSTEM_AUTH.read_bytes()
+        baseline = m.base64.b64decode(m.system_auth_entry(json.loads(state))['restore'])
+        for action, target, data in ((m.rollback, m.PAM, managed), (m.rollback, m.SYSTEM_AUTH, managed),
+                                     (m.repair, m.SYSTEM_AUTH, baseline)):
+            with self.subTest(action.__name__, target=target.name), \
+                    self.acl_on((target, 'system.posix_acl_access')):
+                m.SYSTEM_AUTH.write_bytes(data)
+                with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {target}$'): action()
+                self.assertEqual(m.SYSTEM_AUTH.read_bytes(), data); self.assertTrue(m.PAM.exists())
+                self.assertEqual(m.STATE.read_bytes(), state); self.assertFalse(m.journal_path().exists())
+        m.SYSTEM_AUTH.write_bytes(managed)
+        m.doctor()
+
+    def test_repair_accepts_system_auth_restored_with_its_baseline_metadata(self):
+        m.SYSTEM_AUTH.chmod(0o640)
+        baseline = m.SYSTEM_AUTH.read_bytes()
+        self.setup()
+        managed = m.SYSTEM_AUTH.read_bytes()
+        self.assertEqual(m.SYSTEM_AUTH.stat().st_mode & 0o777, 0o644)
+        m.SYSTEM_AUTH.write_bytes(baseline); m.SYSTEM_AUTH.chmod(0o640)
+        with self.assertRaisesRegex(m.Error, 'Managed file drift'): m.doctor()
+        m.repair()
+        self.assertEqual(m.SYSTEM_AUTH.read_bytes(), managed)
+        self.assertEqual(m.SYSTEM_AUTH.stat().st_mode & 0o777, 0o644)
+        m.doctor()
+        # Only the baseline may carry the baseline's mode, and only that mode.
+        for data, mode in ((baseline, 0o600), (managed, 0o640)):
+            with self.subTest(oct(mode), baseline=data == baseline):
+                m.SYSTEM_AUTH.write_bytes(data); m.SYSTEM_AUTH.chmod(mode)
+                with self.assertRaisesRegex(m.Error, 'permission drift'): m.repair()
+                self.assertEqual(m.SYSTEM_AUTH.stat().st_mode & 0o777, mode)
+        m.SYSTEM_AUTH.write_bytes(managed); m.SYSTEM_AUTH.chmod(0o644)
+        m.doctor()
+
     def test_upgrade_refuses_a_writable_pacnew_or_system_login(self):
         auth, login, _ = self.fake_pambase_release()
         self.start_from('pambase')
@@ -1855,6 +1923,31 @@ class CompanionTest(unittest.TestCase):
         with self.assertRaisesRegex(m.Error, 'Unsafe ownership/mode'): self.setup()
         self.assertFalse(m.STATE.exists())
 
+    def test_native_sddm_pam_hashes_match_the_package_fixtures(self):
+        for path in m.SDDM_PAMS:
+            self.assertEqual(m.digest(self.sddm_fixture('native', path.name)), m.NATIVE_SDDM_PAMS[path.name])
+
+    def test_setup_keeps_an_administrators_edit_to_the_installed_sddm_pam(self):
+        # Omarchy's edit drops the whole faillock preauth line, so an edited preauth line
+        # still produces the .pacsave: only the package's own bytes prove nothing is lost.
+        self.replace_sddm()
+        path = m.SDDM_PAMS[1]
+        edited = path.read_bytes().replace(b'pam_faillock.so preauth', b'pam_faillock.so preauth deny=3')
+        self.assertNotEqual(edited, path.read_bytes())
+        self.assertEqual(m.omarchy_sddm_pam(path, edited), m.pacsave(path).read_bytes())
+        path.write_bytes(edited)
+        with self.assertRaisesRegex(m.Error, f'{path} is not sddm-himmelblau {m.NATIVE_VERSION} as installed'):
+            self.setup()
+        self.assertEqual(path.read_bytes(), edited); self.assertTrue(m.pacsave(path).exists())
+        self.assertFalse(m.STATE.exists())
+
+    def test_setup_refuses_an_sddm_pacsave_with_an_acl(self):
+        self.replace_sddm()
+        saved = m.pacsave(m.SDDM_PAMS[0])
+        with self.acl_on((saved, 'system.posix_acl_access')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {saved}$'): self.setup()
+        self.assertTrue(saved.exists()); self.assertFalse(m.STATE.exists())
+
     def test_interrupted_sddm_pam_restore_recovers_the_package_files(self):
         self.replace_sddm()
         before = {path: path.read_bytes() for path in (*m.SDDM_PAMS, *map(m.pacsave, m.SDDM_PAMS))}
@@ -1912,7 +2005,12 @@ class CompanionTest(unittest.TestCase):
                 ('no restore', broken(lambda s: s['files'][auth].update(
                     restore=None, restore_mode=None, restore_uid=None, restore_gid=None))),
                 ('pambase kind elsewhere', broken(lambda s: s['files'][0 if auth else 1].update(restore_kind='pambase'))),
-                ('no system-auth', broken(lambda s: s['files'].pop(auth)))]:
+                ('no system-auth', broken(lambda s: s['files'].pop(auth))),
+                ('managed twice', broken(lambda s: s['files'].append(dict(s['files'][1 if auth == 0 else 0])))),
+                ('watched and managed', broken(lambda s: s['files'].append(dict(
+                    s['files'][1 if auth == 0 else 0], path=str(m.SYSTEM_LOGIN))))),
+                ('watched and managed, spelled differently', broken(lambda s: s['files'].append(dict(
+                    s['files'][1 if auth == 0 else 0], path=str(m.SYSTEM_LOGIN.parent) + '//system-login'))))]:
             with self.subTest(label):
                 with self.assertRaisesRegex(m.Error, 'Invalid state'): m.check_state(state)
         m.check_state(good)

@@ -200,3 +200,22 @@ class ReleaseTest(unittest.TestCase):
                                     capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 1)
             self.assertIn(b'exact release source checkout', result.stderr)
+
+    def test_installed_pin_takes_its_files_from_the_package_list(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'tools'))
+        try:
+            from native_payload import PayloadError, package_paths
+        finally:
+            sys.path.pop(0)
+        qt5, qt6 = '/usr/lib/qt/qml/SddmComponents/', '/usr/lib/qt6/qml/SddmComponents/'
+        listing = ['/usr/', '/usr/bin/', *NATIVE_PATHS, qt5, qt5 + 'qmldir', qt5 + 'Clock.qml',
+                   qt6, qt6 + 'qmldir', qt6 + 'Clock.qml', '/etc/pam.d/sddm']
+        found = {qt5 + 'qmldir', qt5 + 'Clock.qml', qt6 + 'qmldir', qt6 + 'Clock.qml'}
+        expected = {*NATIVE_PATHS, *found}
+        self.assertEqual(package_paths(listing, found, lambda path: True), expected)
+        # A packaged component deleted on the builder must not drop out of the pin.
+        with self.assertRaisesRegex(PayloadError, 'missing files: ' + re.escape(qt6 + 'Clock.qml')):
+            package_paths(listing, found - {qt6 + 'Clock.qml'}, lambda path: path != qt6 + 'Clock.qml')
+        with self.assertRaisesRegex(PayloadError, 'Not owned by the native package: ' + re.escape(qt5 + 'Extra.qml')):
+            package_paths(listing, found | {qt5 + 'Extra.qml'}, lambda path: True)

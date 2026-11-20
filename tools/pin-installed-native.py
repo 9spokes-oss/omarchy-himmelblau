@@ -18,7 +18,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from native_payload import COMPONENT_PREFIXES, EXECUTABLES, PayloadError, collect  # noqa: E402
+from native_payload import COMPONENT_PREFIXES, PayloadError, collect, package_paths  # noqa: E402
 
 if len(sys.argv) != 4:
     raise SystemExit('Usage: pin-installed-native.py NATIVE_VERSION SOURCE_COMMIT OUTPUT')
@@ -38,15 +38,17 @@ def pacman(*args):
 if pacman('-Q', 'sddm-himmelblau').strip() != f'sddm-himmelblau {version}':
     raise SystemExit(f'sddm-himmelblau {version} is not installed')
 
-paths = set(EXECUTABLES)
+found = set()
 for prefix in COMPONENT_PREFIXES:
     directory = Path(prefix)
     if directory.is_symlink() or not directory.is_dir():
         raise SystemExit('Missing native QML component directory: ' + prefix)
-    paths.update(str(path) for path in directory.rglob('*') if not path.is_dir() or path.is_symlink())
-owners = pacman('-Qqo', *sorted(paths)).split()
-if owners != ['sddm-himmelblau'] * len(paths):
-    raise SystemExit('A pinned native file is not owned by sddm-himmelblau')
+    found.update(str(path) for path in directory.rglob('*') if not path.is_dir() or path.is_symlink())
+try:
+    paths = package_paths(pacman('-Qlq', 'sddm-himmelblau').splitlines(), found,
+                          lambda path: os.path.lexists(path))
+except PayloadError as error:
+    raise SystemExit(str(error)) from None
 
 
 def entry(path):

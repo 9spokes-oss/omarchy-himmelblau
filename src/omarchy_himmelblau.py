@@ -31,6 +31,11 @@ SYSTEM_LOGIN = Path('/etc/pam.d/system-login')  # Watched: must stay pristine pa
 # Omarchy's installer edits SDDM's PAM files. Replacing sddm with the native package saves
 # those edits as .pacsave and installs the defaults; setup puts Omarchy's edits back.
 SDDM_PAMS = (Path('/etc/pam.d/sddm'), Path('/etc/pam.d/sddm-autologin'))
+# sddm-himmelblau NATIVE_VERSION's own copies of SDDM_PAMS, by name.
+NATIVE_SDDM_PAMS = {
+    'sddm': 'd7394292a65ae463926c2c3d2cb4e67bbfeb20995450c8e4c92fe5a28e7c4254',
+    'sddm-autologin': '1a84cf752782b03b53f66188013bf7e4af4f5e6feb7266bfe58c3faaa20777b4',
+}
 # system-auth baselines: pristine pambase, or Omarchy's install-time lockout tuning of it
 # (install/config/increase-lockout-limit.sh). The state's restore_kind names the one setup
 # found; rollback restores it.
@@ -584,6 +589,11 @@ def check_state(state):
             and Path(state['watched'][0]['path']) == SYSTEM_LOGIN
             and state['watched'][0]['pambase'] == state['pambase']):
         raise Error(f'Invalid state file: {STATE}')
+    # One entry per managed path, and none watched: rollback writes every managed path.
+    managed = [Path(entry['path']) for entry in state['files']]
+    if len(set(managed)) != len(managed) or set(managed) & {Path(entry['path'])
+                                                            for entry in state['watched']}:
+        raise Error(f'Invalid state file: {STATE}')
     return state
 
 
@@ -862,17 +872,25 @@ def omarchy_sddm_pam(path, data):
 
 def omarchy_sddm_restores():
     """Writes that put back Omarchy's SDDM PAM edits after the native package replaced
-    sddm: each .pacsave must be exactly Omarchy's edit of the installed file."""
+    sddm: each .pacsave must be exactly Omarchy's edit of the package's file, and the
+    installed file must still be the package's (an administrator's later edit to a line
+    Omarchy's edit drops would otherwise compare equal and be lost)."""
     writes = []
     for path in SDDM_PAMS:
         saved = read(pacsave(path))
         if saved is None:
             continue
         current = read(path)
-        if current is None or omarchy_sddm_pam(path, current) != saved:
+        if current is None or digest(current) != NATIVE_SDDM_PAMS[path.name]:
+            raise Error(f'{path} is not sddm-himmelblau {NATIVE_VERSION} as installed, so '
+                        f'{pacsave(path)} cannot be checked against it; review and merge it '
+                        'by hand, then remove it')
+        if omarchy_sddm_pam(path, current) != saved:
             raise Error(f"{pacsave(path)} is not Omarchy's edit of {path}; review and merge "
                         'it by hand, then remove it')
         require_safe_pam_file(path)
+        # Deleted below: the journal records bytes, owner and mode, never an ACL.
+        require_safe_pam_file(pacsave(path))
         metadata = path.stat()
         writes += [(path, saved, stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid),
                    (pacsave(path), None, 0, 0, 0)]
@@ -919,6 +937,16 @@ def require_safe_pam_file(path):
         raise Error(f'Unsafe ownership/mode on {path}: it must be a regular file owned by root, '
                     'writable only by root')
     no_extended_acl(path)
+    # Whoever can write a parent directory can replace the file, and a default ACL on its
+    # directory would be inherited by the replacement setup writes there.
+    try:
+        check_state_ancestors(path)
+    except Error:
+        raise Error(f'Unsafe ownership/mode on a parent directory of {path}: each must be '
+                    'owned by root and writable only by root') from None
+    no_extended_acl(path.parent)
+    for parent in path.parents[1:]:
+        no_extended_acl(parent, ('system.posix_acl_access',))
 
 
 def pambase_baseline(release):
@@ -1265,6 +1293,8 @@ def repair():
         raise Error(f'{SYSTEM_LOGIN} is not pristine pambase {installed}; '
                     'repair never rewrites it (run rollback, then setup)')
     require_safe_pam_file(SYSTEM_LOGIN)
+    if read(SYSTEM_AUTH) is not None:
+        require_safe_pam_file(SYSTEM_AUTH)
     desired_auth = patched_system_auth(release, system_auth_entry(state)['restore_kind'],
                                        baseline_auth)
     repairs = []
@@ -1274,8 +1304,11 @@ def repair():
         data = read(path)
         if data is not None:
             metadata = path.stat()
-            if (stat.S_IMODE(metadata.st_mode) != entry['mode']
-                    or (metadata.st_uid, metadata.st_gid) != owner()):
+            allowed = [(entry['mode'], *owner())]
+            if path == SYSTEM_AUTH and not upgrade and data == baseline_auth:
+                # Put back as setup found it: the baseline's bytes with their own metadata.
+                allowed.append((entry['restore_mode'], entry['restore_uid'], entry['restore_gid']))
+            if (stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid) not in allowed:
                 raise Error(f'Repair refuses permission drift: {path}')
         if (path == RECOVERY_ACCOUNT and data is None
                 and entry['after'] == digest(identity_file(principal))):
@@ -1386,6 +1419,11 @@ def transact(operation, state, files, directories=(), verify=None):
         check_state_file()
     new_state = serialize_state(state) if state is not None else None
     uid, gid = owner()
+    # The journal records bytes, owner and mode: replacing or deleting a file that carries
+    # an ACL would drop it silently, and recover could not put it back.
+    for path, *_ in files:
+        if read(path) is not None:
+            no_extended_acl(path)
     journal = {
         'journal': JOURNAL_FORMAT, 'operation': operation,
         'state_before': b64(old_state),
@@ -1629,8 +1667,8 @@ def rollback(recovery_only=False):
     print('Root managed files restored; Entra sign-in no longer works on this machine.')
 
 
-def no_extended_acl(path):
-    for attribute in ('system.posix_acl_access', 'system.posix_acl_default'):
+def no_extended_acl(path, attributes=('system.posix_acl_access', 'system.posix_acl_default')):
+    for attribute in attributes:
         try:
             os.getxattr(path, attribute, follow_symlinks=False)
         except OSError as error:

@@ -22,6 +22,21 @@ def selected(path):
     return path in EXECUTABLES or path.startswith(COMPONENT_PREFIXES)
 
 
+def package_paths(listing, found, exists):
+    """The pinned paths of an installed package: every selected file in `listing` (pacman
+    -Qlq, where directories end in '/'). A listed file that no longer `exists` would drop
+    out of a pin taken from the live tree, so it is refused, as is a selected file `found`
+    on disk that the package doesn't own."""
+    paths = {path for path in listing if selected(path) and not path.endswith('/')}
+    missing = sorted(path for path in paths if not exists(path))
+    if missing:
+        raise PayloadError('Installed native package is missing files: ' + ', '.join(missing))
+    unowned = sorted(set(found) - paths)
+    if unowned:
+        raise PayloadError('Not owned by the native package: ' + ', '.join(unowned))
+    return paths
+
+
 def collect(entries):
     """Hash the pinned files among `entries`.
 
