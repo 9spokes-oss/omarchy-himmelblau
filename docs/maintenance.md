@@ -150,8 +150,15 @@ patched stack on Arch's libpam.
 - **Ownership.** Hashes say nothing about who can rewrite a file. `setup`, `repair`,
   `rollback` and `doctor` refuse `system-auth`, `system-login` or an adopted `.pacnew`
   unless it is a regular file owned by root:root, writable only by root, with no special
-  bits or POSIX ACL. The state must hold the same for `system-auth`'s stored rollback
-  owner and mode, and must watch exactly `system-login` for the recorded release.
+  bits or POSIX ACL, and every parent directory is owned by root and writable only by
+  root, with no access ACL (and no default ACL on `/etc/pam.d`, which a replacement
+  would inherit). The state must hold the same for `system-auth`'s stored rollback
+  owner and mode, must watch exactly `system-login` for the recorded release, and must
+  list each managed path once, never a watched one. `repair` accepts `system-auth` put
+  back to its baseline with the baseline's recorded mode, and rewrites it at 0644.
+- **ACLs and the journal.** The journal records bytes, owner and mode. Every root
+  change refuses to replace or delete a file that carries an ACL, since `recover`
+  couldn't put the ACL back.
 - **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
   locked-out user is told why. The dedicated lock service keeps it. Re-running
   Omarchy's lockout sed on the patched file changes nothing.

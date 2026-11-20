@@ -62,7 +62,8 @@ layout lets a successful Entra sign-in skip `pam_shells`, `pam_nologin` and
 `pam_faillock`. `setup` configures system PAM instead. It patches
 `/etc/pam.d/system-auth` so Entra users get the same lockout and account checks as local
 ones, and requires `/etc/pam.d/system-login` to stay pristine. Both files, and any
-`.pacnew` it adopts, must be owned by root, writable only by root and free of ACLs. It accepts pambase
+`.pacnew` it adopts, must be owned by root, writable only by root and free of ACLs, in a
+`/etc/pam.d` only root can write. It accepts pambase
 `20260616-1` as installed, with or without the lockout tuning Omarchy's installer applies
 to `system-auth`, or exactly `aad-tool configure-pam`'s output on either (4.0.8's in both
 files, or in `system-auth` alone once aad-tool skips `system-login`), which it undoes; anything else is refused. `rollback` restores the version setup found, never

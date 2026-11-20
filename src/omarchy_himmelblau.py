@@ -889,8 +889,6 @@ def omarchy_sddm_restores():
             raise Error(f"{pacsave(path)} is not Omarchy's edit of {path}; review and merge "
                         'it by hand, then remove it')
         require_safe_pam_file(path)
-        # Deleted below: the journal records bytes, owner and mode, never an ACL.
-        require_safe_pam_file(pacsave(path))
         metadata = path.stat()
         writes += [(path, saved, stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid),
                    (pacsave(path), None, 0, 0, 0)]
