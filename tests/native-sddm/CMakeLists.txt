@@ -27,3 +27,10 @@ target_include_directories(auth-lifecycle-proofs PRIVATE
  ${SDDM_SOURCE}/src/auth ${SDDM_SOURCE}/src/common ${SDDM_BUILD}/src/common)
 target_link_libraries(auth-lifecycle-proofs Qt6::Core Qt6::Network Qt6::Test Qt6::Qml)
 add_test(NAME auth-lifecycle-proofs COMMAND auth-lifecycle-proofs)
+
+# The greeter's real startup statements on Qt's offscreen platform.
+find_package(Qt6 REQUIRED COMPONENTS Gui)
+add_executable(greeter-lifetime-proofs greeter-lifetime.cpp)
+target_include_directories(greeter-lifetime-proofs PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(greeter-lifetime-proofs Qt6::Gui)
+add_test(NAME greeter-lifetime-proofs COMMAND greeter-lifetime-proofs)

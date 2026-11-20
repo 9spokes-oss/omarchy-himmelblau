@@ -68,6 +68,12 @@ pam = (source / 'src/helper/backend/PamBackend.cpp').read_text()
     pam, ['bool PamBackend::changePassword()'],
     ('PamBackend::', 'FixtureBackend::'), ('oh_recovery_account(', 'fixtureRecoveryAccount(')))
 
+# The greeter's application setup, from constructing QGuiApplication up to its
+# signal handlers: this decides whether closing the views on login quits it.
+greeter = (source / 'src/greeter/GreeterApp.cpp').read_text()
+start = greeter.index('    QGuiApplication app(argc, argv);\n')
+(target / 'GreeterStartup.inc').write_text(greeter[start:greeter.index('    SDDM::SignalHandler s;', start)])
+
 handle = (source / 'src/helper/backend/PamHandle.cpp').read_text()
 (target / 'PamAccountStrict.inc').write_text(methods(
     handle, ['bool PamHandle::acctMgmtStrict()'],

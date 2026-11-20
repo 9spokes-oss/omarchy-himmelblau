@@ -36,7 +36,7 @@ for kind, path in [('native', 'packaging/sddm-himmelblau'), ('companion', 'packa
     recipe = committed(path + '/PKGBUILD').decode().replace('@SOURCE_SHA256@', digest)
     (directory / 'PKGBUILD').write_text(recipe)
     if kind == 'native':
-        for name in ['0000-arch-cmake4.patch', '0001-native-conversation.patch',
+        for name in ['0000-arch-cmake4.patch', '0001-native-conversation.patch', '0002-greeter-keep-running.patch',
                      'sddm-himmelblau-pin-change.pam', 'LGPL-2.1.txt']:
             (directory / name).write_bytes(committed(path + '/' + name))
 print('Clean source export:', commit)

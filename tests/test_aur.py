@@ -66,7 +66,7 @@ class AurRecipeTest(unittest.TestCase):
                                timeout=10, env={'PATH': '/usr/bin:/bin'}).stdout.splitlines()
         committed = {name: digest for name, digest in (line.split() for line in lines)
                      if (ROOT / 'packaging/sddm-himmelblau' / name).is_file()}
-        self.assertEqual(len(committed), 4, lines)
+        self.assertEqual(len(committed), 5, lines)
         for name, digest in committed.items():
             data = (ROOT / 'packaging/sddm-himmelblau' / name).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), digest, name)

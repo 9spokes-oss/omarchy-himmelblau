@@ -6,7 +6,7 @@ pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau inst
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
 license=('MIT')
-depends=('sddm-himmelblau=0.21.0-4' 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
+depends=('sddm-himmelblau=0.21.0-5' 'himmelblau>=4.0.8' 'omarchy' 'python' 'patch' 'pam')
 makedepends=('make')
 # Build from a reviewed checkout; no install hooks or network/source substitution.
 source=('source.tar.gz' 'native-payload.json')

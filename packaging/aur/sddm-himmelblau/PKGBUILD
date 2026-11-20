@@ -4,7 +4,7 @@
 # packaging/sddm-himmelblau/PKGBUILD (tests/test_aur.py checks this).
 pkgname=sddm-himmelblau
 pkgver=0.21.0
-pkgrel=4
+pkgrel=5
 _release=0.6.0
 pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
 arch=('x86_64')
@@ -34,6 +34,7 @@ prepare() {
   cd "sddm-$pkgver"
   patch --batch --fuzz=0 -p1 < "$_recipe/0000-arch-cmake4.patch"
   patch --batch --fuzz=0 -p1 < "$_recipe/0001-native-conversation.patch"
+  patch --batch --fuzz=0 -p1 < "$_recipe/0002-greeter-keep-running.patch"
 }
 
 build() {
