@@ -156,14 +156,23 @@ patched stack on Arch's libpam.
   owner and mode, must watch exactly `system-login` for the recorded release, and must
   list each managed path once, never a watched one. `repair` accepts `system-auth` put
   back to its baseline with the baseline's recorded mode, and rewrites it at 0644.
-- **ACLs and the journal.** The journal records bytes, owner and mode. Every root
-  change, and `recover`, refuses to replace or delete a file that carries an ACL
-  (`state.json` included), or to create one where it would inherit a default ACL, since
-  neither could be put back or rolled back. Each written file and new directory is
-  checked again before it becomes visible.
-- **Changes during a command.** `setup`, `policy`, `repair` and `rollback` pass the bytes
-  they checked to the transaction, which refuses to start if any of those files changed
-  in the meantime (an administrator's or a package's edit is never overwritten unseen).
+- **ACLs and the journal.** The journal records bytes, owner and mode, never an ACL.
+  Before writing the journal, every root change (and `recover`, before its first
+  write) refuses:
+  - a file or directory it would replace, chmod or remove that carries an ACL
+    (`state.json` included);
+  - a file or directory that it, or its undo, would create where a default ACL would
+    be inherited.
+
+  As a backstop, `atomic()` checks each temporary file before renaming it into place.
+  `make_directory()` checks a new directory just after creating it, so for that moment a
+  directory with an inherited ACL exists before the change is undone.
+- **Changes during a command.** `setup`, `policy`, `repair` and `rollback` snapshot every
+  file they may write or delete (bytes, owner and mode, or absence) before their checks.
+  The transaction refuses to start if any of them changed since, including a file that
+  appeared or a permission-only change. The comparison runs just before the journal is
+  written: an edit landing between that comparison and the write it races is not
+  detected. `/etc` offers no lock that would close that window.
 - **State paths.** Every managed and watched path must be absolute and canonical (no
   `.`, `..`, repeated or leading `//`), and `system-auth`'s managed mode must be 0644.
 - **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a

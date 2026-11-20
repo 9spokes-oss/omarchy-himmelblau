@@ -2060,6 +2060,95 @@ class CompanionTest(unittest.TestCase):
                 path.write_bytes(before)
         self.setup()
 
+    def test_setup_refuses_changes_made_before_it_reads_a_file(self):
+        # Setup computes himmelblau.conf from what it reads after the snapshot; an edit in
+        # between must not become the accepted before-image. Files that appear (.pacnew,
+        # .pacsave) and permission-only changes count as changes too.
+        self.replace_sddm()
+        sddm = m.SDDM_PAMS[0]
+        for label, change, path in (
+                ('config', lambda: m.CONFIG.write_bytes(m.CONFIG.read_bytes() + b'# edited\n'), m.CONFIG),
+                ('new pacnew', lambda: m.pacnew(m.SYSTEM_LOGIN).write_bytes(b'new'), m.pacnew(m.SYSTEM_LOGIN)),
+                ('sddm mode', lambda: sddm.chmod(0o600), sddm)):
+            with self.subTest(label):
+                original = m.administrator
+                def administrator(user):
+                    change()
+                    return original(user)
+                with patch.object(m, 'administrator', administrator):
+                    with self.assertRaisesRegex(m.Error, f'{path} changed while setup was checking it'):
+                        self.setup()
+                self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+                self.replace_sddm()
+                m.pacnew(m.SYSTEM_LOGIN).unlink(missing_ok=True)
+                m.CONFIG.write_bytes(self.before[m.CONFIG])
+        m.pacsave(m.SDDM_PAMS[0]).unlink(); m.pacsave(m.SDDM_PAMS[1]).unlink()
+        saved = m.pacsave(sddm)
+        with self.changed_before_transaction(saved, b'appeared\n'):
+            with self.assertRaisesRegex(m.Error, f'{saved} changed while setup was checking it'): self.setup()
+        saved.unlink()
+        self.setup()
+
+    def test_rollback_refuses_an_undo_it_could_not_complete(self):
+        # Deleting the recovery-account file is undone by recreating it, which a default ACL
+        # on its directory would be inherited by: refuse before the journal is written.
+        self.setup()
+        state = m.STATE.read_bytes()
+        parent = m.RECOVERY_ACCOUNT.parent
+        with self.acl_on((parent, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {parent}$'): m.rollback()
+        self.assertEqual(m.STATE.read_bytes(), state); self.assertTrue(m.RECOVERY_ACCOUNT.exists())
+        self.assertFalse(m.journal_path().exists())
+        # A directory record holds owner and mode only: never remove one with an ACL.
+        directory = m.COPY_THEME
+        with self.acl_on((directory, 'system.posix_acl_access')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {directory}$'): m.rollback()
+        self.assertTrue(directory.is_dir()); self.assertEqual(m.STATE.read_bytes(), state)
+        m.rollback()
+
+    def test_setup_refuses_a_theme_copy_that_appears_after_its_checks(self):
+        original = m.transact
+        def transact(*args, **kwargs):
+            m.COPY_THEME.mkdir(); (m.COPY_THEME / 'logo.png').write_bytes(b'planted')
+            return original(*args, **kwargs)
+        with patch.object(m, 'transact', transact):
+            with self.assertRaisesRegex(m.Error, f'{m.COPY_THEME / "logo.png"} changed while setup'): self.setup()
+        self.assertEqual((m.COPY_THEME / 'logo.png').read_bytes(), b'planted'); self.assertFalse(m.STATE.exists())
+
+    def test_rollback_and_recover_refuse_to_recreate_a_directory_under_a_default_acl(self):
+        self.setup()
+        state = m.STATE.read_bytes()
+        themes = m.COPY_THEME.parent
+        with self.acl_on((themes, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {themes}$'): m.rollback()
+        self.assertEqual(m.STATE.read_bytes(), state); self.assertTrue(m.COPY_THEME.is_dir())
+        # Interrupted after removing the theme copy: recover would recreate the directory.
+        original = m.unlink_durable
+        def crash(path, missing_ok=False):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, missing_ok=missing_ok)
+        with patch.object(m, 'unlink_durable', crash):
+            with self.assertRaises(KeyboardInterrupt): m.rollback()
+        self.assertFalse(m.COPY_THEME.exists())
+        with self.acl_on((themes, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {themes}$'): m.recover()
+        self.assertFalse(m.COPY_THEME.exists()); self.assertTrue(m.journal_path().exists())
+        m.recover()
+        self.assertTrue(m.COPY_THEME.is_dir()); m.doctor()
+
+    def test_recover_refuses_to_change_a_directory_with_an_acl(self):
+        original = m.atomic
+        def crash(path, data, mode, *owner):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode, *owner)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        with self.acl_on((m.COPY_THEME, 'system.posix_acl_access')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {m.COPY_THEME}$'): m.recover()
+        self.assertTrue(m.COPY_THEME.is_dir()); self.assertTrue(m.journal_path().exists())
+        m.recover()
+        self.assertFalse(m.COPY_THEME.exists())
+
     def test_repair_and_rollback_refuse_files_changed_after_their_checks(self):
         self.setup()
         state = m.STATE.read_bytes()
@@ -2078,6 +2167,16 @@ class CompanionTest(unittest.TestCase):
                         action()
                 self.assertEqual(m.STATE.read_bytes(), state); self.assertFalse(m.PAM.exists())
                 path.write_bytes(before)
+        # A permission-only change counts too.
+        original = m.transact
+        def chmod_first(*args, **kwargs):
+            m.CONFIG.chmod(0o600)
+            return original(*args, **kwargs)
+        for action, name in ((m.repair, 'repair'), (m.rollback, 'rollback')):
+            with self.subTest(f'{name} mode'), patch.object(m, 'transact', chmod_first):
+                with self.assertRaisesRegex(m.Error, f'{m.CONFIG} changed while {name} was checking it'): action()
+                self.assertEqual(m.STATE.read_bytes(), state)
+            m.CONFIG.chmod(0o644)
         m.repair(); m.doctor()
 
     def test_doctor_reports_an_sddm_pacsave_after_setup(self):
