@@ -205,7 +205,7 @@ class ReleaseTest(unittest.TestCase):
         import sys
         sys.path.insert(0, str(ROOT / 'tools'))
         try:
-            from native_payload import PayloadError, package_paths
+            from native_payload import PayloadError, package_paths, regular_file
         finally:
             sys.path.pop(0)
         qt5, qt6 = '/usr/lib/qt/qml/SddmComponents/', '/usr/lib/qt6/qml/SddmComponents/'
@@ -215,7 +215,15 @@ class ReleaseTest(unittest.TestCase):
         expected = {*NATIVE_PATHS, *found}
         self.assertEqual(package_paths(listing, found, lambda path: True), expected)
         # A packaged component deleted on the builder must not drop out of the pin.
-        with self.assertRaisesRegex(PayloadError, 'missing files: ' + re.escape(qt6 + 'Clock.qml')):
+        with self.assertRaisesRegex(PayloadError, 'missing or not regular files: ' + re.escape(qt6 + 'Clock.qml')):
             package_paths(listing, found - {qt6 + 'Clock.qml'}, lambda path: path != qt6 + 'Clock.qml')
+        # By lstat: a packaged file replaced by a directory or a symlink is not a file.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'file').write_bytes(b'x'); (root / 'directory').mkdir()
+            (root / 'link').symlink_to(root / 'file'); (root / 'dangling').symlink_to(root / 'missing')
+            self.assertEqual({name: regular_file(str(root / name)) for name in
+                              ('file', 'directory', 'link', 'dangling', 'missing')},
+                             {'file': True, 'directory': False, 'link': False, 'dangling': False, 'missing': False})
         with self.assertRaisesRegex(PayloadError, 'Not owned by the native package: ' + re.escape(qt5 + 'Extra.qml')):
             package_paths(listing, found | {qt5 + 'Extra.qml'}, lambda path: True)

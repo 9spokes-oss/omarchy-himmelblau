@@ -161,6 +161,7 @@ def atomic(path, data, mode, uid=None, gid=None):
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
+        no_extended_acl(Path(name))  # An inherited default ACL would outlive the journal.
         os.replace(name, path)
         fsync_directory(path.parent)
     finally:
@@ -552,8 +553,12 @@ def parse_json(data, path):
 
 def check_state(state):
     """Raise Error unless root state is schema 1 with every field the root commands index."""
+    def canonical(path):
+        # Absolute, with no '.', '..', repeated or leading '//' components: one spelling per file.
+        return type(path) is str and path.startswith('/') and not path.startswith('//') \
+            and os.path.normpath(path) == path
     def valid_entry(entry):
-        if not isinstance(entry, dict) or 'restore' not in entry:
+        if not isinstance(entry, dict) or 'restore' not in entry or not canonical(entry.get('path')):
             return False
         fields = {'path': str, 'after': str, 'mode': int, 'restore_kind': str}
         if entry['restore'] is not None:
@@ -564,11 +569,12 @@ def check_state(state):
         # never to metadata a non-root user could write.
         if Path(entry['path']) == SYSTEM_AUTH:
             return (entry['restore_kind'] in BASELINES and entry['restore'] is not None
+                    and entry['mode'] == 0o644
                     and safe_pam_metadata(entry['restore_mode'], entry['restore_uid'],
                                           entry['restore_gid']))
         return entry['restore_kind'] == 'original'
     def valid_watched(entry):
-        return (isinstance(entry, dict)
+        return (isinstance(entry, dict) and canonical(entry.get('path'))
                 and all(type(entry.get(key)) is str for key in ('path', 'sha256', 'pambase')))
     fields = {'version': str, 'domain': str, 'user': str, 'admin': bool, 'apply_policy': bool,
               'identity': dict, 'files': list, 'pambase': str, 'watched': list}
@@ -631,7 +637,7 @@ def planned(path, data, mode):
         return None
     entry = {'path': str(path), 'after': digest(data), 'mode': mode, 'restore': None,
              'restore_mode': None, 'restore_uid': None, 'restore_gid': None,
-             'restore_kind': 'original', 'data': data}
+             'restore_kind': 'original', 'data': data, 'before': before}
     if before is not None:
         metadata = path.stat()
         entry.update(restore=base64.b64encode(before).decode(),
@@ -641,7 +647,7 @@ def planned(path, data, mode):
 
 
 def state_entry(entry):
-    return {key: value for key, value in entry.items() if key != 'data'}
+    return {key: value for key, value in entry.items() if key not in ('data', 'before')}
 
 
 def theme_directories(entries):
@@ -693,8 +699,8 @@ def setup(domain, user, admin=False):
     for path in (SYSTEM_AUTH, SYSTEM_LOGIN):
         if read(pacnew(path)) is not None or pacnew(path).is_symlink():
             raise Error(f'Pending pambase update: {pacnew(path)}; merge it first')
-    kind, baseline_auth, pristine_login = pambase_baseline(release)
-    sddm_pams = omarchy_sddm_restores()
+    kind, baseline_auth, pristine_login, pam_seen = pambase_baseline(release)
+    sddm_pams, sddm_seen = omarchy_sddm_restores()
     principal = administrator(user)
     recovery_parent()
     if read(RECOVERY_ACCOUNT) is not None:
@@ -760,16 +766,21 @@ def setup(domain, user, admin=False):
              'watched': [{'path': str(SYSTEM_LOGIN), 'sha256': digest(pristine_login),
                           'pambase': version}]}
     files = [(Path(entry['path']), entry['data'], entry['mode'], *owner()) for entry in changes]
-    if read(SYSTEM_LOGIN) != pristine_login:
+    if pam_seen[SYSTEM_LOGIN] != pristine_login:
         # Undo aad-tool's system-login lines. Watched, not owned: rollback never writes it.
         metadata = SYSTEM_LOGIN.stat()
         files.append((SYSTEM_LOGIN, pristine_login, stat.S_IMODE(metadata.st_mode),
                       metadata.st_uid, metadata.st_gid))
     # Restored, not owned: rollback leaves Omarchy's SDDM PAM edits in place.
     files += sddm_pams
+    # Every file must still be what preflight checked (system-auth by its baseline check).
+    expected = {Path(entry['path']): entry['before'] for entry in changes}
+    expected.update(pam_seen)
+    expected.update(sddm_seen)
     # A failed setup runs from a live session, so its undo skips the locker check.
     transact('setup', state, files,
-             [(directory, 0o755) for directory in theme_directories(changes)])  # Public greeter assets.
+             [(directory, 0o755) for directory in theme_directories(changes)],  # Public greeter assets.
+             expected=expected)
     print('Root setup complete.')
 
 
@@ -805,7 +816,8 @@ def policy(enable):
     else:
         entry['after'] = digest(after)  # Preserve the original setup rollback bytes.
     state['apply_policy'] = enable
-    transact('policy', state, [(CONFIG, after, 0o644, *owner())], verify=verify_root)
+    transact('policy', state, [(CONFIG, after, 0o644, *owner())], verify=verify_root,
+             expected={CONFIG: before})
     print(f'Set apply_policy = {str(enable).lower()}.')
 
 
@@ -875,7 +887,7 @@ def omarchy_sddm_restores():
     sddm: each .pacsave must be exactly Omarchy's edit of the package's file, and the
     installed file must still be the package's (an administrator's later edit to a line
     Omarchy's edit drops would otherwise compare equal and be lost)."""
-    writes = []
+    writes, seen = [], {}
     for path in SDDM_PAMS:
         saved = read(pacsave(path))
         if saved is None:
@@ -892,7 +904,8 @@ def omarchy_sddm_restores():
         metadata = path.stat()
         writes += [(path, saved, stat.S_IMODE(metadata.st_mode), metadata.st_uid, metadata.st_gid),
                    (pacsave(path), None, 0, 0, 0)]
-    return writes
+        seen.update({path: current, pacsave(path): saved})
+    return writes, seen
 
 
 def omarchy_tuned(data):
@@ -948,14 +961,15 @@ def require_safe_pam_file(path):
 
 
 def pambase_baseline(release):
-    """(baseline kind, system-auth baseline bytes, pristine system-login bytes), from the
-    files as they are now. Accepts a baseline system-auth with pristine system-login, or
+    """(baseline kind, system-auth baseline bytes, pristine system-login bytes, {path:
+    bytes checked}), from the files as they are now. Accepts a baseline system-auth with pristine system-login, or
     aad-tool's output on them: in both files (4.0.8), or in system-auth alone (aad-tool
     once it skips a file that includes another configured one). aad-tool output is proved
     by hash, and by stripping its lines back to the baseline and pristine hashes."""
     auth, login = read(SYSTEM_AUTH), read(SYSTEM_LOGIN)
     if auth is None or login is None:
         raise Error('Missing pambase PAM files')
+    seen = {SYSTEM_AUTH: auth, SYSTEM_LOGIN: login}
     # setup keeps system-auth's metadata as its rollback target and system-login's as is.
     require_safe_pam_file(SYSTEM_AUTH)
     require_safe_pam_file(SYSTEM_LOGIN)
@@ -963,11 +977,11 @@ def pambase_baseline(release):
     if digest(login) == release['system-login']:
         for kind in BASELINES:
             if digest(auth) == baselines[kind]['system-auth']:
-                return kind, auth, login
+                return kind, auth, login, seen
             if digest(auth) == baselines[kind]['aad-tool']:
                 auth = without_aad_tool(auth)
                 if auth is not None and digest(auth) == baselines[kind]['system-auth']:
-                    return kind, auth, login
+                    return kind, auth, login, seen
                 break
     elif digest(login) == release['aad-tool-system-login']:
         for kind in BASELINES:
@@ -976,7 +990,7 @@ def pambase_baseline(release):
                 if (auth is not None and login is not None
                         and digest(auth) == baselines[kind]['system-auth']
                         and digest(login) == release['system-login']):
-                    return kind, auth, login
+                    return kind, auth, login, seen
                 break
     raise Error(f'{SYSTEM_AUTH} and {SYSTEM_LOGIN} must both be pambase as installed (with or '
                 "without Omarchy's lockout tuning), or exactly aad-tool configure-pam "
@@ -1277,6 +1291,7 @@ def repair():
     if theme_entry is None or theme_entry['after'] != digest(theme):
         raise Error('Unsupported managed SDDM theme state')
     installed = installed_pambase()
+    pending = read(pacnew(SYSTEM_AUTH))  # Upgrade only; checked again below.
     if installed != state['pambase']:
         # Accept a pambase upgrade only as the installed release's exact pristine files.
         release, baseline_auth, record = pambase_upgrade(state, installed)
@@ -1287,9 +1302,11 @@ def repair():
         record, upgrade = None, False
         if read(pacnew(SYSTEM_AUTH)) is not None:
             raise Error(f'{pacnew(SYSTEM_AUTH)} exists but pambase is unchanged; review it by hand')
-    if digest(read(SYSTEM_LOGIN) or b'') != release['system-login']:
+    login = read(SYSTEM_LOGIN)
+    if digest(login or b'') != release['system-login']:
         raise Error(f'{SYSTEM_LOGIN} is not pristine pambase {installed}; '
                     'repair never rewrites it (run rollback, then setup)')
+    expected = {SYSTEM_LOGIN: login, pacnew(SYSTEM_AUTH): pending}
     require_safe_pam_file(SYSTEM_LOGIN)
     if read(SYSTEM_AUTH) is not None:
         require_safe_pam_file(SYSTEM_AUTH)
@@ -1299,7 +1316,7 @@ def repair():
     # Full file/source/configuration preflight precedes journal or managed writes.
     for entry in state['files']:
         path = Path(entry['path'])
-        data = read(path)
+        data = expected[path] = read(path)
         if data is not None:
             metadata = path.stat()
             allowed = [(entry['mode'], *owner())]
@@ -1345,7 +1362,7 @@ def repair():
         if read(pacnew(SYSTEM_AUTH)) is not None:
             repairs.append((pacnew(SYSTEM_AUTH), None, 0, 0, 0))
     transact('repair', state, repairs, [(directory, 0o755) for directory in directories],
-             verify=verify_root)
+             verify=verify_root, expected=expected)
     print('Root repair complete.')
 
 
@@ -1395,13 +1412,14 @@ def make_directory(path, mode):
     finally:
         os.umask(previous)
     fsync_directory(path.parent)
+    no_extended_acl(path)
 
 
 def depth(entry):
     return len(Path(entry['path']).parts)
 
 
-def transact(operation, state, files, directories=(), verify=None):
+def transact(operation, state, files, directories=(), verify=None, expected=None):
     """Apply one journalled root change.
 
     files: (path, data or None to delete, mode, uid, gid), applied in order.
@@ -1409,6 +1427,7 @@ def transact(operation, state, files, directories=(), verify=None):
     files, removed (deepest first, must be empty) after them.
     state: the new state, or None to delete the state file.
     verify: called after the commit; an exception undoes the whole operation.
+    expected: {path: bytes or None} the operation checked; any change since is refused.
     """
     check_state_directory()
     prepare_state_directory()
@@ -1417,11 +1436,14 @@ def transact(operation, state, files, directories=(), verify=None):
         check_state_file()
     new_state = serialize_state(state) if state is not None else None
     uid, gid = owner()
-    # The journal records bytes, owner and mode: replacing or deleting a file that carries
-    # an ACL would drop it silently, and recover could not put it back.
-    for path, *_ in files:
-        if read(path) is not None:
-            no_extended_acl(path)
+    # Everything this change was checked against must still be as it was.
+    for path, data in (expected or {}).items():
+        if read(path) != data:
+            raise Error(f'{path} changed while {operation} was checking it; nothing was '
+                        f'written: review it, then run {operation} again')
+    refuse_acl_loss([STATE, *(path for path, *_ in files)])
+    # New directories hold only these files; make_directory() checks each one it creates.
+    refuse_inherited_acl([STATE, journal_path(), *(path for path, data, *_ in files if data is not None)])
     journal = {
         'journal': JOURNAL_FORMAT, 'operation': operation,
         'state_before': b64(old_state),
@@ -1506,6 +1528,9 @@ def restore_journal(journal):
     for entry in journal['files']:
         if not matches_file(file_record(Path(entry['path'])), entry['before'], entry['after']):
             raise Error(f'Recovery refuses unknown target drift: {entry["path"]}')
+    refuse_acl_loss([STATE, *(Path(entry['path']) for entry in journal['files'])])
+    refuse_inherited_acl([STATE, *(Path(entry['path']) for entry in journal['files']
+                                   if entry['before'] is not None)])
     for entry in sorted(journal['directories'], key=depth):
         before, path = entry['before'], Path(entry['path'])
         if before is None:
@@ -1623,6 +1648,8 @@ def rollback(recovery_only=False):
     # While pambase is unchanged, everything rollback needs is in the root-owned state;
     # the running package's supported list is consulted only after an upgrade.
     installed = installed_pambase()
+    # Everything checked below must still be as it was when the transaction starts.
+    checked = {SYSTEM_LOGIN: read(SYSTEM_LOGIN), pacnew(SYSTEM_AUTH): read(pacnew(SYSTEM_AUTH))}
     extra = []
     auth = system_auth_entry(state)
     auth_target = (base64.b64decode(auth['restore']), auth['restore_mode'],
@@ -1650,6 +1677,7 @@ def rollback(recovery_only=False):
     uid, gid = owner()
     for entry in state['files']:
         current = file_record(Path(entry['path']))
+        checked[Path(entry['path'])] = None if current is None else base64.b64decode(current['data'])
         restore = None if entry['restore'] is None else {
             'data': entry['restore'], 'mode': entry['restore_mode'],
             'uid': entry['restore_uid'], 'gid': entry['restore_gid']}
@@ -1661,8 +1689,27 @@ def rollback(recovery_only=False):
               None if entry['restore'] is None else base64.b64decode(entry['restore']),
               entry['restore_mode'], entry['restore_uid'], entry['restore_gid'])
              for entry in reversed(state['files'])]
-    transact('rollback', None, files + extra, [(path, None) for path in directories])
+    transact('rollback', None, files + extra, [(path, None) for path in directories],
+             expected=checked)
     print('Root managed files restored; Entra sign-in no longer works on this machine.')
+
+
+def refuse_acl_loss(paths):
+    """The journal records bytes, owner and mode: replacing or deleting a file that carries
+    an ACL would drop it silently, and recover could not put it back."""
+    for path in paths:
+        if read(path) is not None:
+            no_extended_acl(path)
+
+
+def refuse_inherited_acl(paths):
+    """A file or directory created at each path would inherit its nearest existing
+    ancestor's default ACL, which the journal can't record and rollback would refuse."""
+    for path in paths:
+        parent = path.parent
+        while not parent.exists():
+            parent = parent.parent
+        no_extended_acl(parent, ('system.posix_acl_default',))
 
 
 def no_extended_acl(path, attributes=('system.posix_acl_access', 'system.posix_acl_default')):

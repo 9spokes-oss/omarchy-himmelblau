@@ -157,8 +157,15 @@ patched stack on Arch's libpam.
   list each managed path once, never a watched one. `repair` accepts `system-auth` put
   back to its baseline with the baseline's recorded mode, and rewrites it at 0644.
 - **ACLs and the journal.** The journal records bytes, owner and mode. Every root
-  change refuses to replace or delete a file that carries an ACL, since `recover`
-  couldn't put the ACL back.
+  change, and `recover`, refuses to replace or delete a file that carries an ACL
+  (`state.json` included), or to create one where it would inherit a default ACL, since
+  neither could be put back or rolled back. Each written file and new directory is
+  checked again before it becomes visible.
+- **Changes during a command.** `setup`, `policy`, `repair` and `rollback` pass the bytes
+  they checked to the transaction, which refuses to start if any of those files changed
+  in the meantime (an administrator's or a package's edit is never overwritten unseen).
+- **State paths.** Every managed and watched path must be absolute and canonical (no
+  `.`, `..`, repeated or leading `//`), and `system-auth`'s managed mode must be 0644.
 - **Omarchy's `silent`.** The patched `preauth` line has no `silent`, by design: a
   locked-out user is told why. The dedicated lock service keeps it. Re-running
   Omarchy's lockout sed on the patched file changes nothing.

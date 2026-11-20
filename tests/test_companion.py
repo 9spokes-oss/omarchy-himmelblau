@@ -1808,7 +1808,12 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {target[0]}$'): self.setup()
                 self.assertFalse(m.STATE.exists())
         with self.acl_on((etc, default)):
-            self.setup()  # Only the destination directory's default ACL is inherited.
+            # A replacement in /etc/pam.d inherits only that directory's default ACL ...
+            m.require_safe_pam_file(m.SYSTEM_AUTH)
+            # ... but setup also creates /etc/sddm.conf.d, which would inherit /etc's.
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {etc}$'): self.setup()
+            self.assertFalse(m.STATE.exists())
+        self.setup()
         with patch.object(m, 'check_state_ancestors', guard):
             with self.assertRaisesRegex(m.Error, 'parent directory of'): m.doctor()
         with self.acl_on((pam_d, default)):
@@ -1961,6 +1966,120 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual({path: path.read_bytes() for path in before}, before)
         self.assertFalse(m.STATE.exists())
 
+    def test_setup_refuses_a_destination_that_would_inherit_a_default_acl(self):
+        # The recovery-account file would inherit it; rollback could then never delete it.
+        parent = m.RECOVERY_ACCOUNT.parent
+        with self.acl_on((parent, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {parent}$'): self.setup()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.RECOVERY_ACCOUNT.exists())
+        self.assertFalse(m.journal_path().exists())
+
+    def test_written_inodes_are_checked_for_an_inherited_acl(self):
+        # Backstop for a default ACL added after preflight: the temporary inode and any new
+        # directory are checked before they become visible, and the change is undone.
+        target = self.base / 'etc/acl-check'
+        real = os.getxattr
+        def getxattr(path, attribute, **kwargs):
+            if Path(path).name.startswith('.himmelblau-') or Path(path) == self.base / 'new-directory':
+                return b'acl'
+            return real(path, attribute, **kwargs)
+        with patch.object(m.os, 'getxattr', getxattr):
+            with self.assertRaisesRegex(m.Error, 'Extended ACL refused'): m.atomic(target, b'data', 0o644)
+            with self.assertRaisesRegex(m.Error, 'Extended ACL refused'):
+                m.make_directory(self.base / 'new-directory', 0o755)
+        self.assertFalse(target.exists())
+        self.assertEqual([path.name for path in target.parent.iterdir() if path.name.startswith('.himmelblau-')], [])
+
+    def test_recover_refuses_to_drop_an_acl(self):
+        original = m.atomic
+        def crash(path, data, mode, *owner):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode, *owner)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        pam = m.PAM.read_bytes()
+        for target in (m.PAM, m.SYSTEM_AUTH):
+            with self.subTest(target.name), self.acl_on((target, 'system.posix_acl_access')):
+                with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {target}$'): m.recover()
+                self.assertEqual(m.PAM.read_bytes(), pam); self.assertTrue(m.journal_path().exists())
+        m.recover()
+        self.assertFalse(m.PAM.exists()); self.assertFalse(m.journal_path().exists())
+
+    def test_root_changes_refuse_a_state_directory_with_a_default_acl(self):
+        # state.json and the journal would inherit it.
+        self.setup()
+        state = m.STATE.read_bytes()
+        with self.acl_on((m.STATE.parent, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {m.STATE.parent}$'): m.policy(True)
+        self.assertEqual(m.STATE.read_bytes(), state); self.assertFalse(m.journal_path().exists())
+
+    def test_recover_refuses_to_recreate_a_file_that_would_inherit_an_acl(self):
+        original = m.atomic
+        def crash(path, data, mode, *owner):
+            if path == m.STATE: raise KeyboardInterrupt
+            return original(path, data, mode, *owner)
+        with patch.object(m, 'atomic', crash):
+            with self.assertRaises(KeyboardInterrupt): self.setup()
+        managed = m.SYSTEM_AUTH.read_bytes()
+        with self.acl_on((m.SYSTEM_AUTH.parent, 'system.posix_acl_default')):
+            with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {m.SYSTEM_AUTH.parent}$'): m.recover()
+        self.assertEqual(m.SYSTEM_AUTH.read_bytes(), managed); self.assertTrue(m.journal_path().exists())
+        m.recover()
+        self.assertNotEqual(m.SYSTEM_AUTH.read_bytes(), managed)
+
+    def test_root_changes_refuse_to_drop_an_acl_on_the_state_file(self):
+        self.setup()
+        state = m.STATE.read_bytes()
+        for action in (m.rollback, lambda: m.policy(True)):
+            with self.subTest(action), self.acl_on((m.STATE, 'system.posix_acl_access')):
+                with self.assertRaisesRegex(m.Error, f'Extended ACL refused .*: {m.STATE}$'): action()
+                self.assertEqual(m.STATE.read_bytes(), state); self.assertTrue(m.PAM.exists())
+
+    def changed_before_transaction(self, path, data):
+        """transact() that first changes path, as an administrator or package might
+        between a command's checks and its transaction."""
+        original = m.transact
+        def transact(*args, **kwargs):
+            path.write_bytes(data)
+            return original(*args, **kwargs)
+        return patch.object(m, 'transact', transact)
+
+    def test_setup_refuses_files_changed_after_its_checks(self):
+        self.replace_sddm()
+        sddm, saved = m.SDDM_PAMS[1], m.pacsave(m.SDDM_PAMS[1])
+        for path in (sddm, saved, m.SYSTEM_AUTH, m.SYSTEM_LOGIN, m.CONFIG):
+            with self.subTest(path.name):
+                before = path.read_bytes()
+                edited = before + b'# edited during setup\n'
+                with self.changed_before_transaction(path, edited):
+                    with self.assertRaisesRegex(m.Error, f'{path} changed while setup was checking it'):
+                        self.setup()
+                self.assertEqual(path.read_bytes(), edited)
+                self.assertFalse(m.STATE.exists()); self.assertFalse(m.PAM.exists())
+                self.assertTrue(saved.exists())
+                path.write_bytes(before)
+        self.setup()
+
+    def test_repair_and_rollback_refuse_files_changed_after_their_checks(self):
+        self.setup()
+        state = m.STATE.read_bytes()
+        before = m.CONFIG.read_bytes()
+        with self.changed_before_transaction(m.CONFIG, before + b'# edited\n'):
+            with self.assertRaisesRegex(m.Error, f'{m.CONFIG} changed while policy was checking it'):
+                m.policy(True)
+        self.assertEqual(m.STATE.read_bytes(), state); m.CONFIG.write_bytes(before)
+        m.PAM.unlink()  # Something for repair to do.
+        for action, name, path in ((m.repair, 'repair', m.SYSTEM_LOGIN), (m.repair, 'repair', m.CONFIG),
+                                   (m.rollback, 'rollback', m.SYSTEM_LOGIN), (m.rollback, 'rollback', m.CONFIG)):
+            with self.subTest(name, path=path.name):
+                before = path.read_bytes()
+                with self.changed_before_transaction(path, before + b'# edited\n'):
+                    with self.assertRaisesRegex(m.Error, f'{path} changed while {name} was checking it'):
+                        action()
+                self.assertEqual(m.STATE.read_bytes(), state); self.assertFalse(m.PAM.exists())
+                path.write_bytes(before)
+        m.repair(); m.doctor()
+
     def test_doctor_reports_an_sddm_pacsave_after_setup(self):
         self.setup()
         for path in m.SDDM_PAMS:
@@ -2010,7 +2129,14 @@ class CompanionTest(unittest.TestCase):
                 ('watched and managed', broken(lambda s: s['files'].append(dict(
                     s['files'][1 if auth == 0 else 0], path=str(m.SYSTEM_LOGIN))))),
                 ('watched and managed, spelled differently', broken(lambda s: s['files'].append(dict(
-                    s['files'][1 if auth == 0 else 0], path=str(m.SYSTEM_LOGIN.parent) + '//system-login'))))]:
+                    s['files'][1 if auth == 0 else 0], path=str(m.SYSTEM_LOGIN.parent) + '//system-login')))),
+                ('managed system-auth mode', broken(lambda s: s['files'][auth].update(mode=0o640))),
+                *((f'noncanonical {spelling}', broken(lambda s, spelling=spelling: s['files'][0 if auth else 1].update(
+                    path=spelling.format(s['files'][0 if auth else 1]['path']))))
+                  for spelling in ('/{}', '{}/', '{}/.', '/tmp/../{}', 'relative/path')),
+                *((f'noncanonical watched {spelling}', broken(lambda s, spelling=spelling: s['watched'][0].update(
+                    path=spelling.format(s['watched'][0]['path']))))
+                  for spelling in ('/{}', '{}/.', str(m.SYSTEM_LOGIN.parent) + '/../pam.d/system-login'))]:
             with self.subTest(label):
                 with self.assertRaisesRegex(m.Error, 'Invalid state'): m.check_state(state)
         m.check_state(good)

@@ -74,7 +74,7 @@ GitHub release archive instead of a local export.
 - **The native pin.** A local build has no published native artifact, so the AUR
   companion pins the files of the *installed* `sddm-himmelblau` when it is built
   (`tools/pin-installed-native.py`), taking the list from `pacman -Qlq`, so a packaged
-  file missing on the builder fails the build. The manifest is marked `"build": "local"`.
+  file that is missing on the builder, or no longer a regular file, fails the build. The manifest is marked `"build": "local"`.
   `doctor` still detects later changes to those files. That they came from the
   reviewed source rests on the recipes' pinned archive checksums, plus the
   companion's check that the tag still points at the reviewed commit.

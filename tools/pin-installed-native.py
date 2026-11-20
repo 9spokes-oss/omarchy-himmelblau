@@ -45,8 +45,7 @@ for prefix in COMPONENT_PREFIXES:
         raise SystemExit('Missing native QML component directory: ' + prefix)
     found.update(str(path) for path in directory.rglob('*') if not path.is_dir() or path.is_symlink())
 try:
-    paths = package_paths(pacman('-Qlq', 'sddm-himmelblau').splitlines(), found,
-                          lambda path: os.path.lexists(path))
+    paths = package_paths(pacman('-Qlq', 'sddm-himmelblau').splitlines(), found)
 except PayloadError as error:
     raise SystemExit(str(error)) from None
 
