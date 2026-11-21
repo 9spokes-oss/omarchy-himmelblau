@@ -104,8 +104,25 @@ SDDM autologin) and brought current with `omarchy update`, using companion sourc
   the right one. The lock authenticated through `omarchy-himmelblau-lock-password`, the
   faillock tally was empty after the success, and `doctor` stayed clean.
 
+On 2026-11-20, on the same VM, after the review fixes merged as `0e59935`:
+
+- The companion was rebuilt from `0e59935` with its AUR recipe and reinstalled. `doctor`
+  was clean, including the parent-directory and ACL checks against the real
+  `/etc/pam.d`, and `setup` reported no changes.
+- The user removed the plugin copied from a local repository and added it from GitHub
+  (`omarchy plugin add https://github.com/9spokes-oss/omarchy-himmelblau.git --enable`),
+  answering Omarchy's trust prompt. The clone was `0e59935`, and `status` passed.
+- After logging out and back in, the user locked, entered a wrong PIN, then unlocked with
+  the right one. Both attempts went through `omarchy-himmelblau-lock-password`, the
+  faillock tally was empty afterwards, and `doctor` stayed clean.
+
+One sign-in that day, the first after the greeter had run for about 34 hours, stalled for
+30 seconds between switching to the user's VT and starting the session. SDDM logged
+`Session started false` and the user saw a black screen; the compositor started just
+after. The next sign-in started at once. The cause isn't established.
+
 Not covered: disk-encrypted installs (where Omarchy enables autologin), PIN reset,
-rollback and upgrade on this VM, and the published GitHub plugin source.
+and rollback and upgrade on this VM.
 
 ## Validation procedure
 
