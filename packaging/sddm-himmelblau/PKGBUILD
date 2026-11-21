@@ -2,7 +2,7 @@
 # Build/check from the reviewed companion checkout; never run as root.
 pkgname=sddm-himmelblau
 pkgver=0.21.0
-pkgrel=4
+pkgrel=5
 pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
@@ -20,12 +20,13 @@ backup=('usr/share/sddm/scripts/Xsetup' 'usr/share/sddm/scripts/Xstop'
         'etc/pam.d/sddm' 'etc/pam.d/sddm-autologin' 'etc/pam.d/sddm-greeter'
         'etc/pam.d/sddm-himmelblau-pin-change')
 source=("sddm-$pkgver.tar.gz::https://codeload.github.com/sddm/sddm/tar.gz/refs/tags/v$pkgver"
-        '0000-arch-cmake4.patch' '0001-native-conversation.patch'
+        '0000-arch-cmake4.patch' '0001-native-conversation.patch' '0002-greeter-keep-running.patch'
         'sddm-himmelblau-pin-change.pam' 'LGPL-2.1.txt' 'source.tar.gz')
 # Updated by the reviewed patch/provenance export; no SKIP checksums.
 sha256sums=('f895de2683627e969e4849dbfbbb2b500787481ca5ba0de6d6dfdae5f1549abf'
              '7f6ae3250f72a7de65e4b622d4396895005c73ee1e91c5901272c37e2c83bd05'
              'a3f8bc7f74dae8c3466144442be24152fa8364abebc58c234d89ca9d6c6f720c'
+             '635c8aa4751879548cb7ca69635cdce2db356c7549fa1af853da764a59570dd5'
              'ed27b1e7ccacf252c38006591cbd8526e02b566601982c88e2ba9ec290b9f335'
              'dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551'
              '@SOURCE_SHA256@')
@@ -34,6 +35,7 @@ prepare() {
   cd "sddm-$pkgver"
   patch --batch --fuzz=0 -p1 < "$srcdir/0000-arch-cmake4.patch"
   patch --batch --fuzz=0 -p1 < "$srcdir/0001-native-conversation.patch"
+  patch --batch --fuzz=0 -p1 < "$srcdir/0002-greeter-keep-running.patch"
 }
 
 build() {

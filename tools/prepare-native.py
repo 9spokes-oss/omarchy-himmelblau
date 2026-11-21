@@ -25,7 +25,8 @@ with tarfile.open(archive) as source:
     source.extractall(destination, filter='data')
 tree = destination / ('sddm-' + provenance['baseline_tag'].removeprefix('v'))
 for name, key in [('0000-arch-cmake4.patch', 'arch_patch_sha256'),
-                  ('0001-native-conversation.patch', 'native_patch_sha256')]:
+                  ('0001-native-conversation.patch', 'native_patch_sha256'),
+                  ('0002-greeter-keep-running.patch', 'greeter_patch_sha256')]:
     patch = (recipe / name).read_bytes()
     if hashlib.sha256(patch).hexdigest() != provenance[key]:
         raise SystemExit('Patch checksum mismatch: ' + name)

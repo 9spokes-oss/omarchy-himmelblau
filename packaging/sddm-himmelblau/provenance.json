@@ -6,6 +6,8 @@
   "arch_cmake_commit": "228778c2b4b7e26db1e1d69fe484ed75c5791c3a",
   "arch_patch_sha256": "7f6ae3250f72a7de65e4b622d4396895005c73ee1e91c5901272c37e2c83bd05",
   "native_patch_sha256": "a3f8bc7f74dae8c3466144442be24152fa8364abebc58c234d89ca9d6c6f720c",
+  "greeter_upstream_commit": "da0b64d8e2378c4bce16cbea6cac2ffc89ad1a4a",
+  "greeter_patch_sha256": "635c8aa4751879548cb7ca69635cdce2db356c7549fa1af853da764a59570dd5",
   "result_files": {
     "src/auth/Auth.cpp": "3bf4654c94cf0cca096f0e3567929d97d104894ffa1185d645b0a39794598aa1",
     "src/auth/Auth.h": "eae7a44af536029a5e3f3055a791a7d1351cbd732167a2db59d0dd683e82a9f3",
@@ -22,6 +24,7 @@
     "src/daemon/SocketServer.h": "90731dfa1d46eb8ecc7faf75cfb4935d318458280121eb4903db19877c32a42a",
     "src/greeter/GreeterProxy.cpp": "badfbb0a0e99f11298339a64f44c2e0a749406415f5dd5f61bd15d60ef665516",
     "src/greeter/GreeterProxy.h": "eb632a876aaff8d765d411d777651c682dffa41d43ef752ca4624ab61582529b",
+    "src/greeter/GreeterApp.cpp": "d04132c1ff60ced1422d74a60ae63e461adda0b990a6be443ce4133456b4dace",
     "src/helper/Backend.h": "971f895699ff2a729d9d036289c540f917a9b5b2a50fcaa0603e3e4fef856705",
     "src/helper/HelperApp.cpp": "3b6cb0bcd2327854c5ab74b30e3df06c15b22b4264a10e6b68c322f5ed17d90a",
     "src/helper/HelperApp.h": "1e139604915e75a27cc37bf164e9d8318d3b43362bb6077f452cd9db27cc9bc0",

@@ -5,7 +5,7 @@
 pkgname=omarchy-himmelblau
 pkgver=0.6.0
 pkgrel=1
-_native=0.21.0-4
+_native=0.21.0-5
 _commit=@RELEASE_COMMIT@
 pkgdesc='Experimental explicit Omarchy companion for an existing Himmelblau installation'
 arch=('x86_64')
