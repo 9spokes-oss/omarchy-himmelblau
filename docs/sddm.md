@@ -22,6 +22,22 @@ SDDM 0.21.0's greeter quits as soon as a login succeeds, and its compositor tear
 
 Cancelling cannot undo a PIN change that PAM has already committed; the next login shows which PIN is current. The lock screen uses its own unprivileged helper, limited to the current user; the greeter does not reuse it.
 
+## Upstream watch
+
+`sddm-himmelblau` replaces Arch's `sddm`, so its fixes are ours to carry. The daily [Upstream SDDM workflow](../.github/workflows/upstream-sddm.yml) runs `tools/check-upstream-sddm.py` (locally: `python3 tools/check-upstream-sddm.py`, add `--build` on a machine with the `native` job's build dependencies). It checks:
+
+- **Arch's packaging** (`archlinux/packaging/packages/sddm` on gitlab.archlinux.org). It replays Arch's `prepare()` (the `v$pkgver` tag plus Arch's cherry-picks), applies our series with the PKGBUILD's `patch --fuzz=0` and `--forward`, then builds Qt6 and Qt5 and runs the native proofs. A patch whose upstream commit the tree already has is skipped: 0000 is our copy of Arch's cherry-pick 228778c, 0002 is upstream da0b64d. The baseline is `arch_packaging_commit` in `provenance.json`: a different `pkgver`, `pkgrel` or cherry-pick list from that commit's PKGBUILD alerts, as does any `source=()` or `prepare()` step the check cannot replay, or a moved `baseline_tag`.
+- **Upstream releases.** Any `sddm/sddm` tag newer than `baseline_tag` alerts, with whether our series applies to it.
+- **Upstream `develop`**, informational only. 0001 does not apply there (two `Display.h` hunks were rejected on 2026-11-22), and that changes with every upstream refactor, so a daily alert would be noise. The job summary shows the rejected hunks and the commits since our release; read it when rebasing or proposing the protocol upstream.
+
+An alert fails the job and opens one issue titled "Native SDDM patches need attention against upstream" with the `upstream-sddm` label, holding the versions and commits checked, the failing patch, its rejected hunks or the build or proof output. A later run comments only when the alerts change, and the first passing run closes the issue. A run that cannot check (network, clone) fails without touching the issue.
+
+When it fires:
+
+- **Arch bumped `pkgrel` or cherry-picks**: review what Arch changed. Carry any new fix into our series as a patch (as 0000 carries 228778c), bump our `pkgrel` and release. Then set `arch_packaging_commit` to Arch's new commit; that clears the drift alert.
+- **A patch no longer applies, or the build or proofs fail**: rebase the series onto the tree the report names, update `provenance.json` and release a new `pkgrel`.
+- **A new upstream release**: rebase onto it, set `baseline_tag`, `baseline_commit` and the archive hash, and release. The job stays red until then: that is intended, since a release usually carries fixes our package lacks.
+
 ## VM acceptance
 
 Keep SSH and a local recovery console available. Before replacing anything, save the original SDDM package and signature, the previous companion package, the configuration, the companion state and the copied theme. Build both packages and run the native tests (`make native-test`, also run by the package's `check()`) before restarting the display manager.

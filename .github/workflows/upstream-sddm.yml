@@ -1,0 +1,58 @@
+name: Upstream SDDM
+
+# Daily: does our native SDDM patch series still apply to, build on and pass the
+# native proofs against Arch's sddm packaging, and has upstream released anything?
+# See "Upstream watch" in docs/sddm.md.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+  # Prove changes to the check itself on their PR; the issue steps skip this event.
+  pull_request:
+    paths:
+      - .github/workflows/upstream-sddm.yml
+      - tools/check-upstream-sddm.py
+      - packaging/sddm-himmelblau/**
+      - tests/native-sddm/**
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sddm-${{ github.ref }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake extra-cmake-modules libpam0g-dev libxau-dev libxcb1-dev libxcb-xkb-dev libxkbcommon-dev libsystemd-dev qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools qtbase5-dev qtdeclarative5-dev qttools5-dev qttools5-dev-tools
+      - name: Apply, build and prove our series against Arch and upstream
+        id: check
+        run: |
+          set +e
+          python3 tools/check-upstream-sddm.py --build --report "$RUNNER_TEMP/upstream-sddm.md"
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/upstream-sddm.md" >> "$GITHUB_STEP_SUMMARY"
+      # Only this step gets the token; upstream code is compiled and run above.
+      - name: Open, update or close the tracking issue
+        if: always() && github.event_name != 'pull_request' && steps.check.outputs.status != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STATUS: ${{ steps.check.outputs.status }}
+        run: python3 tools/check-upstream-sddm.py --notify "$STATUS" --report "$RUNNER_TEMP/upstream-sddm.md"
+      - name: Fail unless the check passed
+        if: always() && steps.check.outputs.status != '0'
+        env:
+          STATUS: ${{ steps.check.outputs.status }}
+        run: |
+          echo "::error::Upstream SDDM check exited ${STATUS:-without a status}; see the job summary"
+          exit 1
