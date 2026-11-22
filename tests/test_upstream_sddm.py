@@ -1,8 +1,12 @@
-"""Parsing and decisions of tools/check-upstream-sddm.py (no network, no git)."""
+"""Parsing and decisions of tools/check-upstream-sddm.py (no network; git only on local repos)."""
+import argparse
 import importlib.util
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +95,45 @@ class UpstreamTest(unittest.TestCase):
                 self.assertRegex(provenance[key], r'^[0-9a-f]{40}$')
         for key in ('arch_packaging_commit', 'baseline_commit', 'baseline_tag'):
             self.assertIn(key, provenance)
+
+
+class ArchReplayFailureTest(unittest.TestCase):
+    """Once Arch's PKGBUILD is read, failing to replay it is an alert, not a broken check."""
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.work)
+        repo = self.repo = self.work / 'upstream'
+        def git(*args):
+            return subprocess.run(['git', '-C', str(repo), '-c', 'user.name=t', '-c', 'user.email=t@t.invalid',
+                                   *args], check=True, capture_output=True, text=True).stdout.strip()
+        repo.mkdir()
+        git('init', '-q')
+        (repo / 'f').write_text('a\n')
+        git('add', 'f')
+        git('commit', '-qm', 'a')
+        git('tag', 'v0.21.0')
+        for text in ('b\n', 'c\n'):  # the second commit cannot be cherry-picked onto the tag
+            (repo / 'f').write_text(text)
+            git('commit', '-qam', text)
+        self.conflicting = git('rev-parse', 'HEAD')
+        self.args = argparse.Namespace(build=False)
+        self.provenance = {'baseline_tag': 'v0.21.0', 'baseline_commit': git('rev-parse', 'v0.21.0')}
+
+    def alerts(self, **changes):
+        current = {**c.parse_pkgbuild(ARCH_PKGBUILD), 'cherry_picks': [], **changes}
+        return c.check_arch(self.args, self.repo, current, self.provenance, self.work)[0]
+
+    def test_unreadable_version(self):
+        self.assertEqual(c.parse_pkgbuild(ARCH_PKGBUILD.replace('pkgver=0.21.0', 'pkgver = 0.21.0'))['pkgver'], None)
+        self.assertEqual(self.alerts(pkgver=None), ["Arch tree: cannot read pkgver or pkgrel from Arch's PKGBUILD"])
+
+    def test_version_without_upstream_tag(self):
+        self.assertEqual(self.alerts(pkgver='0.99.0'), ['Arch tree: Arch pkgver has no upstream tag v0.99.0'])
+
+    def test_cherry_pick_that_does_not_apply(self):
+        self.assertEqual(self.alerts(cherry_picks=[self.conflicting]),
+                         [f'Arch tree: cannot replay Arch prepare() at git cherry-pick -n {self.conflicting}'])
 
 
 class IssueDecisionTest(unittest.TestCase):

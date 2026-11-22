@@ -192,8 +192,47 @@ def build_and_prove(tree, work):
     for name, args in steps:
         result = run([str(a) for a in args], check=False)
         if result.returncode:
-            return name, (result.stdout + result.stderr)
+            output = result.stdout + result.stderr
+            # Parallel builds keep printing after the first error; show error lines first.
+            errors = [line for line in output.splitlines() if re.search(r'\berror\b', line, re.I)]
+            return name, ('Error lines:\n' + '\n'.join(errors)[:4000] + '\n\nOutput tail:\n'
+                          + clip(output, SECTION_LIMIT - 4000))
     return None
+
+
+def check_arch(args, upstream, current, provenance, work):
+    """Our series on Arch's tree. Once Arch's PKGBUILD is in hand every failure is an alert."""
+    alerts, sections, commit = [], [], None
+    tag = f"v{current['pkgver']}"
+    arch_version = f"{current['pkgver']}-{current['pkgrel']}"
+    if not current['pkgver'] or not current['pkgrel']:
+        return ["Arch tree: cannot read pkgver or pkgrel from Arch's PKGBUILD"], sections, commit
+    if run(['git', '-C', str(upstream), 'rev-parse', '--verify', '-q', f'refs/tags/{tag}'], check=False).returncode:
+        return [f'Arch tree: Arch pkgver has no upstream tag {tag}'], sections, commit
+    sections += [f'### Arch sddm {arch_version} (`{tag}` + Arch cherry-picks + our series)', '']
+    try:
+        tree = Tree('arch ' + arch_version, upstream, tag, current['cherry_picks'], provenance, work)
+    except subprocess.CalledProcessError as error:
+        step = ' '.join(error.cmd[3:])
+        sections += [f'Replaying Arch failed at `git {step}`:', '', '``````', clip(error.stderr), '``````']
+        return [f'Arch tree: cannot replay Arch prepare() at git {step}'], sections, commit
+    commit = tree.commit
+    if tag == provenance['baseline_tag'] and commit != provenance['baseline_commit']:
+        alerts.append(f"Upstream tag {tag} moved: {provenance['baseline_commit']} -> {commit}")
+    if tree.failure:
+        alerts.append('Arch tree: ' + tree.failure)
+    sections.append(tree.markdown())
+    if not args.build:
+        sections += ['', 'Build and native proofs not run (no `--build`).']
+    elif not tree.failure:
+        failed = build_and_prove(tree.path, work / 'build')
+        if failed:
+            alerts.append(f'Arch tree: {failed[0]} failed')
+            sections += ['', f'<details><summary>{failed[0]} output</summary>', '', '``````',
+                         failed[1], '``````', '</details>']
+        else:
+            sections += ['', 'Qt6 and Qt5 builds and the native proofs passed.']
+    return alerts, sections, commit
 
 
 def check(args, work):
@@ -206,27 +245,11 @@ def check(args, work):
     baseline = parse_pkgbuild(git(arch, 'show', provenance['arch_packaging_commit'] + ':PKGBUILD'))
     current = parse_pkgbuild(Path(args.arch_pkgbuild).read_text() if args.arch_pkgbuild
                              else git(arch, 'show', arch_head + ':PKGBUILD'))
-    arch_version = f"{current['pkgver']}-{current['pkgrel']}"
     alerts += [f'Arch packaging changed: {d}' for d in arch_drift(baseline, current)]
 
-    tag = 'v' + current['pkgver']
-    tree = Tree('arch ' + arch_version, upstream, tag, current['cherry_picks'], provenance, work)
-    if tag == provenance['baseline_tag'] and tree.commit != provenance['baseline_commit']:
-        alerts.append(f"Upstream tag {tag} moved: {provenance['baseline_commit']} -> {tree.commit}")
-    if tree.failure:
-        alerts.append('Arch tree: ' + tree.failure)
-    sections += [f'### Arch sddm {arch_version} (`{tag}` + Arch cherry-picks + our series)', '',
-                 tree.markdown()]
-    if args.build and not tree.failure:
-        failed = build_and_prove(tree.path, work / 'build')
-        if failed:
-            alerts.append(f'Arch tree: {failed[0]} failed')
-            sections += ['', f'<details><summary>{failed[0]} output</summary>', '', '``````',
-                         clip(failed[1]), '``````', '</details>']
-        else:
-            sections += ['', 'Qt6 and Qt5 builds and the native proofs passed.']
-    elif not args.build:
-        sections += ['', 'Build and native proofs not run (no `--build`).']
+    arch_alerts, arch_sections, arch_commit = check_arch(args, upstream, current, provenance, work)
+    alerts += arch_alerts
+    sections += arch_sections
 
     tags = git(upstream, 'tag', '--list', 'v*').split()
     for new in newer_tags(tags, provenance['baseline_tag']):
@@ -243,11 +266,11 @@ def check(args, work):
                     f'Our series does not apply: {develop.failure}'), '', develop.markdown()]
 
     head = [f"## Upstream SDDM check: {'ALERT' if alerts else 'OK'}", '',
-            f'- Arch packaging: {arch_version} at `{arch_head}` ({ARCH})'
+            f"- Arch packaging: {current['pkgver']}-{current['pkgrel']} at `{arch_head}` ({ARCH})"
             + (' with PKGBUILD from --arch-pkgbuild' if args.arch_pkgbuild else '') + '; '
             f"baseline `{provenance['arch_packaging_commit']}` "
             f"({baseline['pkgver']}-{baseline['pkgrel']})",
-            f'- Upstream `{tag}`: `{tree.commit}`',
+            f"- Upstream `v{current['pkgver']}`: `{arch_commit}`",
             f"- Upstream develop: `{develop.commit}`",
             f"- Newest upstream release tag: `{max(tags, key=lambda t: version(t) or ())}`"
             f" (we build `{provenance['baseline_tag']}`)", '']
