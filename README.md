@@ -150,8 +150,9 @@ It refuses anything else: an unlisted release, drift, or a pambase upgrade in th
 update. Then run `sudo omarchy-himmelblau rollback` with the new companion, then
 `setup`. Until `upgrade` runs, `doctor`, `setup`, `repair` and `policy` refuse the old
 state and point to it. An older listed plugin release passes the lock's setup check,
-but `status` asks for the update. State from `0.6.0` and earlier is refused: roll it
-back, then set up again. See [maintenance](docs/maintenance.md#upgrading-between-releases).
+but `status` asks for the update. The oldest listed release is `0.6.0`. State from
+`0.5.3` and earlier predates the current format and is refused: roll it back with the
+companion that wrote it, then set up again. See [maintenance](docs/maintenance.md#upgrading-between-releases).
 
 ## Install the Omarchy plugin
 

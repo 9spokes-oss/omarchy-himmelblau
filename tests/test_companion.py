@@ -760,7 +760,7 @@ class CompanionTest(unittest.TestCase):
 
     def test_older_plugin_release_records_match_current_layout(self):
         current = m.manifest('fixed-plugin')['files']
-        self.assertTrue(m.manifest('releases'))
+        self.assertEqual(list(m.manifest('releases')), ['0.6.0', '0.6.1'])
         for version in m.manifest('releases'):
             with self.subTest(version):
                 older = m.older_release(version)['plugin-files']
@@ -2340,6 +2340,33 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(m.load_state()['version'], m.VERSION)
         m.doctor()
         self.assertIn('upgraded from companion 0.0.7', m.sys.stdout.getvalue())
+
+    def test_upgrade_moves_a_real_0_6_0_setup(self):
+        """0.6.0 wrote the same state format and managed files; only its theme copy differs."""
+        self.setup()
+        work = self.base / 'theme-0.6.0'; work.mkdir()
+        (work / 'Main.qml').write_bytes((ROOT / 'tests/fixtures/Main.qml').read_bytes())
+        subprocess.run(['/usr/bin/patch', '--batch', '--fuzz=0', '-p1', '-d', str(work)], check=True,
+                       capture_output=True, input=(ROOT / 'tests/fixtures/sddm-conversation-0.6.0.patch').read_bytes())
+        old_theme = (work / 'Main.qml').read_bytes()
+        listed = m.older_release('0.6.0')
+        self.assertEqual(m.digest(old_theme), listed['sddm-conversation'])
+        self.assertEqual(listed['lock-pam'], m.manifest('lock-pam')['after'])
+        theme = m.COPY_THEME / 'Main.qml'
+        theme.write_bytes(old_theme)
+        state = m.load_state()
+        before = [dict(item) for item in state['files']]
+        next(item for item in state['files'] if item['path'] == str(theme))['after'] = m.digest(old_theme)
+        state['version'] = '0.6.0'; m.save_state(state)
+        with self.assertRaisesRegex(m.Error, 'written by companion 0.6.0, not .*; run upgrade$'): m.doctor()
+        m.require_no_live_locker.side_effect = m.Error('A graphical session remains active')
+        m.upgrade()  # Live: the lock service is unchanged.
+        self.assertEqual(theme.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
+        self.assertEqual(m.load_state()['files'], before)
+        m.doctor()
+        m.require_no_live_locker.side_effect = None
+        m.rollback()
+        self.assertFalse(m.COPY_THEME.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
 
     def test_upgrade_with_unchanged_outputs_only_restamps_the_state(self):
         self.previous_setup(theme=None)

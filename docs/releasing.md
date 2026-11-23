@@ -64,7 +64,7 @@ its tagged `assets/patches.json`:
 ```
 
 Keep the older entries, so skipped releases still upgrade. List only releases whose
-state uses the current format (`SCHEMA`); 0.6.0 is left out by decision.
+state uses the current format (`SCHEMA`), from 0.6.0 on.
 
 `upgrade` rewrites only the theme copy's `Main.qml` and the lock PAM service. If a
 release changes any other file `setup` writes (the patched `system-auth`, the PIN-change

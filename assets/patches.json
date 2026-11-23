@@ -48,6 +48,21 @@
     }
   },
   "releases": {
+    "0.6.0": {
+      "sddm-conversation": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a",
+      "lock-pam": "7dc5349694f27d65f8a4fc1c542336d53602e571847d7447acfb3e699dcde73e",
+      "plugin-files": {
+        "manifest.json": "609ecb1f6da7f1be12ec6c84b408b5f26c652dd0f8d96656b5e0b32419eae789",
+        "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
+        "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
+        "plugin/Service.qml": "1aeae646fe2fe8dc59e6b25969b1c89aecf573e1df5b44a3b4daa97bb4d32e4c",
+        "plugin/LockView.qml": "8369f3e5ada978ac16966c178dccb820c267e69e38c42351aea5b0e5e4bf5397",
+        "plugin/FingerprintModel.js": "6684762de3e3b88445a165344a9093e8faedb0647137199f16ffd1861db6f87c",
+        "plugin/poster.sh": "4941c8ae143a0ed0b226a6c54e1f94cbdd5937907cc01d0d0866c0cf34d916df",
+        "plugin/LICENSE": "c9d4e8860cd7799a02e3dd574556afd4a3740aa340eb645134dc4c78a59b441c",
+        "plugin/provenance.json": "383fad5634e9403d27de8333e969dc5f7a8fc1b3aef41e499eae90888f55bcc5"
+      }
+    },
     "0.6.1": {
       "sddm-conversation": "446360da4a3b273c3aa0d67e15fca538dff37f27a23c04752a5caeef42a0c4f0",
       "lock-pam": "7dc5349694f27d65f8a4fc1c542336d53602e571847d7447acfb3e699dcde73e",
