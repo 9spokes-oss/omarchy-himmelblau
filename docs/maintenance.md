@@ -161,16 +161,16 @@ authorized (Omarchy 4.5.0-3 and the lock-lifecycle branch both do this). It:
 
 1. Runs `sudo -n omarchy-himmelblau upgrade`. It never prompts: without the update's
    authorization, or for a user who can't use sudo, it only says to run it.
-2. Updates the lock plugin, only to exactly this companion's release. `omarchy plugin
-   update` installs whatever the plugin's origin HEAD is, so the hook first clones
-   HEAD and checks it with `omarchy-himmelblau check-plugin` (every file against this
-   release's hashes), then updates, checks the installed plugin again, and restarts the
-   shell only if that passes. The origin could change between the two checks; the
-   second one catches it before the shell loads the new code, and the hook tells you
-   not to restart the shell or log out until `status` passes.
+2. Checks the installed lock plugin with `omarchy-himmelblau check-plugin` (every file
+   against this release's hashes, in the resolved home) and, if it isn't this release,
+   tells you to update it. It never updates the plugin itself. `omarchy plugin update`
+   installs whatever the origin's HEAD is, not a given commit, and Omarchy can reload
+   the plugin into the running shell as part of that update, before any check the hook
+   could run afterwards. Omarchy has no way to install a verified commit without
+   reloading it, so the plugin update stays a step you take and review.
 3. Runs `omarchy-himmelblau reboot-required`. It exits 0 when a native SDDM file was
    replaced after this boot; the hook then sets Omarchy's `reboot-required` marker.
-4. Runs `status` and reports a failure.
+4. Runs `status` and reports a failure, when the plugin is already this release.
 
 The hook doesn't install itself: nothing a package does as root should write into a
 user's configuration, and a plugin that changed its own update path would be surprising.
@@ -221,8 +221,8 @@ later `rollback` still restores what `setup` found.
   new files after a logout, and its own code changes only when it restarts, which ends
   every session. Reboot rather than just log out, and run `upgrade` first: a new daemon
   with an old theme copy may not offer sign-in.
-- **The plugin**, when its origin doesn't hold exactly this release yet: update it
-  later, then restart the shell (no logout).
+- **The plugin** needs a shell restart (no logout), after you update and review it
+  yourself; the hook only tells you when.
 - **Anything `upgrade` refuses**: `rollback` with the new companion, then `setup`.
 - **The theme copy** needs neither: the greeter reads it when it next starts.
 

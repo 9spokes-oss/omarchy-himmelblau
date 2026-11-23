@@ -78,9 +78,10 @@ session runs, so it needs a logout. Between the package upgrade and `upgrade`, t
 lock's setup check warns (`status` says "Root upgrade pending"), but the lock still
 locks. Say so in its release notes.
 
-The post-update hook installs the plugin only when its origin HEAD is exactly this
-release, so publish the release's plugin (merge and tag) before users update. A plugin
-change merged to `main` before its companion release makes the hook wait.
+Users update the plugin from GitHub themselves (the hook only tells them to), and
+`status` passes only for exactly this release's files. Publish the release's plugin
+(merge and tag) with the packages, and don't merge plugin changes to `main` ahead of
+their companion release: `omarchy plugin update` installs `main`'s HEAD.
 
 ## Publishing
 

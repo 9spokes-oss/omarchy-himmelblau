@@ -122,8 +122,11 @@ Then `omarchy update` finishes a companion upgrade from the running desktop. Aft
 packages and shell restart, the hook:
 
 1. runs `sudo omarchy-himmelblau upgrade` (using the update's sudo authorization);
-2. updates the lock plugin, but only when the plugin's origin holds exactly the new
-   companion release, and restarts the shell only if the update installed it;
+2. tells you when the lock plugin isn't the new release yet. Update it yourself from an
+   unlocked desktop (`omarchy plugin update 9spokes.himmelblau-lock`, review the diff,
+   then `omarchy-restart-shell` and `omarchy-himmelblau status`): `omarchy plugin
+   update` installs whatever the plugin's origin holds and can load it into the
+   running shell at once, so the hook never runs it for you;
 3. marks a reboot as required when `sddm-himmelblau` changed, so `omarchy update`
    offers one at the end.
 

@@ -6,7 +6,6 @@ set -uo pipefail
 
 companion=/usr/bin/omarchy-himmelblau
 plugin_id=9spokes.himmelblau-lock
-plugin_dir=$HOME/.config/omarchy/plugins/$plugin_id
 
 say() { printf '\e[1momarchy-himmelblau:\e[0m %s\n' "$*"; }
 alert() {
@@ -16,6 +15,9 @@ alert() {
 
 [[ -x $companion ]] || exit 0
 version=$("$companion" --version) || exit 0
+# The companion accepts a symlinked home (it resolves it) but no symlink below it.
+home=$(realpath -e -- "$HOME") || exit 0
+plugin_dir=$home/.config/omarchy/plugins/$plugin_id
 
 # 1. The root upgrade. -n: never prompt; without the update's authorization, just say so.
 if output=$(sudo -n "$companion" upgrade 2>&1); then
@@ -29,24 +31,13 @@ else
   alert "Work sign-in upgrade did not run: ${output##*$'\n'}"
 fi
 
-# 2. The lock plugin, only to exactly this companion's release. omarchy plugin update
-# installs whatever the plugin's origin HEAD is, so check that first, and its result
-# before the shell loads it. The origin could change between the two: then the plugin
-# on disk is not loaded until the next shell start, and status reports it.
+# 2. The lock plugin. The hook never updates it: omarchy plugin update installs the
+# origin's HEAD and can reload it into the running shell before anything here could
+# check it. It only says when the installed plugin isn't this companion's release.
+plugin_current=1
 if [[ -d $plugin_dir ]] && ! "$companion" check-plugin "$plugin_dir" >/dev/null 2>&1; then
-  work=$(mktemp -d) || exit 0
-  trap 'rm -rf -- "$work"' EXIT
-  url=$(git -C "$plugin_dir" remote get-url origin 2>/dev/null) || url=
-  if [[ -n $url ]] && git clone -q --depth 1 -- "$url" "$work/candidate" 2>/dev/null &&
-      "$companion" check-plugin "$work/candidate" >/dev/null 2>&1; then
-    if omarchy plugin update "$plugin_id" --yes && "$companion" check-plugin "$plugin_dir"; then
-      omarchy-restart-shell && say "Lock plugin updated to $version; shell restarted."
-    else
-      alert "The lock plugin is not the $version release after updating. Don't restart the shell or log out until omarchy-himmelblau status passes."
-    fi
-  else
-    alert "Couldn't confirm lock plugin $version at its origin. Update it later (omarchy plugin update $plugin_id), then run omarchy-himmelblau status"
-  fi
+  plugin_current=0
+  alert "Update the lock plugin to $version from an unlocked desktop: omarchy plugin update $plugin_id (review the diff), then omarchy-restart-shell and omarchy-himmelblau status"
 fi
 
 # 3. A replaced display manager needs a reboot; omarchy update offers one after its hooks.
@@ -55,7 +46,7 @@ if "$companion" reboot-required >/dev/null 2>&1; then
   say 'sddm-himmelblau changed: reboot (not just log out) to start it.'
 fi
 
-if ! output=$("$companion" status 2>&1); then
+if (( plugin_current )) && ! output=$("$companion" status 2>&1); then
   alert "Lock plugin check: $output"
 fi
 exit 0

@@ -19,22 +19,13 @@ exec "$@"''',
     'companion': '''case "$1" in
 --version) echo 9.9.9 ;;
 upgrade) cat "$STATE/upgrade-output"; exit "$(cat "$STATE/upgrade-status")" ;;
-check-plugin)
-  case "$2" in
-  */candidate) [ -e "$STATE/candidate-current" ] ;;
-  *) [ -e "$STATE/installed-current" ] ;;
-  esac ;;
+check-plugin) [ -e "$STATE/installed-current" ] ;;
 reboot-required) [ -e "$STATE/reboot" ] ;;
 status) [ -e "$STATE/installed-current" ] || { echo "Fixed lock plugin 9.9.8 needs updating to 9.9.9"; exit 1; } ;;
 esac''',
-    'omarchy': '''[ "$*" = "plugin update 9spokes.himmelblau-lock --yes" ] || exit 98
-[ -e "$STATE/update-installs-current" ] && touch "$STATE/installed-current"
-exit 0''',
-    'git': '''case "$*" in
-*"remote get-url origin") echo https://example.invalid/plugin.git ;;
-*clone*) mkdir -p "${@: -1}" ;;
-*) exit 97 ;;
-esac''',
+    # The hook must never update the plugin or restart the shell itself.
+    'omarchy': 'exit 0',
+    'git': 'exit 0',
     'omarchy-restart-shell': 'exit 0',
     'omarchy-state': 'exit 0',
     'notify-send': 'exit 0',
@@ -66,8 +57,8 @@ class PostUpdateHookTest(unittest.TestCase):
         for name in names:
             (self.state / name).touch()
 
-    def run_hook(self):
-        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': str(self.home), 'STATE': str(self.state)}
+    def run_hook(self, home=None):
+        env = {'PATH': f'{self.bin}:/usr/bin:/bin', 'HOME': str(home or self.home), 'STATE': str(self.state)}
         result = subprocess.run(['bash', str(self.hook)], env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = (self.state / 'calls').read_text().splitlines() if (self.state / 'calls').exists() else []
@@ -85,28 +76,24 @@ class PostUpdateHookTest(unittest.TestCase):
         for name in ('omarchy', 'git', 'omarchy-restart-shell', 'omarchy-state', 'notify-send'):
             self.assertNotIn(name, names)
 
-    def test_verified_plugin_release_is_installed_then_the_shell_restarted(self):
+    def test_an_older_plugin_is_reported_never_updated(self):
         self.upgrade('Root setup upgraded from companion 9.9.7 to 9.9.9.', 0)
-        self.given('candidate-current', 'update-installs-current')
-        out, names, calls = self.run_hook()
-        self.assertIn('plugin update 9spokes.himmelblau-lock --yes', ' '.join(calls))
-        self.assertLess(names.index('omarchy'), names.index('omarchy-restart-shell'))
-        self.assertIn('Lock plugin updated to 9.9.9; shell restarted.', out)
-        self.assertNotIn('notify-send', names)
-
-    def test_unverified_origin_is_never_installed(self):
         out, names, _ = self.run_hook()
-        self.assertNotIn('omarchy', names)
-        self.assertNotIn('omarchy-restart-shell', names)
-        self.assertIn("Couldn't confirm lock plugin 9.9.9 at its origin", out)
+        for name in ('omarchy', 'git', 'omarchy-restart-shell'):
+            self.assertNotIn(name, names)
+        self.assertIn('Update the lock plugin to 9.9.9 from an unlocked desktop: omarchy plugin update '
+                      '9spokes.himmelblau-lock (review the diff)', out)
+        self.assertEqual(out.count('Update the lock plugin'), 1)  # status isn't asked to repeat it.
         self.assertIn('notify-send', names)
 
-    def test_an_update_that_installs_something_else_does_not_restart_the_shell(self):
-        self.given('candidate-current')  # The origin moved after the check.
-        out, names, _ = self.run_hook()
-        self.assertIn('omarchy', names)
-        self.assertNotIn('omarchy-restart-shell', names)
-        self.assertIn("Don't restart the shell or log out until omarchy-himmelblau status passes", out)
+    def test_a_symlinked_home_is_resolved_before_the_plugin_path(self):
+        self.given('installed-current')
+        alias = self.home.parent / 'home-alias'
+        alias.symlink_to(self.home)
+        out, names, calls = self.run_hook(home=alias)
+        checked = [call for call in calls if call.startswith('companion check-plugin')]
+        self.assertEqual(checked, [f'companion check-plugin {self.home.resolve()}/.config/omarchy/plugins/9spokes.himmelblau-lock'])
+        self.assertNotIn('notify-send', names)
 
     def test_refusals_and_missing_sudo_are_reported_and_the_rest_still_runs(self):
         self.given('installed-current', 'reboot')
