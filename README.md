@@ -110,12 +110,27 @@ join a tenant or reload sessions. Root `doctor` checks files and sources; it doe
 test daemon negotiation, authentication or sessions. User `status` performs the same
 checks as `plugin-status`; each command refuses the wrong privilege level.
 
-This is a prototype with no in-place upgrades. To change companion versions, run
-`sudo omarchy-himmelblau rollback`, upgrade the packages, then run `setup` again.
-`doctor`, `setup`, `repair` and `policy` refuse state written by another version;
-`rollback` accepts it. State from `0.5.3` and earlier predates the current format and is
-refused by every command: roll it back with the companion that wrote it before
-upgrading. See [maintenance](docs/maintenance.md).
+Upgrades go one release at a time:
+
+1. Upgrade `omarchy-himmelblau` and `sddm-himmelblau` together.
+2. Log out of every graphical session. From a text console (the login screen may stay
+   up), run `sudo omarchy-himmelblau upgrade`, then `sudo omarchy-himmelblau doctor`.
+3. Reboot.
+4. From an unlocked session, update the plugin to the same version and check it with
+   `omarchy-himmelblau status`.
+
+`upgrade` accepts only state written by the release just before this one, and only
+while every managed file is exactly what that release wrote. It rewrites only the
+files that changed between the two releases (the theme copy's `Main.qml` and the lock
+PAM service) and records the new version, in one journalled transaction. It refuses
+anything else: a skipped release, drift, a pambase upgrade in the same update, or a
+running graphical session or locker. In those cases run `sudo omarchy-himmelblau
+rollback` with the new companion, then `setup`. Until `upgrade` runs, `doctor`, `setup`,
+`repair` and `policy` refuse the previous release's state and point to it. The previous
+release's plugin keeps locking, but `status` asks for the plugin update. State from
+`0.5.3` and earlier predates the current format and is refused by every command: roll
+it back with the companion that wrote it before upgrading. See
+[maintenance](docs/maintenance.md#upgrading-between-releases).
 
 ## Install the Omarchy plugin
 
@@ -179,8 +194,8 @@ operation cannot undo a credential change already committed by the daemon.
 
 Privileged commands use fixed executable paths and an isolated Python interpreter.
 The companion tracks exact managed files, identity mappings and native payload hashes;
-unknown configuration, source or package drift is refused. Explicit `repair` upgrades
-the recorded `0.5.2` theme; old 0.1/0.2 state is no longer migrated. See
+unknown configuration, source or package drift is refused. Explicit `upgrade` moves the
+previous release's setup to this one; old 0.1/0.2 state is no longer migrated. See
 [security policy](SECURITY.md), [maintenance](docs/maintenance.md)
 and [release trust boundaries](docs/releasing.md).
 

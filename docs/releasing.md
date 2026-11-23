@@ -49,6 +49,23 @@ package archives, `source.tar.gz`, `sddm-corresponding-source.tar.gz` and
 source) and `source.tar.gz` (companion, patches, recipes, tests) with the native
 binary, so a release does not depend on the upstream download staying available.
 
+## The previous release
+
+`upgrade` moves a setup from exactly one earlier release, recorded as
+`previous-release` in `assets/patches.json`. When you bump `VERSION`, copy into it from
+the release being replaced (its tagged `assets/patches.json`):
+
+- `version`: that release's companion version;
+- `sddm-conversation`: its `sddm-conversation.after`;
+- `lock-pam`: its `lock-pam.after`;
+- `plugin-files`: its `fixed-plugin.files`, so its plugin keeps locking until updated.
+
+`upgrade` rewrites only the theme copy's `Main.qml` and the lock PAM service. If a
+release changes any other file `setup` writes (the patched `system-auth`, the PIN-change
+service, the SDDM override, the admin rule or the recovery-account policy), `upgrade`
+refuses with "Upgrade cannot change". Extend `upgrade` and its tests for that change,
+or say in the release notes that the release needs `rollback`, then `setup`.
+
 ## Publishing
 
 - Publish from the reviewed commit as an experimental prerelease, listing what was

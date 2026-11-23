@@ -74,6 +74,7 @@ PIN_PAM = Path('/etc/pam.d/omarchy-himmelblau-pin-change')
 PIN_PAM_CONTENT = (b'# Dedicated current-user PIN replacement; no session unlock.\n'
                    b'account [success=ok default=die] pam_himmelblau.so\n'
                    b'password required pam_himmelblau.so\n')
+OVERRIDE_CONTENT = b'[Theme]\nCurrent=omarchy-himmelblau\n'
 SDDM_PIN_PAM = Path('/etc/pam.d/sddm-himmelblau-pin-change')
 SDDM_PIN_PAM_CONTENT = (b'# Native SDDM PIN replacement; a successful change never starts a session.\n'
                         b'account [success=ok default=die] pam_himmelblau.so\n'
@@ -206,8 +207,10 @@ def manifest(name):
     elif name == 'pambase':
         required = {}  # Supported releases by version; pambase_release() checks each.
     elif name == 'previous-release':
-        # The one release whose plugin locker-preflight still accepts.
-        required = {'version': str, 'sddm-conversation': str, 'plugin-files': dict}
+        # The one release upgrade moves from and whose plugin locker-preflight still
+        # accepts, with what it wrote for each output upgrade may rewrite.
+        required = {'version': str, 'sddm-conversation': str, 'lock-pam': str,
+                    'plugin-files': dict}
     else:
         required = {'filename': str, 'before': str, 'after': str}
     if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
@@ -531,7 +534,7 @@ def check_state_file():
 
 
 def load_state(any_version=False):
-    """Load schema-1 state. Only rollback accepts a state from another version."""
+    """Load schema-1 state. Only rollback and upgrade accept a state from another version."""
     check_state_directory()
     data = read(STATE)
     if data is None:
@@ -539,6 +542,9 @@ def load_state(any_version=False):
     check_state_file()
     state = check_state(parse_json(data, STATE))
     if not any_version and state['version'] != VERSION:
+        if state['version'] == manifest('previous-release')['version']:
+            raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
+                        'run upgrade')
         raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
                     'run rollback, then setup')
     return state
@@ -767,7 +773,7 @@ def setup(domain, user, admin=False):
         raise Error('Original theme Main.qml missing')
     if read(OVERRIDE) is not None:
         raise Error(f'{OVERRIDE} exists but is not managed')
-    add(OVERRIDE, b'[Theme]\nCurrent=omarchy-himmelblau\n')
+    add(OVERRIDE, OVERRIDE_CONTENT)
     if admin:
         if read(SUDOERS) is not None:
             raise Error(f'{SUDOERS} exists but is not managed')
@@ -1378,6 +1384,84 @@ def repair():
     print('Root repair complete.')
 
 
+@exclusive
+def upgrade():
+    """Move a setup written by the previous companion release to this one, in place.
+
+    Accepts state from exactly previous-release, and only while every managed file is
+    still what that release wrote (bytes, owner and mode). Rewrites only the outputs that
+    may change between releases, each from the hash previous-release records for it; every
+    other managed file must already be what this release would write. Restore targets are
+    kept, so rollback still restores what setup found."""
+    previous = manifest('previous-release')
+    state = load_state(any_version=True)
+    if state['version'] == VERSION:
+        doctor()
+        print(f'Already at companion {VERSION}; no changes')
+        return
+    if state['version'] != previous['version'] or previous['version'] == VERSION:
+        raise Error(f'State was written by companion {state["version"]}; upgrade accepts only '
+                    f'{previous["version"]}. Run rollback, then setup')
+    seen = snapshot(root_targets(state))
+    require_no_live_locker()
+    native_sddm_contract()
+    require_no_autologin()
+    principal = check_identity(state)
+    check_admin_identity(state)
+    configuration_scope(state['domain'], state['user'], state['apply_policy'])
+    require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
+    issues = pambase_issues(state)
+    if issues:
+        # repair cannot run on another version's state: nothing here may be fixed in place.
+        raise Error('\n'.join([*issues, f'Upgrade needs the {previous["version"]} setup '
+                                          'unchanged; run rollback, then setup']))
+    patch_source('lock-conversation', read(LOCK) or b'')
+    patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
+    auth = system_auth_entry(state)
+    # Outputs that may change between releases, and what this release writes for each.
+    pinned = {COPY_THEME / 'Main.qml': ('sddm-conversation',
+                                        patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')),
+              PAM: ('lock-pam', patch_source('lock-pam', stock_pam()))}
+    # Outputs that must not: the same inputs give the same bytes in both releases.
+    fixed = {RECOVERY_ACCOUNT: identity_file(principal), PIN_PAM: PIN_PAM_CONTENT,
+             OVERRIDE: OVERRIDE_CONTENT,
+             SYSTEM_AUTH: patched_system_auth(pambase_release(state['pambase']), auth['restore_kind'],
+                                              base64.b64decode(auth['restore']))}
+    if state['admin']:
+        fixed[SUDOERS] = admin_rule(principal)
+    recorded = [Path(entry['path']) for entry in state['files']]
+    if (set(pinned) | set(fixed)) - set(recorded) or (not state['admin'] and SUDOERS in recorded):
+        raise Error('Unsupported managed file set; run rollback, then setup')
+    writes = []
+    for entry in state['files']:
+        path = Path(entry['path'])
+        current = file_record(path)
+        if (current is None or digest(base64.b64decode(current['data'])) != entry['after']
+                or (current['mode'], current['uid'], current['gid']) != (entry['mode'], *owner())):
+            raise Error(f'Upgrade refuses managed drift: {path}; run rollback, then setup')
+        if path in pinned:
+            name, data = pinned[path]
+            if entry['after'] != previous[name]:
+                raise Error(f'Upgrade refuses: {path} is not what companion '
+                            f'{previous["version"]} wrote; run rollback, then setup')
+            if digest(data) != entry['after']:
+                writes.append((path, data, entry['mode'], *owner()))
+                entry['after'] = digest(data)  # Keep the restore target: absence, for both.
+        elif path in fixed:
+            if digest(fixed[path]) != entry['after']:
+                raise Error(f'Upgrade cannot change {path}; run rollback, then setup')
+        elif path != CONFIG and not path.is_relative_to(COPY_THEME):
+            raise Error(f'Upgrade refuses unknown managed file: {path}')
+    for directory in checked_theme_directories(state['files']):
+        if stat.S_IMODE(directory.stat().st_mode) != 0o755:
+            raise Error(f'Companion theme directory must be 0755: {directory}; '
+                        'run rollback, then setup')
+    state['version'] = VERSION
+    transact('upgrade', state, writes, verify=verify_root, expected=seen)
+    print(f'Root setup upgraded from companion {previous["version"]} to {VERSION}. '
+          'Reboot, then update the lock plugin.')
+
+
 
 # Transactions. Every root change (setup, policy, repair, rollback) runs through
 # transact(): one journal, written once before the first change, records each
@@ -1387,7 +1471,7 @@ def repair():
 # checks every target against before or after, then puts every one back.
 
 OPERATION_LABELS = {'setup': 'Setup', 'policy': 'Policy change', 'repair': 'Repair',
-                    'rollback': 'Rollback'}
+                    'upgrade': 'Upgrade', 'rollback': 'Rollback'}
 
 
 def b64(data):
@@ -1920,6 +2004,7 @@ def main(argv=None):
     # status is the same check as plugin-status; existing post-update hooks call it.
     for command in ('doctor', 'status', 'repair', 'plugin-status', 'locker-preflight'):
         sub.add_parser(command)
+    sub.add_parser('upgrade', help='move the previous release\'s setup to this release (root)')
     for command in ('rollback', 'recover'):
         recovery_parser = sub.add_parser(command)
         recovery_parser.add_argument('--recovery-only', action='store_true',
@@ -1950,6 +2035,8 @@ def main(argv=None):
             policy(args.policy_enabled)
         elif args.command == 'repair':
             repair()
+        elif args.command == 'upgrade':
+            upgrade()
         elif args.command == 'rollback':
             rollback(args.recovery_only)
         elif args.command == 'recover':
