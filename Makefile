@@ -15,7 +15,6 @@ test:
 	python3 -m unittest discover -s tests -v
 	node tests/pam-conversation.mjs
 	node tests/sddm-conversation.mjs
-	node tests/warp-model.mjs
 
 # PAM stack harness (podman): the proposed system-auth and lock service on Arch's libpam.
 pam-stack-test:

@@ -13,7 +13,7 @@ private company package and its docs.
 
 - **Bar:** Omarchy 4.5 has no Waybar. The bar is `omarchy-shell` (Quickshell), and
   indicators are `bar-widget` plugins. The prototype is a plugin, `9spokes.warp`, in
-  [`warp/plugin/`](../warp/plugin/). It draws a theme-coloured cloud and has a small
+  [`9spokes-oss/omarchy-warp`](https://github.com/9spokes-oss/omarchy-warp). It draws a theme-coloured cloud and has a small
   panel with a connect switch, state, reason and organization, plus sign-in, Access
   re-auth and refresh actions.
 - **Package:** use Cloudflare's Ubuntu `.deb`, repackaged. Cloudflare publishes no Arch
@@ -298,8 +298,8 @@ package and Omarchy's source (it was never run under Hyprland):
 
 ### Prototype: `9spokes.warp` bar widget
 
-[`warp/plugin/`](../warp/plugin/) is a third-party `bar-widget` plugin. It passes
-`omarchy plugin validate` in the VM.
+[`9spokes-oss/omarchy-warp`](https://github.com/9spokes-oss/omarchy-warp) is a third-party `bar-widget` plugin, with
+`manifest.json` at the repo root. It passes `omarchy plugin validate` in the VM.
 
 - **Theme:** colours come from the bar facade (`bar.barForeground`, `bar.urgent`) and
   `Commons.Color`, and sizes from `Style`, as in first-party widgets. The icon is drawn
@@ -342,9 +342,11 @@ package and Omarchy's source (it was never run under Hyprland):
 
 Tests:
 
-- `node tests/warp-model.mjs` (part of `make test`) checks the parser against captured
+Both live in the plugin repo.
+
+- `make test` (`tests/model.test.mjs`) checks the parser against captured
   and expected outputs.
-- [`tests/warp-harness/run.sh`](../tests/warp-harness/run.sh) renders the real
+- [`tests/harness/run.sh`](https://github.com/9spokes-oss/omarchy-warp/blob/main/tests/harness/run.sh) renders the real
   `Panel.qml` and `Service.qml` offscreen on an Omarchy machine. It needs no compositor,
   root or WARP. It uses:
   - Omarchy's `qs.Commons` and `qs.Ui` with a chosen theme;
@@ -375,12 +377,10 @@ Lab results (VM, Quickshell 0.3.2):
 Icon states in `gruvbox`: ![](warp/gruvbox-icon-states.png). Service down:
 ![](warp/tokyo-night-service-down.png).
 
-Prototype install for one user (until the plugin has its own repo):
+Install for one user:
 
 ```bash
-cp -r warp/plugin ~/.config/omarchy/plugins/9spokes.warp
-omarchy-shell shell rescanPlugins
-omarchy plugin enable 9spokes.warp
+omarchy plugin add https://github.com/9spokes-oss/omarchy-warp.git --enable --yes
 ```
 
 ## 4. Packaging recommendation
@@ -401,7 +401,6 @@ Split it by who owns each piece:
      can't install it system-wide.
    - It has no org data. Users, or a first-login hook, run
      `omarchy plugin add https://github.com/9spokes-oss/omarchy-warp.git --enable --yes`.
-   - The `warp/` subdirectory here is a staging copy until that repo exists.
 4. **Not in `omarchy-himmelblau`.** WARP doesn't depend on Himmelblau, and the companion
    is scoped to sign-in and lock. Mention WARP only in docs, and keep the two
    independently installable.
@@ -443,14 +442,12 @@ organization's `mdm.xml`; the work user then signed in from the widget.
   Omarchy repo. Not the AUR package.
 - **CA delivery:** the private company package ships the Gateway CA as a p11-kit anchor,
   with the runtime variables.
-- **Plugin home:** its own public repo, `9spokes-oss/omarchy-warp`.
+- **Plugin home:** its own public repo, [`9spokes-oss/omarchy-warp`](https://github.com/9spokes-oss/omarchy-warp), created 2026-11-23.
 
 ## Next steps
 
-1. Create `9spokes-oss/omarchy-warp` with the plugin at the root, plus its model test and
-   offscreen harness, then drop `warp/` from this repo.
-2. Add `cloudflare-warp` to the company's signed repo build.
-3. Write the private `<company>-warp` package: `mdm.xml`, the CA anchor and variables,
+1. Add `cloudflare-warp` to the company's signed repo build.
+2. Write the private `<company>-warp` package: `mdm.xml`, the CA anchor and variables,
    the `warp-svc` preset, and optionally the Chromium protocol policy.
 
 ## Not verified
