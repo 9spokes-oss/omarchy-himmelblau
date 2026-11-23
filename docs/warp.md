@@ -423,7 +423,10 @@ organization's `mdm.xml`; the work user then signed in from the widget.
 - `ip route get 10.0.2.2` shows replies to QEMU's NAT host going through the
   `CloudflareWARP` routing table, so inbound SSH times out.
 - The same applies on a real laptop to any LAN range that isn't excluded from the tunnel.
-- In the lab, disconnect from the widget to get SSH back.
+- In the lab, disconnect from the widget to get SSH back. Or, if the host also runs WARP
+  in an organization that routes device-to-device (WARP-to-WARP) traffic, SSH to the
+  VM's WARP address instead; that worked with the VM connected. Reuse the forwarded
+  port's host key with `-o HostKeyAlias=[127.0.0.1]:2222`.
 
 **Found on the way, not WARP:**
 - The login screen kept Entra's number-match message out of sight. Its message area is
