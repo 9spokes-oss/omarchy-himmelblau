@@ -5,7 +5,7 @@
 pkgname=sddm-himmelblau
 pkgver=0.21.0
 pkgrel=5
-_release=0.6.0
+_release=0.6.1
 pkgdesc='SDDM with explicit correlated PAM conversations and isolated Himmelblau PIN replacement'
 arch=('x86_64')
 url='https://github.com/9spokes-oss/omarchy-himmelblau'
