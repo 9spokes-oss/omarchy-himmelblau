@@ -19,19 +19,20 @@ private company package and its docs.
 - **Package:** use Cloudflare's Ubuntu `.deb`, repackaged. Cloudflare publishes no Arch
   package. AUR `cloudflare-warp-bin` repackages it with a pinned SHA-256. Here that
   hash was verified to chain back to Cloudflare's signed apt metadata.
-  - Recommended: build our own package, without `warp-taskbar`, in the signed company
+  - Decided: build our own package, without `warp-taskbar`, in the signed company
     repo. The bar widget replaces the taskbar. [`packaging/cloudflare-warp/`](../packaging/cloudflare-warp/)
     holds the recipe and the check for Cloudflare's signature chain.
 - **Enrollment:** `mdm.xml` names the organization, and the user enrolls once through the
-  browser and Entra. Chromium's linux-entra-sso should make that sign-in silent, but this
-  is not verified.
+  browser and Entra. With Chromium's linux-entra-sso the Entra step was silent in the
+  live check.
 - **CA:** on Arch, one anchor file in `/etc/ca-certificates/trust-source/anchors/` plus
   `update-ca-trust` covers several consumers:
   - OpenSSL, curl and Python, including Arch's `certifi`, which is a symlink to the system bundle;
   - NSS and Chromium, because Arch's `libnssckbi.so` is p11-kit;
   - Java.
   - Node and pip-installed `certifi` still need environment variables.
-  - WARP's own certificate installer has no Arch path.
+  - WARP's own certificate installer has no Arch path, so the private company package
+    ships the CA (decided).
 - **Networking:** Omarchy uses NetworkManager, systemd-resolved (stub) and ufw, the
   resolver model WARP supports on Ubuntu. No conflicts were found on paper. Docker and Tailscale need care (see [Networking](#networking-on-omarchy)).
 
