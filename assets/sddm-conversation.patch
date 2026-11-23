@@ -90,9 +90,6 @@
 +      root.promptText = message
        password.text = ""
 -      password.focus = true
--    }
--    function onLoginSucceeded() {
--      root.loginFailed = false
 +      password.forceActiveFocus()
 +    }
 +    function onConversationMessage(attempt, message, error) {
@@ -104,7 +101,9 @@
 +        root.notices = messages
 +      }
 +      root.noticeError = error
-+    }
+     }
+-    function onLoginSucceeded() {
+-      root.loginFailed = false
 +    function onConversationAuthorized(attempt) {
 +      if (attempt !== root.activeAttempt) return
 +      root.authorized = true
@@ -147,7 +146,7 @@
  
      Image {
        id: logo
-@@ -43,6 +151,90 @@
+@@ -43,6 +151,105 @@
        anchors.horizontalCenter: parent.horizontalCenter
      }
  
@@ -197,12 +196,27 @@
 +      }
 +    }
 +
++    Text {
++      // The notice area keeps the newest message in view; say when older ones are above it.
++      anchors.horizontalCenter: parent.horizontalCenter
++      visible: noticeView.contentY > 0
++      text: "▲ earlier messages (scroll up)"
++      color: "#565f89"
++      font.family: "JetBrainsMono Nerd Font"
++      font.pixelSize: 14
++    }
++
 +    Flickable {
++      id: noticeView
 +      anchors.horizontalCenter: parent.horizontalCenter
 +      width: Math.min(720, root.width * 0.9)
 +      height: Math.min(infoText.implicitHeight, root.height * 0.18)
 +      contentHeight: infoText.height
 +      clip: true
++      // A number match or error arrives after earlier notices: scroll it into view.
++      function showNewest() { contentY = Math.max(0, contentHeight - height) }
++      onContentHeightChanged: showNewest()
++      onHeightChanged: showNewest()
 +      Text {
 +        id: infoText
 +        width: parent.width
@@ -238,7 +252,7 @@
      Row {
        anchors.horizontalCenter: parent.horizontalCenter
        spacing: 15
-@@ -72,7 +264,7 @@
+@@ -72,7 +279,7 @@
            spacing: 5
  
            Repeater {
@@ -247,7 +261,7 @@
  
              Image {
                source: "bullet.png"
-@@ -82,28 +274,43 @@
+@@ -82,28 +289,43 @@
            }
          }
  
@@ -297,7 +311,7 @@
                event.accepted = true
              }
            }
-@@ -111,6 +318,28 @@
+@@ -111,6 +333,28 @@
        }
      }
  
