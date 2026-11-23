@@ -105,7 +105,12 @@ repackages. These are facts about the client, not about any organization's setti
     `/etc/systemd/resolved.conf.d/cloudflare-warp.conf` and the `inet cloudflare-warp`
     nft table.
   - `verify-upstream.sh` re-checks the signature chain and the pinned hash on each bump.
-  - Built in the lab VM: 7 files, and every library resolves after the fix.
+  - Built and installed in the lab VM:
+    - 7 files, and every library resolves after the fix;
+    - `warp-svc` is active and enabled;
+    - the MDM file is parsed (`warp-cli mdm get-configs`);
+    - the unregistered daemon left DNS alone: no resolved drop-in, no `CloudflareWARP`
+      interface, and HTTPS still works.
 - **Updates:** on Linux, updates come only from the package manager. Bump the company
   package when Cloudflare publishes, re-running the chain check.
 
@@ -118,8 +123,7 @@ sudo systemctl enable --now warp-svc.service
 - The company package can do this through a systemd preset
   (`/usr/lib/systemd/system-preset/50-<company>.preset`, `enable warp-svc.service`), so a
   fresh install comes up enabled.
-- An unregistered daemon is expected to leave routes, DNS and the firewall alone. Not
-  observed: the daemon was never run on Arch.
+- An unregistered daemon leaves DNS and routes alone, as observed in the lab VM.
 - The bar widget shows "Service not running" until the daemon is up.
 
 ### Unattended org enrollment (MDM file)
@@ -300,8 +304,11 @@ package and Omarchy's source (it was never run under Hyprland):
   Cloudflare's logo.
 - **State source:** `warp-cli --accept-tos -j status`, polled every 30 s by default.
   - A long-lived `warp-cli -l status` re-polls whenever it prints anything.
-  - On the connected host it printed nothing in 6 s, even under a pty. It is assumed to
-    print only on changes, but that was never seen, so polling is the baseline.
+  - In the lab VM, over a plain pipe and unbuffered, it printed the current state at once
+    (`Status update: Unable` / `Reason: Registration Missing due to: Daemon Startup`).
+    It printed another line on each daemon event, for example `Status update: List of
+    local policy configurations was updated` after `warp-cli mdm refresh`. Polling stays
+    as the fallback.
   - The stream is used only as a trigger, so the widget doesn't depend on its format.
   - When the listener exits, it is retried with a doubling delay up to 60 s. The delay
     resets only after the listener prints something or stays up for 30 s.
@@ -313,7 +320,9 @@ package and Omarchy's source (it was never run under Hyprland):
   otherwise wait for an answer. This is accepted, since the company deploys the client.
 - **States** (see `Model.js`):
   - Connected, Connecting, Disconnecting, Disconnected, Paused, Unable;
-  - Not enrolled: any reason containing `RegistrationMissing`;
+  - Not enrolled: any reason containing `RegistrationMissing`. A fresh daemon on Arch
+    reports `{"status":"Unable","reason":{"RegistrationMissing":"DaemonStartup"}}`
+    (captured in the VM);
   - Service not running: the JSON error `{"code":"FailedToConnectToDaemon"}`, captured
     from the real CLI with the socket hidden;
   - Not installed: warp-cli is not on PATH;
@@ -409,8 +418,6 @@ Split it by who owns each piece:
 
 ## Not verified
 
-- The unregistered daemon's real `-j status` output. `tests/warp-model.mjs` assumes the
-  `RegistrationMissing` shape.
 - Enrollment, Entra SSO through linux-entra-sso, the deep-link handoff, posture and
   Conditional Access. These need the user's sign-in into the real org.
 - Whether the client writes the Gateway CA anywhere on Arch.

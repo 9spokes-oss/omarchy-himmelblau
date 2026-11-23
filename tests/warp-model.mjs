@@ -43,6 +43,13 @@ const status = (obj, code = 0) => Model.parseStatus(JSON.stringify(obj, null, 2)
 // Runner exit 127: warp-cli not on PATH.
 assert.equal(Model.parseStatus('', '', 127).state, S.notInstalled);
 
+// captured: fresh, unregistered daemon on Arch (lab VM, 2026-11-23).
+{
+  const v = Model.parseStatus('{\n  "status": "Unable",\n  "reason": {\n    "RegistrationMissing": "DaemonStartup"\n  }\n}\n', '', 0);
+  assert.equal(v.state, S.unregistered);
+  assert.equal(v.detail, 'Registration missing: Daemon startup');
+}
+
 // Registration missing, as a string or a struct reason, under either status.
 for (const reason of ['RegistrationMissing', { RegistrationMissing: 'DaemonStartup' }, { RegistrationMissing: { reason: 'ManualDeletion' } }]) {
   for (const s of ['Disconnected', 'Unable']) {
