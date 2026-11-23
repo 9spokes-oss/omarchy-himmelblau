@@ -162,4 +162,16 @@ assert.ok(source.includes('enabled: root.conversationAvailable && root.activeAtt
 assert.ok(source.includes('textFormat: Text.PlainText'));
 assert.ok(!source.includes('console.log'));
 
-console.log('PASS: SDDM capability guard, fresh correlated prompts, cancel/authorization cutoff, stale events, PIN recovery never launches a session, failure keeps daemon notices');
+// The notice area keeps the newest message (a number match, an error) in view on a
+// small screen, and says when earlier messages are above it.
+const view = loadFunctions(source, ['showNewest'], { contentY: 0, contentHeight: 40, height: 65 });
+view.showNewest();
+assert.equal(view.contentY, 0);
+view.contentHeight = 200;
+view.showNewest();
+assert.equal(view.contentY, 135);
+assert.ok(source.includes('onContentHeightChanged: showNewest()'));
+assert.ok(source.includes('onHeightChanged: showNewest()'));
+assert.ok(source.includes('visible: noticeView.contentY > 0'));
+
+console.log('PASS: SDDM capability guard, fresh correlated prompts, cancel/authorization cutoff, stale events, PIN recovery never launches a session, failure keeps daemon notices, newest notice stays in view');
