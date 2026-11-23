@@ -1,8 +1,9 @@
 # Cloudflare WARP on Omarchy
 
 Findings and a prototype for putting the company's Cloudflare One (WARP / Zero Trust) client
-on an Omarchy work laptop. Status: **prototype**. Enrollment, Entra sign-in and the Arch CA
-install were not exercised yet, because they need the user's sign-in (see [Not verified](#not-verified)).
+on an Omarchy work laptop. Status: **prototype, live-checked**. On 2026-11-23 the lab VM
+(Omarchy 4.5) was enrolled into the real organization through the widget, with Entra SSO.
+See [Live check](#live-check-lab-vm-2026-11-23).
 
 `<team>` is a placeholder for the Zero Trust team name. This public document carries no
 organization settings (policy, split tunnel, enrollment details); those live in the
@@ -55,8 +56,12 @@ repackages. These are facts about the client, not about any organization's setti
   - `warp-svc` needs `tpm2-tss`, `nss`, `openssl`, `dbus`, `libcap` and `systemd-libs`.
   - `warp-dex` also needs `libpcap`, `libnl` and `rdma-core` (`libibverbs`). The AUR
     recipe doesn't list these three.
-- **DNS:** with systemd-resolved, the client sets resolved's *global* DNS servers to its
-  local DoH proxy on `127.0.2.2` and `127.0.2.3`. Per-link DNS is left in place.
+- **DNS:** with systemd-resolved, the client points DNS at its local DoH proxy on
+  `127.0.2.2` and `127.0.2.3`, and per-link DNS is left in place.
+  - On Arch (lab VM), it set these on its own `CloudflareWARP` link and wrote no
+    `resolved.conf.d` drop-in.
+  - Cloudflare's removal scripts still clean up a drop-in
+    (`/etc/systemd/resolved.conf.d/cloudflare-warp.conf`), so some setups do get one.
 - **Gateway CA installer:** strings in `warp-svc` show certificate-store paths for:
   - Debian (`/usr/local/share/ca-certificates`, `update-ca-certificates`);
   - RHEL/Fedora (`/usr/share/pki/ca-trust-source/anchors`);
@@ -223,7 +228,8 @@ Per runtime:
 
 ### Himmelblau and Entra SSO
 
-Expected flow, not verified, because verifying it means enrolling:
+Verified live in the lab VM on 2026-11-23 (see [Live check](#live-check-lab-vm-2026-11-23)).
+The flow:
 
 1. The widget's sign-in action (or `warp-cli registration new`) opens the default
    browser, Chromium on Omarchy, at the team's Cloudflare Access login.
@@ -233,10 +239,21 @@ Expected flow, not verified, because verifying it means enrolling:
    - This is the extension's core path. It does **not** depend on the `wellKnownApps`
      list in [`examples/chromium-m365-sso.json`](../examples/chromium-m365-sso.json),
      which is for single-page apps.
-   - So the sign-in should complete without a password if Conditional Access allows it.
-3. Access redirects to `com.cloudflare.warp://…`. Chromium asks before opening an
-   external protocol. The `AutoLaunchProtocolsFromOrigins` policy can allow
-   `com.cloudflare.warp` from the Access origin and remove that prompt.
+   - Observed: Entra recognised the user with no account picker, password or MFA.
+3. Access redirects to `com.cloudflare.warp://…`. Chromium asks once before opening the
+   external protocol; its "always open" box is unticked by default.
+   - The company package can remove that prompt with a Chromium managed policy, for
+     example `/etc/chromium/policies/managed/warp.json`:
+
+     ```json
+     { "AutoLaunchProtocolsFromOrigins": [
+         { "protocol": "com.cloudflare.warp",
+           "allowed_origins": ["https://<team>.cloudflareaccess.com"] } ] }
+     ```
+
+   - Not tested.
+4. The deep-link handler runs `warp-cli registration token`, and the daemon connects.
+   The widget showed Connected almost at once.
 
 Risks to check when enrolling:
 
@@ -400,6 +417,32 @@ Split it by who owns each piece:
    is scoped to sign-in and lock. Mention WARP only in docs, and keep the two
    independently installable.
 
+## Live check (lab VM, 2026-11-23)
+
+The lab VM runs Omarchy 4.5 with Himmelblau. It got the taskbar-less package and the
+organization's `mdm.xml`; the work user then signed in from the widget.
+
+| Step | Result |
+|---|---|
+| Install (`packaging/cloudflare-warp`) | Built and installed; `warp-svc` enabled and active. Unregistered status `{"status":"Unable","reason":{"RegistrationMissing":"DaemonStartup"}}` |
+| Widget before enrollment | Faded cloud with the urgent `!` badge, and a **Sign in to your organization** action |
+| Sign-in | Chromium opened the team's Access page. Entra SSO through linux-entra-sso was silent. Chromium asked once to open `com.cloudflare.warp`. The widget showed Connected almost at once |
+| Connected state | `{"status":"Connected","reason":"NetworkHealthy"}`, MASQUE tunnel, HTTPS through Gateway verified (`curl` 200, verify 0) |
+| Right-click disconnect / reconnect | Worked from the real bar. A manual disconnect reports `{"status":"Disconnected","reason":"Paused"}` |
+| Gateway CA | The client wrote **nothing**: no `installed_cert.pem`, no new file in any CA store, no NSS DB. TLS still worked only because the lab VM already had the CA as a p11-kit anchor. Provision the CA in the package |
+
+**Lab caveat: SSH into the VM stops while WARP is connected.**
+- `ip route get 10.0.2.2` shows replies to QEMU's NAT host going through the
+  `CloudflareWARP` routing table, so inbound SSH times out.
+- The same applies on a real laptop to any LAN range that isn't excluded from the tunnel.
+- In the lab, disconnect from the widget to get SSH back.
+
+**Found on the way, not WARP:**
+- The login screen kept Entra's number-match message out of sight. Its message area is
+  clipped and doesn't scroll to the newest line; scrolling it by hand reveals the number.
+- It came up because Entra asked for a fresh MFA at login (`AADSTS70044`).
+- Reported to the session that owns the greeter theme.
+
 ## Decisions
 
 - **Taskbar:** dropped; the bar widget replaces it.
@@ -418,13 +461,12 @@ Split it by who owns each piece:
 
 ## Not verified
 
-- Enrollment, Entra SSO through linux-entra-sso, the deep-link handoff, posture and
-  Conditional Access. These need the user's sign-in into the real org.
-- Whether the client writes the Gateway CA anywhere on Arch.
-- The widget inside a live `omarchy-shell` bar: the VM's SDDM is in `start-limit-hit` and
-  was left alone.
+- How an expired Access session or a posture failure shows up in `warp-cli status`, and
+  so in the widget.
+- The `AutoLaunchProtocolsFromOrigins` policy that would skip Chromium's protocol prompt.
 - Live theme switching. Omarchy pushes themes to the shell over `applyTheme` IPC, and the
   harness doesn't host that. The widget only binds to the same tokens as first-party
   widgets.
 - uwsm picking up `/etc/environment.d`.
-- What `warp-cli -l status` prints on a state change.
+- A screenshot of the widget in the live bar. The VM's framebuffer dumps come out
+  smeared, so the offscreen renders above stand in for one.

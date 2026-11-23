@@ -65,6 +65,14 @@ for (const reason of ['RegistrationMissing', { RegistrationMissing: 'DaemonStart
 assert.equal(status({ status: 'Unable', reason: 'missing_registration' }).state, S.unregistered);
 assert.equal(Model.parseStatus('{"code":"MissingRegistration","error":"x"}', '', 1).state, S.unregistered);
 
+// captured: manual disconnect from the widget (lab VM).
+{
+  const v = status({ status: 'Disconnected', reason: 'Paused' });
+  assert.equal(v.state, S.disconnected);
+  assert.equal(v.detail, 'Paused');
+  assert.equal(v.on, false);
+}
+
 // Other daemon states.
 assert.equal(status({ status: 'Connecting', reason: { PerformingHappyEyeballs: [1, 2] } }).state, S.connecting);
 assert.equal(status({ status: 'Connecting', reason: { PerformingHappyEyeballs: [1, 2] } }).on, true);
