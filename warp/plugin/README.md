@@ -17,14 +17,14 @@ theme's bar colours, so a theme switch restyles it with the rest of the bar.
 
 State comes from `warp-cli -j status`, polled every `refreshIntervalSec`. A long-running
 `warp-cli -l status` re-polls whenever it prints something; its output is used only as a
-trigger. It is assumed to print on daemon changes, which has not been observed yet. A
+trigger. On the lab VM it printed on each daemon change. A
 disconnect that policy refuses shows the daemon's message in the panel. Sign-in runs in
 its own process and is abandoned after 5 minutes.
 
 ## Install (prototype)
 
-The plugin is a subdirectory of this repo, and `omarchy plugin add` needs a manifest at a
-repo root. Until it has its own repo, copy it:
+This is a staging copy. The plugin moves to its own repo, `9spokes-oss/omarchy-warp`,
+because `omarchy plugin add` needs a manifest at a repo root. Until then, copy it:
 
 ```bash
 mkdir -p ~/.config/omarchy/plugins

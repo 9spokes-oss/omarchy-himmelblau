@@ -78,8 +78,8 @@ repackages. These are facts about the client, not about any organization's setti
 
 | Option | Trust story | Verdict |
 |---|---|---|
-| AUR `cloudflare-warp-bin` 2026.8.2115.0-1 | Downloads Cloudflare's `resolute` (Ubuntu 26.04) `.deb` from `pkg.cloudflareclient.com` and checks it against a SHA-256 pinned by AUR maintainers (4 co-maintainers, 83 votes). Trust on first use per update. | Fine for a pilot. Review every bump |
-| **Company-built package in the signed Omarchy repo** (see `omarchy-repo` design) | Same `.deb`, but the PKGBUILD verifies Cloudflare's chain: repo key `C068 A2B5 7717 7519 3CBE 1F2F 6E2D D217 4FA1 C3BA`, then a signed `InRelease`, then the `Packages` SHA-256, then the `.deb` SHA-256. Signed by our repo key. | **Recommended** |
+| AUR `cloudflare-warp-bin` 2026.8.2115.0-1 | Downloads Cloudflare's `resolute` (Ubuntu 26.04) `.deb` from `pkg.cloudflareclient.com` and checks it against a SHA-256 pinned by AUR maintainers (4 co-maintainers, 83 votes). Trust on first use per update. | Not chosen |
+| **Company-built package in the signed Omarchy repo** (see `omarchy-repo` design) | Same `.deb`, but the PKGBUILD verifies Cloudflare's chain: repo key `C068 A2B5 7717 7519 3CBE 1F2F 6E2D D217 4FA1 C3BA`, then a signed `InRelease`, then the `Packages` SHA-256, then the `.deb` SHA-256. Signed by our repo key. | **Chosen** |
 | Cloudflare's own repo | deb/rpm only, no pacman | Not applicable |
 
 - **Chain checked by hand:** `InRelease` dated 2026-10-20 had a good signature from that
@@ -189,25 +189,10 @@ sudo update-ca-trust
 trust list | grep -A2 'Gateway CA'
 ```
 
-- **Where the PEM comes from:**
-  - It is a public certificate, specific to the Cloudflare account, so it can be shipped
-    in the private company package.
-  - If the Zero Trust certificate setting delivers it to the client, it appears as
-    `/var/lib/cloudflare-warp/installed_cert.pem`. A path unit can mirror that copy into
-    the Arch store. Not built or tested:
-
-```ini
-# /usr/lib/systemd/system/warp-ca-sync.path
-[Path]
-PathChanged=/var/lib/cloudflare-warp/installed_cert.pem
-[Install]
-WantedBy=multi-user.target
-
-# /usr/lib/systemd/system/warp-ca-sync.service
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'install -m644 /var/lib/cloudflare-warp/installed_cert.pem /etc/ca-certificates/trust-source/anchors/cloudflare-gateway.crt && update-ca-trust'
-```
+- **Where the PEM comes from (decided):** the private company package ships it. It is a
+  public certificate, specific to the Cloudflare account, so it stays out of this repo.
+  Mirroring a copy the client writes is not an option on Arch: in the live check the
+  client wrote no certificate anywhere.
 
 Per runtime:
 
@@ -401,19 +386,22 @@ omarchy plugin enable 9spokes.warp
 
 Split it by who owns each piece:
 
-1. **System package (private company repo)**, e.g. `<company>-warp`:
-   - depends on our verified `cloudflare-warp` build;
-   - installs `mdm.xml` with the team name, the Gateway CA anchor (or the sync path unit),
+1. **`cloudflare-warp`, built and signed in the company's Omarchy repo** from
+   [`packaging/cloudflare-warp/`](../packaging/cloudflare-warp/). The PKGBUILD has no org
+   data, so it stays in this public repo; the signed repo builds and signs it.
+2. **System package (private company repo)**, e.g. `<company>-warp`:
+   - depends on that `cloudflare-warp`;
+   - installs `mdm.xml` with the team name, the Gateway CA anchor,
      the `environment.d` and `profile.d` CA variables, and a preset that enables `warp-svc`;
    - is org-specific, so it must not live in this public repo.
-2. **Omarchy plugin `9spokes.warp` in its own public git repo**, e.g. `9spokes-oss/omarchy-warp`:
+3. **Omarchy plugin `9spokes.warp` in its own public git repo**, `9spokes-oss/omarchy-warp`:
    - `omarchy plugin add` clones one repo per plugin with `manifest.json` at its root,
      and plugins install per user under `~/.config/omarchy/plugins/`. A pacman package
      can't install it system-wide.
    - It has no org data. Users, or a first-login hook, run
      `omarchy plugin add https://github.com/9spokes-oss/omarchy-warp.git --enable --yes`.
-   - The `warp/` subdirectory here is a staging copy.
-3. **Not in `omarchy-himmelblau`.** WARP doesn't depend on Himmelblau, and the companion
+   - The `warp/` subdirectory here is a staging copy until that repo exists.
+4. **Not in `omarchy-himmelblau`.** WARP doesn't depend on Himmelblau, and the companion
    is scoped to sign-in and lock. Mention WARP only in docs, and keep the two
    independently installable.
 
@@ -450,14 +438,19 @@ organization's `mdm.xml`; the work user then signed in from the widget.
 - **Organization settings:** kept out of this public repo.
 - **Live check:** approved, enrolling a lab machine into the real organization, with the
   user signing in.
+- **Package source:** our `cloudflare-warp` PKGBUILD, built and signed in the company's
+  Omarchy repo. Not the AUR package.
+- **CA delivery:** the private company package ships the Gateway CA as a p11-kit anchor,
+  with the runtime variables.
+- **Plugin home:** its own public repo, `9spokes-oss/omarchy-warp`.
 
-## Open questions
+## Next steps
 
-1. **Package source.** Build in the company's signed repo, or use AUR
-   `cloudflare-warp-bin`?
-2. **CA delivery.** Ship the Gateway CA in the private package, or mirror the client's
-   delivered copy with the path unit?
-3. **Plugin home.** Give the plugin its own repo (proposed `9spokes-oss/omarchy-warp`)?
+1. Create `9spokes-oss/omarchy-warp` with the plugin at the root, plus its model test and
+   offscreen harness, then drop `warp/` from this repo.
+2. Add `cloudflare-warp` to the company's signed repo build.
+3. Write the private `<company>-warp` package: `mdm.xml`, the CA anchor and variables,
+   the `warp-svc` preset, and optionally the Chromium protocol policy.
 
 ## Not verified
 
