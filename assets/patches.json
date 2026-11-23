@@ -48,11 +48,11 @@
     }
   },
   "previous-release": {
-    "version": "0.6.0",
-    "sddm-conversation": "179319ecaf93779f7d98a4be0154c1a2da313f19ba0579fbf6453bce2f5f4c2a",
+    "version": "0.6.1",
+    "sddm-conversation": "446360da4a3b273c3aa0d67e15fca538dff37f27a23c04752a5caeef42a0c4f0",
     "lock-pam": "7dc5349694f27d65f8a4fc1c542336d53602e571847d7447acfb3e699dcde73e",
     "plugin-files": {
-      "manifest.json": "609ecb1f6da7f1be12ec6c84b408b5f26c652dd0f8d96656b5e0b32419eae789",
+      "manifest.json": "dbc9e7dd0e50a5c2493c01f0e9bd7536785010f8d12489f7d3e99e37c78aad9a",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
       "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
       "plugin/Service.qml": "1aeae646fe2fe8dc59e6b25969b1c89aecf573e1df5b44a3b4daa97bb4d32e4c",
@@ -65,7 +65,7 @@
   },
   "fixed-plugin": {
     "id": "9spokes.himmelblau-lock",
-    "version": "0.6.1",
+    "version": "0.6.2",
     "upstream": {
       "Service.qml": "cf9da581ab749194d44d5f7f73dc028704373f59dd6b131a90b9c07419fed7c9",
       "LockView.qml": "e5ec598e4dfafc0c6acb3ab8de1c3be810437ae943f6888fdcf1f92a6400876a",
@@ -74,7 +74,7 @@
       "manifest.json": "58af8610a79045dfc09b541a5c2fdfd2e8886624549a49114ba424b4833cc546"
     },
     "files": {
-      "manifest.json": "dbc9e7dd0e50a5c2493c01f0e9bd7536785010f8d12489f7d3e99e37c78aad9a",
+      "manifest.json": "5d554a2f72f7dd445c3f71df121da081f065bf38e898cf0ea08484f8d786be48",
       "plugin/UPSTREAM-LICENSE": "717ba1949502290f8e47688ae2e323acd06c8ca47aec9f7596b15f678c1af4a2",
       "plugin/generate.py": "5bc7a670944aea7988ac5bc76d413fe1b12dca2e39da97d445425123f3bc2427",
       "plugin/Service.qml": "1aeae646fe2fe8dc59e6b25969b1c89aecf573e1df5b44a3b4daa97bb4d32e4c",

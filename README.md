@@ -51,7 +51,7 @@ pending permission request. See [configuration and validation](docs/intune-sso.m
 
 ## Packages and setup
 
-The `0.6.1` companion requires `sddm-himmelblau=0.21.0-5`. This is a reviewed native
+The `0.6.2` companion requires `sddm-himmelblau=0.21.0-5`. This is a reviewed native
 backport, not a theme-only change or an official upstream SDDM release. Build both
 packages from a clean committed source export using [the release procedure](docs/releasing.md).
 Do not run the template PKGBUILDs directly or build packages as root.

@@ -76,7 +76,7 @@ observations. Local recovery SSH/sudo worked, but local recovery GUI login was n
 repeated on this build. A silent MFA wait longer than 60 seconds was not
 independently timed. Core-limit runtime causality remains inconclusive as described
 above. These results do not establish offline sign-in or every MFA method/policy.
-Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3`, `0.6.0` and `0.6.1` are unpublished.
+Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3`, `0.6.0`, `0.6.1` and `0.6.2` are unpublished.
 Marketplace submission remains withdrawn.
 
 ## 0.6.0 fresh-install acceptance
