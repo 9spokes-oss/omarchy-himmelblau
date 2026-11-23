@@ -2308,7 +2308,7 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaisesRegex(m.Error, f'written by companion {previous["version"]}.*run upgrade$'):
                     action()
         m.upgrade()
-        m.require_no_live_locker.assert_called_once_with()
+        m.require_no_live_locker.assert_not_called()  # Only the theme copy changed.
         state = m.load_state()
         self.assertEqual(state['version'], m.VERSION)
         theme = m.COPY_THEME / 'Main.qml'
@@ -2374,9 +2374,38 @@ class CompanionTest(unittest.TestCase):
         m.save_state(state)
         m.upgrade(); m.doctor()
 
+    def test_live_upgrade_needs_a_logout_only_to_replace_the_lock_service(self):
+        live = m.Error('A graphical session or locker is running, or session state is unknown')
+        for name, pam, refused in (('theme copy only', None, False),
+                                   ('lock service too', b'# previous release lock service\n', True)):
+            with self.subTest(name):
+                self.previous_setup(pam=pam)
+                m.require_no_live_locker.side_effect = live
+                if refused:
+                    self.assert_upgrade_refused('replaces the lock PAM service: log out of every '
+                                                'graphical session and run it from a text console')
+                    m.require_no_live_locker.side_effect = None
+                m.upgrade(); m.doctor()
+                m.require_no_live_locker.side_effect = None
+                m.rollback()
+
+    def test_reboot_is_required_only_after_a_native_change_since_boot(self):
+        newest = max(path.lstat().st_ctime for path in (*m.NATIVE_EXECUTABLES, *(file for directory in m.NATIVE_COMPONENTS for file in directory.rglob('*'))))
+        with patch.object(m, 'boot_time', return_value=int(newest) + 1):
+            self.assertFalse(m.native_changed_since_boot())
+            with self.assertRaises(SystemExit) as exit: m.main(['reboot-required'])
+            self.assertEqual(exit.exception.code, 1)
+        with patch.object(m, 'boot_time', return_value=int(newest) - 1):
+            self.assertTrue(m.native_changed_since_boot())
+            m.main(['reboot-required'])
+            self.previous_setup()
+            m.upgrade()
+            self.assertIn("reboot (don't just log out)", m.sys.stdout.getvalue())
+
     def test_upgrade_rewrites_a_previous_lock_service(self):
         self.previous_setup(theme=None, pam=b'# previous release lock service\n')
         m.upgrade()
+        m.require_no_live_locker.assert_called_once_with()
         self.assertEqual(m.digest(m.PAM.read_bytes()), m.manifest('lock-pam')['after'])
         m.doctor()
         m.rollback()
@@ -2394,7 +2423,6 @@ class CompanionTest(unittest.TestCase):
         theme = m.COPY_THEME / 'Main.qml'
         old_theme, old_pin, old_login = theme.read_bytes(), m.PIN_PAM.read_bytes(), m.SYSTEM_LOGIN.read_bytes()
         extra = m.COPY_THEME / 'unexpected.qml'
-        refuse = m.Error('A graphical session or locker is running, or session state is unknown')
         cases = [
             ('theme copy edited', f'managed drift: {theme}',
              lambda: theme.write_bytes(b'edited'), lambda: theme.write_bytes(old_theme)),
@@ -2416,9 +2444,6 @@ class CompanionTest(unittest.TestCase):
             ('output this release cannot change', f'Upgrade cannot change {m.PIN_PAM}',
              lambda: setattr(m, 'PIN_PAM_CONTENT', b'# a new service\n'),
              lambda: setattr(m, 'PIN_PAM_CONTENT', old_pin)),
-            ('live session', 'graphical session or locker is running',
-             lambda: setattr(m.require_no_live_locker, 'side_effect', refuse),
-             lambda: setattr(m.require_no_live_locker, 'side_effect', None)),
         ]
         for name, message, apply, undo in cases:
             with self.subTest(name):

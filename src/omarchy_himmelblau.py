@@ -1403,7 +1403,12 @@ def upgrade():
     owner and mode). Rewrites only the outputs that may change between releases, each
     from the hash that release records for it; every other managed file must already be
     what this release would write. Restore targets are kept, so rollback still restores
-    what setup found."""
+    what setup found.
+
+    It runs from a live desktop unless it would replace the lock PAM service: the greeter
+    reads the theme copy only when it starts, but a running locker uses the lock service
+    on its next authentication, and root cannot tell which plugin code a running shell has
+    loaded. Then, like rollback, it needs every graphical session ended."""
     state = load_state(any_version=True)
     if state['version'] == VERSION:
         doctor()
@@ -1415,7 +1420,6 @@ def upgrade():
         raise Error(f'State was written by companion {state["version"]}; upgrade accepts '
                     f'{accepted}. Run rollback, then setup')
     seen = snapshot(root_targets(state))
-    require_no_live_locker()
     native_sddm_contract()
     require_no_autologin()
     principal = check_identity(state)
@@ -1468,10 +1472,34 @@ def upgrade():
         if stat.S_IMODE(directory.stat().st_mode) != 0o755:
             raise Error(f'Companion theme directory must be 0755: {directory}; '
                         'run rollback, then setup')
+    if any(path == PAM for path, *_ in writes):
+        try:
+            require_no_live_locker()
+        except Error as error:
+            raise Error(f'{error}. This upgrade replaces the lock PAM service: log out of every '
+                        'graphical session and run it from a text console') from None
     old_version, state['version'] = state['version'], VERSION
     transact('upgrade', state, writes, verify=verify_root, expected=seen)
-    print(f'Root setup upgraded from companion {old_version} to {VERSION}. '
-          'Reboot, then update the lock plugin.')
+    print(f'Root setup upgraded from companion {old_version} to {VERSION}. Update the lock '
+          'plugin if omarchy-himmelblau status asks for it.')
+    if native_changed_since_boot():
+        print('sddm-himmelblau changed since boot: reboot (don\'t just log out) to start it.')
+
+
+def boot_time():
+    for line in Path('/proc/stat').read_text().splitlines():
+        if line.startswith('btime '):
+            return int(line.split()[1])
+    raise Error('Unknown boot time')
+
+
+def native_changed_since_boot():
+    """Whether an installed native SDDM file was replaced after this boot, so the running
+    display manager is older than the greeter it would start next. Any user may ask."""
+    boot = boot_time()
+    paths = [*NATIVE_EXECUTABLES, *(path for directory in NATIVE_COMPONENTS if directory.is_dir()
+                                    for path in directory.rglob('*'))]
+    return any(path.lstat().st_ctime >= boot for path in paths if path.exists())
 
 
 
@@ -2022,7 +2050,9 @@ def main(argv=None):
     # status is the same check as plugin-status; existing post-update hooks call it.
     for command in ('doctor', 'status', 'repair', 'plugin-status', 'locker-preflight'):
         sub.add_parser(command)
-    sub.add_parser('upgrade', help='move the previous release\'s setup to this release (root)')
+    sub.add_parser('upgrade', help='move an older release\'s setup to this release (root)')
+    sub.add_parser('reboot-required',
+                   help='exit 0 when sddm-himmelblau changed since boot (any user)')
     for command in ('rollback', 'recover'):
         recovery_parser = sub.add_parser(command)
         recovery_parser.add_argument('--recovery-only', action='store_true',
@@ -2043,6 +2073,10 @@ def main(argv=None):
         plugin_status()
     elif args.command == 'locker-preflight':
         locker_preflight()
+    elif args.command == 'reboot-required':
+        if not native_changed_since_boot():
+            sys.exit(1)
+        print('sddm-himmelblau changed since boot: reboot to start it')
     else:
         root_required()
         if args.command == 'doctor':
