@@ -1,0 +1,61 @@
+# Maintainer: 9Spokes OSS
+# Cloudflare One (WARP) client for Arch/Omarchy, repackaged from Cloudflare's
+# signed Ubuntu repository WITHOUT warp-taskbar: the Omarchy bar widget
+# (warp/plugin, 9spokes.warp) replaces it. Dependencies are what the kept
+# binaries link (ldd), not the taskbar's GTK/WebKit/Ayatana stack.
+#
+# Bumping: set pkgver, run ./verify-upstream.sh, which checks Cloudflare's
+# signature chain (repo key -> InRelease -> Packages -> .deb SHA-256) and
+# prints the SHA-256 to pin below.
+pkgname=cloudflare-warp
+pkgver=2026.8.2115.0
+pkgrel=1
+_dist=resolute
+pkgdesc='Cloudflare One (WARP) client daemon and CLI, without the taskbar app'
+arch=('x86_64')
+url='https://developers.cloudflare.com/cloudflare-one/team-and-resources/devices/warp/'
+license=('LicenseRef-Cloudflare-proprietary')
+depends=('glibc' 'gcc-libs' 'dbus' 'systemd-libs' 'libcap' 'openssl' 'nss' 'tpm2-tss'
+         'nftables' 'iproute2'
+         # warp-dex (DEX network tests)
+         'libpcap' 'libnl' 'rdma-core')
+makedepends=('patchelf')
+provides=('warp-cli' 'warp-svc')
+conflicts=('cloudflare-warp-bin')
+options=('!strip' '!debug')
+install=cloudflare-warp.install
+source=("cloudflare-warp_${pkgver}_amd64.deb::https://pkg.cloudflareclient.com/pool/${_dist}/main/c/cloudflare-warp/cloudflare-warp_${pkgver}_amd64.deb")
+sha256sums=('021bfd4741366ee8cb24b71609bbfdf2df4182c7b72fd63fd1520f43092f5747')
+
+prepare() {
+  rm -rf data
+  mkdir data
+  bsdtar -xf data.tar.gz -C data
+}
+
+package() {
+  cd data
+
+  local _bin
+  for _bin in warp-svc warp-cli warp-diag warp-dex; do
+    install -Dm755 "bin/$_bin" "$pkgdir/usr/bin/$_bin"
+  done
+  # Debian names libpcap 1.x "libpcap.so.0.8"; Arch's same ABI is libpcap.so.1.
+  patchelf --replace-needed libpcap.so.0.8 libpcap.so.1 "$pkgdir/usr/bin/warp-dex"
+  ! patchelf --print-needed "$pkgdir/usr/bin/warp-dex" | grep -qx 'libpcap.so.0.8'
+
+  install -Dm644 lib/systemd/system/warp-svc.service "$pkgdir/usr/lib/systemd/system/warp-svc.service"
+  sed -i 's|^ExecStart=/bin/warp-svc$|ExecStart=/usr/bin/warp-svc|' "$pkgdir/usr/lib/systemd/system/warp-svc.service"
+  grep -qx 'ExecStart=/usr/bin/warp-svc' "$pkgdir/usr/lib/systemd/system/warp-svc.service"
+
+  # Finishes browser sign-in: com.cloudflare.warp:// -> warp-cli registration token.
+  install -Dm644 usr/share/applications/com.cloudflare.warp.desktop "$pkgdir/usr/share/applications/com.cloudflare.warp.desktop"
+  sed -i 's|^Exec=/bin/warp-cli |Exec=/usr/bin/warp-cli |' "$pkgdir/usr/share/applications/com.cloudflare.warp.desktop"
+  grep -q '^Exec=/usr/bin/warp-cli ' "$pkgdir/usr/share/applications/com.cloudflare.warp.desktop"
+  install -Dm644 usr/share/icons/hicolor/scalable/apps/zero-trust-orange.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/zero-trust-orange.svg"
+
+  # Left out on purpose: bin/warp-taskbar, usr/lib/warp/ (Flutter app),
+  # warp-taskbar.service, com.cloudflare.WarpTaskbar.{desktop,service} and the
+  # XDG autostart entry.
+}

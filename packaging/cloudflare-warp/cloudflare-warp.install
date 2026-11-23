@@ -1,0 +1,19 @@
+post_install() {
+  echo '==> Enable the daemon:  systemctl enable --now warp-svc.service'
+  echo '==> Enrollment reads /var/lib/cloudflare-warp/mdm.xml (installed by the company package).'
+}
+
+pre_remove() {
+  systemctl disable --now warp-svc.service >/dev/null 2>&1 || true
+}
+
+# Same network cleanup as Cloudflare's own prerm/postrm: the daemon leaves a
+# systemd-resolved drop-in and an nftables table while it runs. State under
+# /var/lib/cloudflare-warp (registration, mdm.xml) is left in place.
+post_remove() {
+  if [ -f /etc/systemd/resolved.conf.d/cloudflare-warp.conf ]; then
+    rm -f /etc/systemd/resolved.conf.d/cloudflare-warp.conf
+    systemctl try-restart systemd-resolved.service >/dev/null 2>&1 || true
+  fi
+  nft delete table inet cloudflare-warp 2>/dev/null || true
+}
