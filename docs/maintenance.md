@@ -146,43 +146,85 @@ Native SDDM replacement has its own package rollback. The companion's root rollb
 
 ## Upgrading between releases
 
-`sudo omarchy-himmelblau upgrade` moves a setup from the release recorded as
-`previous-release` in `assets/patches.json` to the installed companion's version. It
-is the only command that accepts state written by another release, apart from
-`rollback`. The order:
+`sudo omarchy-himmelblau upgrade` moves a setup from any release listed under `releases`
+in `assets/patches.json` to the installed companion's version. Apart from `rollback`, it
+is the only command that accepts state written by another release.
 
-1. Upgrade both packages together; `upgrade` checks the native package like `doctor`.
-2. End every graphical session and run `upgrade` from a text console. Like `rollback`,
-   it refuses while a graphical session, locker or compositor other than the login
-   screen's is running, or when it cannot tell.
-3. Run `doctor`, then reboot so the greeter loads the new theme copy.
-4. Update the plugin from an unlocked session and restart the shell. Until then the
-   previous plugin release keeps passing `locker-preflight`, and `status` asks for
-   the update.
+### With omarchy update
+
+The per-user hook (`omarchy hook install post-update
+/usr/share/omarchy-himmelblau/post-update/omarchy-himmelblau`) is a two-line wrapper
+around `/usr/lib/omarchy-himmelblau/post-update`, so the logic updates with the package.
+Nothing root-owned writes into `$HOME`. `omarchy update` runs it as the user after its
+package upgrade and shell restart, before its reboot prompt, while it keeps sudo
+authorized (Omarchy 4.5.0-3 and the lock-lifecycle branch both do this). It:
+
+1. Runs `sudo -n omarchy-himmelblau upgrade`. It never prompts: without the update's
+   authorization, or for a user who can't use sudo, it only says to run it.
+2. Updates the lock plugin, only to exactly this companion's release. `omarchy plugin
+   update` installs whatever the plugin's origin HEAD is, so the hook first clones
+   HEAD and checks it with `omarchy-himmelblau check-plugin` (every file against this
+   release's hashes), then updates, checks the installed plugin again, and restarts the
+   shell only if that passes. The origin could change between the two checks; the
+   second one catches it before the shell loads the new code, and the hook tells you
+   not to restart the shell or log out until `status` passes.
+3. Runs `omarchy-himmelblau reboot-required`. It exits 0 when a native SDDM file was
+   replaced after this boot; the hook then sets Omarchy's `reboot-required` marker.
+4. Runs `status` and reports a failure.
+
+The hook doesn't install itself: nothing a package does as root should write into a
+user's configuration, and a plugin that changed its own update path would be surprising.
+
+### Notices
+
+- A pacman PostTransaction hook (`/usr/share/libalpm/hooks/omarchy-himmelblau.hook`)
+  runs `omarchy-himmelblau upgrade-notice` after either package is installed or
+  upgraded. It is read-only, takes no lock and never fails the transaction. It prints
+  the step left, if any: `upgrade` (before rebooting), `rollback` then `setup`,
+  `recover`, or a reboot.
+- The post-update hook sends a desktop notification for anything it couldn't do.
+- `status` says "Root upgrade pending" when the lock PAM service is an older listed
+  release's. The lock screen's existing setup warning then points to `status`. This
+  covers only releases that change the lock service. The state is root-only, so an
+  upgrade that changes nothing the user can read (0.6.1 to 0.6.2 only restamps the
+  state) shows up only in the pacman and hook notices.
+
+### What upgrade checks
 
 Before writing anything, `upgrade` checks that:
 
-- the state's version is exactly `previous-release.version`. State already at this
-  release is verified with `doctor` and left alone; any other version is refused;
+- the state's version is a listed release. State already at this release is verified
+  with `doctor` and left alone; any other version is refused;
 - every managed file still has exactly the bytes, owner and mode the state records,
   with no repair: a missing or edited file is refused;
-- the recorded theme copy `Main.qml` and lock PAM service are exactly what the previous
-  release wrote (`previous-release.sddm-conversation` and `lock-pam`);
+- the recorded theme copy `Main.qml` and lock PAM service are exactly what that release
+  wrote (its `sddm-conversation` and `lock-pam`);
 - every other generated file (recovery-account policy, PIN-change service, SDDM
   override, admin rule, patched `system-auth`) is what this release would write too;
 - identity, configuration, native payload, upstream sources, the theme copy's tree
   and pambase pass the same checks as `doctor`. A pambase upgrade in the same update
-  is refused, because `repair` cannot run on the previous release's state.
+  is refused, because `repair` cannot run on another release's state.
 
 It then writes only the outputs that changed, sets the state's version, and checks the
 result with `doctor`'s checks in one journalled transaction: a failure undoes it, and
 an interrupted one needs `recover`. Each file's rollback target is unchanged, so a
-later `rollback` still restores what `setup` found. Anything `upgrade` refuses goes
-through `rollback` with the new companion, then `setup`.
+later `rollback` still restores what `setup` found.
 
-Each release can only upgrade from the release before it. A machine that skips a
-release, or that runs a release older than the first one with `upgrade`, rolls back
-and sets up again.
+### What still needs a logout or a reboot
+
+- **Replacing the lock PAM service.** A running locker uses it on its next
+  authentication, and root can't tell which plugin code a running shell has loaded
+  (files on disk aren't the loaded QML). So `upgrade` then refuses while a graphical
+  session, locker or compositor other than the login screen's runs, or when it can't
+  tell, and says to log out. No release so far has changed that service.
+- **A new `sddm-himmelblau`.** The running display manager starts the greeter from the
+  new files after a logout, and its own code changes only when it restarts, which ends
+  every session. Reboot rather than just log out, and run `upgrade` first: a new daemon
+  with an old theme copy may not offer sign-in.
+- **The plugin**, when its origin doesn't hold exactly this release yet: update it
+  later, then restart the shell (no logout).
+- **Anything `upgrade` refuses**: `rollback` with the new companion, then `setup`.
+- **The theme copy** needs neither: the greeter reads it when it next starts.
 
 ## System PAM and pambase upgrades
 

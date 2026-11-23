@@ -49,16 +49,22 @@ package archives, `source.tar.gz`, `sddm-corresponding-source.tar.gz` and
 source) and `source.tar.gz` (companion, patches, recipes, tests) with the native
 binary, so a release does not depend on the upstream download staying available.
 
-## The previous release
+## Releases upgrade accepts
 
-`upgrade` moves a setup from exactly one earlier release, recorded as
-`previous-release` in `assets/patches.json`. When you bump `VERSION`, copy into it from
-the release being replaced (its tagged `assets/patches.json`):
+`upgrade` moves a setup from any release listed under `releases` in
+`assets/patches.json`. When you bump `VERSION`, add the release being replaced, from
+its tagged `assets/patches.json`:
 
-- `version`: that release's companion version;
-- `sddm-conversation`: its `sddm-conversation.after`;
-- `lock-pam`: its `lock-pam.after`;
-- `plugin-files`: its `fixed-plugin.files`, so its plugin keeps locking until updated.
+```json
+"X.Y.Z": {
+  "sddm-conversation": "<its sddm-conversation.after>",
+  "lock-pam": "<its lock-pam.after>",
+  "plugin-files": { "<its fixed-plugin.files>": "..." }
+}
+```
+
+Keep the older entries, so skipped releases still upgrade. List only releases whose
+state uses the current format (`SCHEMA`); 0.6.0 is left out by decision.
 
 `upgrade` rewrites only the theme copy's `Main.qml` and the lock PAM service. If a
 release changes any other file `setup` writes (the patched `system-auth`, the PIN-change
@@ -67,10 +73,14 @@ refuses with "Upgrade cannot change"; if it adds or removes one, `upgrade` refus
 managed file set. Extend `upgrade` and its tests for that change, or say in the release
 notes that the release needs `rollback`, then `setup`.
 
-A release that changes `lock-pam.after` also stops the previous plugin locking between
-the package upgrade and `upgrade`: `locker-preflight` accepts only the current release's
-lock PAM service. Say so in its release notes (log out before upgrading the packages),
-or have `lock_prerequisites` accept `previous-release.lock-pam` too.
+A release that changes `lock-pam.after` makes `upgrade` refuse while a graphical
+session runs, so it needs a logout. Between the package upgrade and `upgrade`, the
+lock's setup check warns (`status` says "Root upgrade pending"), but the lock still
+locks. Say so in its release notes.
+
+The post-update hook installs the plugin only when its origin HEAD is exactly this
+release, so publish the release's plugin (merge and tag) before users update. A plugin
+change merged to `main` before its companion release makes the hook wait.
 
 ## Publishing
 

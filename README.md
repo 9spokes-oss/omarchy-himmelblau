@@ -110,27 +110,48 @@ join a tenant or reload sessions. Root `doctor` checks files and sources; it doe
 test daemon negotiation, authentication or sessions. User `status` performs the same
 checks as `plugin-status`; each command refuses the wrong privilege level.
 
-Upgrades go one release at a time:
+### Upgrading
 
-1. Upgrade `omarchy-himmelblau` and `sddm-himmelblau` together.
-2. Log out of every graphical session. From a text console (the login screen may stay
-   up), run `sudo omarchy-himmelblau upgrade`, then `sudo omarchy-himmelblau doctor`.
-3. Reboot.
-4. From an unlocked session, update the plugin to the same version and check it with
-   `omarchy-himmelblau status`.
+Install the `omarchy update` hook once, as the desktop user:
 
-`upgrade` accepts only state written by the release just before this one, and only
-while every managed file is exactly what that release wrote. It rewrites only the
-files that changed between the two releases (the theme copy's `Main.qml` and the lock
-PAM service) and records the new version, in one journalled transaction. It refuses
-anything else: a skipped release, drift, a pambase upgrade in the same update, or a
-running graphical session or locker. In those cases run `sudo omarchy-himmelblau
-rollback` with the new companion, then `setup`. Until `upgrade` runs, `doctor`, `setup`,
-`repair` and `policy` refuse the previous release's state and point to it. The previous
-release's plugin keeps locking, but `status` asks for the plugin update. State from
-`0.5.3` and earlier predates the current format and is refused by every command: roll
-it back with the companion that wrote it before upgrading. See
-[maintenance](docs/maintenance.md#upgrading-between-releases).
+```sh
+omarchy hook install post-update /usr/share/omarchy-himmelblau/post-update/omarchy-himmelblau
+```
+
+Then `omarchy update` finishes a companion upgrade from the running desktop. After its
+packages and shell restart, the hook:
+
+1. runs `sudo omarchy-himmelblau upgrade` (using the update's sudo authorization);
+2. updates the lock plugin, but only when the plugin's origin holds exactly the new
+   companion release, and restarts the shell only if the update installed it;
+3. marks a reboot as required when `sddm-himmelblau` changed, so `omarchy update`
+   offers one at the end.
+
+Anything it can't do appears in the update output and as a desktop notification. A
+`pacman` hook also prints the step left after any upgrade of either package, including
+a plain `pacman -Syu`.
+
+Without the hook, after upgrading both packages run `sudo omarchy-himmelblau upgrade`,
+then `omarchy plugin update 9spokes.himmelblau-lock`, `omarchy-restart-shell` and
+`omarchy-himmelblau status`. If `sddm-himmelblau` changed (`omarchy-himmelblau
+reboot-required` exits 0), run `upgrade` before rebooting, and reboot rather than just
+log out.
+
+`upgrade` accepts state from any earlier release that uses the current state format
+(listed in `assets/patches.json`), so skipped releases are fine, and only while every
+managed file is exactly what that release wrote. It rewrites only what changed between
+the two releases (the theme copy's `Main.qml` and the lock PAM service) and records the
+new version, in one journalled transaction. It runs from a live desktop unless it
+replaces the lock PAM service; then log out of every graphical session and run it from
+a text console (the login screen may stay up). No release so far has changed that
+service.
+
+It refuses anything else: an unlisted release, drift, or a pambase upgrade in the same
+update. Then run `sudo omarchy-himmelblau rollback` with the new companion, then
+`setup`. Until `upgrade` runs, `doctor`, `setup`, `repair` and `policy` refuse the old
+state and point to it. An older listed plugin release passes the lock's setup check,
+but `status` asks for the update. State from `0.6.0` and earlier is refused: roll it
+back, then set up again. See [maintenance](docs/maintenance.md#upgrading-between-releases).
 
 ## Install the Omarchy plugin
 
@@ -194,8 +215,8 @@ operation cannot undo a credential change already committed by the daemon.
 
 Privileged commands use fixed executable paths and an isolated Python interpreter.
 The companion tracks exact managed files, identity mappings and native payload hashes;
-unknown configuration, source or package drift is refused. Explicit `upgrade` moves the
-previous release's setup to this one; old 0.1/0.2 state is no longer migrated. See
+unknown configuration, source or package drift is refused. Explicit `upgrade` moves
+an earlier release's setup to this one; old 0.1/0.2 state is no longer migrated. See
 [security policy](SECURITY.md), [maintenance](docs/maintenance.md)
 and [release trust boundaries](docs/releasing.md).
 
