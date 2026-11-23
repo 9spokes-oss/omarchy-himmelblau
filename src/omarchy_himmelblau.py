@@ -1486,6 +1486,42 @@ def upgrade():
         print('sddm-himmelblau changed since boot: reboot (don\'t just log out) to start it.')
 
 
+def upgrade_notice():
+    """Run by pacman after either package changes: say what step, if any, is left.
+    Read-only, takes no lock, and never fails the transaction."""
+    def say(message):
+        print(f'omarchy-himmelblau: {message}')
+    try:
+        check_state_directory(allow_journal=True)
+        if journal_path().exists() or journal_path().is_symlink():
+            say('a root change was interrupted; run sudo omarchy-himmelblau recover')
+            return
+        if read(STATE) is None:
+            return  # Not set up.
+        version = load_state(any_version=True)['version']
+        if version != VERSION and older_release(version) is not None:
+            say(f'the work sign-in setup is from {version}. Run sudo omarchy-himmelblau upgrade '
+                'before rebooting (omarchy update runs it if its post-update hook is installed)')
+        elif version != VERSION:
+            say(f'the work sign-in setup is from {version}, which this companion cannot upgrade. '
+                'Run sudo omarchy-himmelblau rollback, then setup')
+        elif native_changed_since_boot():
+            say('sddm-himmelblau changed: reboot (not just log out) to start it')
+    except Exception as error:  # A notice must never fail the package transaction.
+        say(f'could not check the setup ({error}); run sudo omarchy-himmelblau doctor')
+
+
+def check_plugin(directory):
+    """Exit 0 when directory holds exactly this release's plugin files (any user)."""
+    def no_symlink(path):
+        if path.is_symlink():
+            raise Error(f'Symlink refused: {path}')
+    release = plugin_release(Path(directory).absolute(), no_symlink)
+    if release != VERSION:
+        raise Error(f'{directory} is plugin release {release or "unknown"}, not {VERSION}')
+    print(f'{directory} is the {VERSION} plugin release.')
+
+
 def boot_time():
     for line in Path('/proc/stat').read_text().splitlines():
         if line.startswith('btime '):
@@ -2005,6 +2041,9 @@ def lock_prerequisites():
     # The lock uses only the dedicated service; stock PAM matters to setup/repair.
     data = read(PAM)
     if data is None or digest(data) != manifest('lock-pam')['after']:
+        if data is not None and any(older_release(version)['lock-pam'] == digest(data)
+                                    for version in manifest('releases')):
+            raise Error('Root upgrade pending: run sudo omarchy-himmelblau upgrade')
         raise Error('Dedicated lock PAM is missing or changed')
     metadata = PAM.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
@@ -2053,6 +2092,10 @@ def main(argv=None):
     sub.add_parser('upgrade', help='move an older release\'s setup to this release (root)')
     sub.add_parser('reboot-required',
                    help='exit 0 when sddm-himmelblau changed since boot (any user)')
+    sub.add_parser('upgrade-notice', help='print the step a package change left (root, pacman hook)')
+    check_parser = sub.add_parser('check-plugin',
+                                  help='exit 0 when a directory holds this release\'s plugin (user)')
+    check_parser.add_argument('directory')
     for command in ('rollback', 'recover'):
         recovery_parser = sub.add_parser(command)
         recovery_parser.add_argument('--recovery-only', action='store_true',
@@ -2073,6 +2116,9 @@ def main(argv=None):
         plugin_status()
     elif args.command == 'locker-preflight':
         locker_preflight()
+    elif args.command == 'check-plugin':
+        user_required()
+        check_plugin(args.directory)
     elif args.command == 'reboot-required':
         if not native_changed_since_boot():
             sys.exit(1)
@@ -2089,6 +2135,8 @@ def main(argv=None):
             repair()
         elif args.command == 'upgrade':
             upgrade()
+        elif args.command == 'upgrade-notice':
+            upgrade_notice()
         elif args.command == 'rollback':
             rollback(args.recovery_only)
         elif args.command == 'recover':

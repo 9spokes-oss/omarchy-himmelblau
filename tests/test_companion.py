@@ -2493,4 +2493,72 @@ class CompanionTest(unittest.TestCase):
             m.main(['upgrade'])
             upgrade.assert_called_once_with()
 
+    # Notices and the plugin check behind omarchy update's hook.
+
+    def notice(self):
+        before = m.sys.stdout.getvalue()
+        m.upgrade_notice()  # Never raises.
+        return m.sys.stdout.getvalue()[len(before):]
+
+    def test_upgrade_notice_names_the_step_left_and_never_fails(self):
+        self.assertEqual(self.notice(), '')  # Not set up.
+        self.setup()
+        later = patch.object(m, 'boot_time', return_value=2 ** 40)
+        with later:
+            self.assertEqual(self.notice(), '')
+        self.assertIn('reboot (not just log out)', self.notice())  # Fixture files postdate any boot.
+        state = m.load_state(); state['version'] = '0.0.9'; m.save_state(state)
+        self.releases = {'0.0.9': {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64, 'plugin-files': {}}}
+        manifest = m.manifest
+        with patch.object(m, 'manifest', lambda name: self.releases if name == 'releases' else manifest(name)):
+            self.assertIn('setup is from 0.0.9. Run sudo omarchy-himmelblau upgrade before rebooting', self.notice())
+            state['version'] = '0.0.1'; m.save_state(state)
+            self.assertIn('from 0.0.1, which this companion cannot upgrade. Run sudo omarchy-himmelblau rollback, then setup',
+                          self.notice())
+        m.journal_path().write_text('{}'); m.journal_path().chmod(0o600)
+        self.assertIn('run sudo omarchy-himmelblau recover', self.notice())
+        m.journal_path().unlink()
+        m.STATE.write_text('not json')
+        self.assertIn('could not check the setup', self.notice())
+
+    def test_check_plugin_accepts_only_this_release(self):
+        directory, listing = self.fixed_plugin_fixture()
+        m.check_plugin(directory)
+        m.main(['check-plugin', str(directory)])
+        with patch.object(m.os, 'geteuid', return_value=0):
+            with self.assertRaisesRegex(m.Error, 'not root'): m.main(['check-plugin', str(directory)])
+        service = directory / 'plugin/Service.qml'
+        original = service.read_bytes()
+        older = original + b'// release 0.0.8\n'
+        releases = {'0.0.8': {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64,
+                              'plugin-files': dict(m.manifest('fixed-plugin')['files'],
+                                                   **{'plugin/Service.qml': m.digest(older)})}}
+        manifest = m.manifest
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)):
+            service.write_bytes(older)
+            with self.assertRaisesRegex(m.Error, f'is plugin release 0.0.8, not {m.VERSION}'): m.check_plugin(directory)
+            service.write_bytes(original + b'// drift\n')
+            with self.assertRaisesRegex(m.Error, 'is plugin release unknown'): m.check_plugin(directory)
+            service.unlink(); service.symlink_to(directory / 'plugin/LockView.qml')
+            with self.assertRaisesRegex(m.Error, 'Symlink refused'): m.check_plugin(directory)
+
+    def test_status_says_when_the_lock_service_waits_for_a_root_upgrade(self):
+        self.setup()
+        old = b'# an older release lock service\n'
+        releases = {'0.0.9': {'sddm-conversation': 'a' * 64, 'lock-pam': m.digest(old), 'plugin-files': {}}}
+        manifest = m.manifest
+        stat = Path.stat
+        def root_owned(path, *args, **kwargs):
+            result = stat(path, *args, **kwargs)
+            return SimpleNamespace(st_uid=0, st_mode=result.st_mode) if path == m.PAM else result
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)), \
+                patch.object(Path, 'stat', root_owned):
+            m.lock_prerequisites()
+            m.PAM.write_bytes(old)
+            with self.assertRaisesRegex(m.Error, 'Root upgrade pending: run sudo omarchy-himmelblau upgrade'):
+                m.lock_prerequisites()
+            m.PAM.write_bytes(old + b'# drift\n')
+            with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing or changed'):
+                m.lock_prerequisites()
+
 if __name__ == '__main__': unittest.main()

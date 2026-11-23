@@ -1,0 +1,12 @@
+# Prints the step a companion or native SDDM upgrade leaves, if any. Read-only.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = omarchy-himmelblau
+Target = sddm-himmelblau
+
+[Action]
+Description = Checking the Entra sign-in setup against the installed companion...
+When = PostTransaction
+Exec = /usr/bin/omarchy-himmelblau upgrade-notice
