@@ -707,7 +707,7 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaises(m.Error): action()
             listing.pop()
             service = directory / 'plugin/Service.qml'; service.write_bytes(service.read_bytes()+b'// drift\n')
-            with self.assertRaisesRegex(m.Error, 'differs from companion release'): m.plugin_status()
+            with self.assertRaisesRegex(m.Error, 'differs from every companion release'): m.plugin_status()
         m.PAM.unlink()
         with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing'): m.lock_prerequisites()
 
@@ -729,42 +729,51 @@ class CompanionTest(unittest.TestCase):
             with self.assertRaises(m.Error):
                 m.locker_preflight()
 
-    def test_previous_plugin_release_still_locks_but_must_be_updated(self):
+    def test_older_plugin_releases_still_pass_preflight_but_must_be_updated(self):
         directory, listing = self.fixed_plugin_fixture()
         listing[0]['enabled'] = False; listing[1]['enabled'] = True
         service = directory / 'plugin/Service.qml'
-        service.write_bytes(service.read_bytes() + b'// previous release\n')
+        original = service.read_bytes()
         current = m.manifest('fixed-plugin')
-        previous = dict(m.manifest('previous-release'))
-        previous['plugin-files'] = dict(current['files'], **{'plugin/Service.qml': m.digest(service.read_bytes())})
+        releases = {}
+        for version in ('0.0.7', '0.0.8'):
+            data = original + f'// release {version}\n'.encode()
+            releases[version] = {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64,
+                                 'plugin-files': dict(current['files'], **{'plugin/Service.qml': m.digest(data)})}
         manifest = m.manifest
-        with patch.object(m, 'manifest', lambda name: previous if name == 'previous-release' else manifest(name)), \
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)), \
                 patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing), \
                 patch.object(m.subprocess, 'run') as run:
-            m.locker_preflight()
-            m.main(['locker-preflight'])
-            needs = f'{previous["version"]} needs updating to {current["version"]}'
-            for action in (m.plugin_status, lambda: m.main(['status'])):
-                with self.assertRaisesRegex(m.Error, needs): action()
+            for version in releases:
+                with self.subTest(version):
+                    service.write_bytes(original + f'// release {version}\n'.encode())
+                    m.locker_preflight()
+                    m.main(['locker-preflight'])
+                    needs = f'{version} needs updating to {current["version"]}'
+                    for action in (m.plugin_status, lambda: m.main(['status'])):
+                        with self.assertRaisesRegex(m.Error, needs): action()
             run.assert_not_called()
-            # Neither release: refused everywhere, the preflight included.
-            service.write_bytes(service.read_bytes() + b'// drift\n')
+            # No release: refused everywhere, the preflight included.
+            service.write_bytes(original + b'// drift\n')
             for action in (m.locker_preflight, m.plugin_status):
-                with self.assertRaisesRegex(m.Error, 'differs from companion release'): action()
+                with self.assertRaisesRegex(m.Error, 'differs from every companion release'): action()
 
-    def test_previous_plugin_release_record_matches_current_layout(self):
+    def test_older_plugin_release_records_match_current_layout(self):
         current = m.manifest('fixed-plugin')['files']
-        previous = m.manifest('previous-release')['plugin-files']
-        self.assertEqual(set(previous), set(current))
-        # Files that never change between releases must agree; the rest must differ.
-        for name in ('plugin/UPSTREAM-LICENSE', 'plugin/FingerprintModel.js', 'plugin/poster.sh', 'plugin/LICENSE'):
-            self.assertEqual(previous[name], current[name], name)
-        self.assertNotEqual(previous['manifest.json'], current['manifest.json'])
+        self.assertTrue(m.manifest('releases'))
+        for version in m.manifest('releases'):
+            with self.subTest(version):
+                older = m.older_release(version)['plugin-files']
+                self.assertEqual(set(older), set(current))
+                # Files that never change between releases must agree; the rest must differ.
+                for name in ('plugin/UPSTREAM-LICENSE', 'plugin/FingerprintModel.js', 'plugin/poster.sh', 'plugin/LICENSE'):
+                    self.assertEqual(older[name], current[name], name)
+                self.assertNotEqual(older['manifest.json'], current['manifest.json'])
 
     def test_fixed_plugin_rejects_unlisted_and_symlink_runtime_files(self):
         directory, listing = self.fixed_plugin_fixture()
         extra = directory / 'plugin/Extra.qml'; extra.write_text('unlisted')
-        with self.assertRaisesRegex(m.Error, 'runtime tree'): m.fixed_plugin_files()
+        with self.assertRaisesRegex(m.Error, 'differs from every companion release'): m.fixed_plugin_files()
         extra.unlink(); extra.symlink_to(directory / 'plugin/Service.qml')
         with self.assertRaises(m.Error): m.fixed_plugin_files()
 
@@ -2268,7 +2277,7 @@ class CompanionTest(unittest.TestCase):
         if apply_policy:
             m.policy(True)
         state = m.load_state()
-        previous = dict(m.manifest('previous-release'), version='0.0.9')
+        previous = {'plugin-files': m.manifest('fixed-plugin')['files'], 'version': '0.0.9'}
         for path, name, data in ((m.COPY_THEME / 'Main.qml', 'sddm-conversation', theme),
                                  (m.PAM, 'lock-pam', pam)):
             entry = next(item for item in state['files'] if Path(item['path']) == path)
@@ -2278,8 +2287,9 @@ class CompanionTest(unittest.TestCase):
             previous[name] = entry['after']
         state['version'] = previous['version']
         m.save_state(state)
+        self.releases = {'0.0.9': previous}
         manifest = m.manifest
-        replaced = patch.object(m, 'manifest', lambda name: previous if name == 'previous-release' else manifest(name))
+        replaced = patch.object(m, 'manifest', lambda name: self.releases if name == 'releases' else manifest(name))
         replaced.start(); self.addCleanup(replaced.stop)
         return previous
 
@@ -2317,6 +2327,19 @@ class CompanionTest(unittest.TestCase):
         m.rollback()
         self.assertFalse(m.STATE.exists()); self.assertFalse(m.COPY_THEME.exists()); self.assertFalse(m.PAM.exists())
         self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_upgrade_skips_releases_from_any_listed_one(self):
+        previous = self.previous_setup()
+        # Two releases since the one that wrote this setup: each is listed with its own outputs.
+        self.releases = {'0.0.7': previous,
+                         '0.0.8': dict(previous, **{'sddm-conversation': 'c' * 64}),
+                         '0.0.9': dict(previous, **{'sddm-conversation': 'd' * 64})}
+        state = m.load_state(any_version=True); state['version'] = '0.0.7'; m.save_state(state)
+        with self.assertRaisesRegex(m.Error, r'written by companion 0\.0\.7, not .*; run upgrade$'): m.doctor()
+        m.upgrade()
+        self.assertEqual(m.load_state()['version'], m.VERSION)
+        m.doctor()
+        self.assertIn('upgraded from companion 0.0.7', m.sys.stdout.getvalue())
 
     def test_upgrade_with_unchanged_outputs_only_restamps_the_state(self):
         self.previous_setup(theme=None)
@@ -2362,7 +2385,7 @@ class CompanionTest(unittest.TestCase):
     def test_upgrade_refuses_state_from_any_other_release(self):
         self.previous_setup()
         state = m.load_state(any_version=True); state['version'] = '0.0.1'; m.save_state(state)
-        self.assert_upgrade_refused(r'written by companion 0\.0\.1; upgrade accepts only 0\.0\.9\. '
+        self.assert_upgrade_refused(r'written by companion 0\.0\.1; upgrade accepts 0\.0\.9\. '
                                     'Run rollback, then setup')
         with self.assertRaisesRegex(m.Error, 'run rollback, then setup'): m.doctor()
 

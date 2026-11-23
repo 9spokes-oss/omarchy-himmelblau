@@ -39,12 +39,15 @@ class VersionPinTest(unittest.TestCase):
         self.assertEqual(provenance['baseline_tag'], 'v' + pkgver)
 
 
-    def test_previous_release_is_an_older_release(self):
-        previous = json.loads((ROOT / 'assets/patches.json').read_text())['previous-release']
+    def test_upgrade_releases_are_older_releases(self):
+        releases = json.loads((ROOT / 'assets/patches.json').read_text())['releases']
         number = lambda version: tuple(int(part) for part in version.split('.'))
-        self.assertLess(number(previous['version']), number(m.VERSION))
-        for name in ('sddm-conversation', 'lock-pam'):
-            self.assertRegex(previous[name], '^[0-9a-f]{64}$')
+        self.assertTrue(releases)
+        for version, entry in releases.items():
+            self.assertLess(number(version), number(m.VERSION))
+            for name in ('sddm-conversation', 'lock-pam'):
+                self.assertRegex(entry[name], '^[0-9a-f]{64}$')
+            self.assertTrue(all(isinstance(value, str) for value in entry['plugin-files'].values()))
 
 if __name__ == '__main__':
     unittest.main()

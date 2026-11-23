@@ -206,16 +206,26 @@ def manifest(name):
         required = {'id': str, 'files': dict, 'upstream': dict}
     elif name == 'pambase':
         required = {}  # Supported releases by version; pambase_release() checks each.
-    elif name == 'previous-release':
-        # The one release upgrade moves from and whose plugin locker-preflight still
-        # accepts, with what it wrote for each output upgrade may rewrite.
-        required = {'version': str, 'sddm-conversation': str, 'lock-pam': str,
-                    'plugin-files': dict}
+    elif name == 'releases':
+        required = {}  # Older releases by version; older_release() checks each.
     else:
         required = {'filename': str, 'before': str, 'after': str}
     if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
                                           for key, kind in required.items()):
         raise Error(f'Invalid {path} entry: {name}')
+    return entry
+
+
+def older_release(version):
+    """What an older release, listed in patches.json, wrote for each output upgrade may
+    rewrite, and its plugin files; None for any other version."""
+    entry = manifest('releases').get(version) if version != VERSION else None
+    if entry is None:
+        return None
+    if (not isinstance(entry, dict)
+            or any(not isinstance(entry.get(key), str) for key in ('sddm-conversation', 'lock-pam'))
+            or not isinstance(entry.get('plugin-files'), dict)):
+        raise Error(f'Invalid {ASSETS / "patches.json"} release entry: {version}')
     return entry
 
 
@@ -542,7 +552,7 @@ def load_state(any_version=False):
     check_state_file()
     state = check_state(parse_json(data, STATE))
     if not any_version and state['version'] != VERSION:
-        if state['version'] == manifest('previous-release')['version']:
+        if older_release(state['version']) is not None:
             raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
                         'run upgrade')
         raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
@@ -1386,22 +1396,24 @@ def repair():
 
 @exclusive
 def upgrade():
-    """Move a setup written by the previous companion release to this one, in place.
+    """Move a setup written by an older companion release to this one, in place.
 
-    Accepts state from exactly previous-release, and only while every managed file is
-    still what that release wrote (bytes, owner and mode). Rewrites only the outputs that
-    may change between releases, each from the hash previous-release records for it; every
-    other managed file must already be what this release would write. Restore targets are
-    kept, so rollback still restores what setup found."""
-    previous = manifest('previous-release')
+    Accepts state from any release listed in patches.json (each uses the current state
+    format), and only while every managed file is still what that release wrote (bytes,
+    owner and mode). Rewrites only the outputs that may change between releases, each
+    from the hash that release records for it; every other managed file must already be
+    what this release would write. Restore targets are kept, so rollback still restores
+    what setup found."""
     state = load_state(any_version=True)
     if state['version'] == VERSION:
         doctor()
         print(f'Already at companion {VERSION}; no changes')
         return
-    if state['version'] != previous['version']:
-        raise Error(f'State was written by companion {state["version"]}; upgrade accepts only '
-                    f'{previous["version"]}. Run rollback, then setup')
+    previous = older_release(state['version'])
+    if previous is None:
+        accepted = ', '.join(sorted(manifest('releases'))) or 'none'
+        raise Error(f'State was written by companion {state["version"]}; upgrade accepts '
+                    f'{accepted}. Run rollback, then setup')
     seen = snapshot(root_targets(state))
     require_no_live_locker()
     native_sddm_contract()
@@ -1413,7 +1425,7 @@ def upgrade():
     issues = pambase_issues(state)
     if issues:
         # repair cannot run on another version's state: nothing here may be fixed in place.
-        raise Error('\n'.join([*issues, f'Upgrade needs the {previous["version"]} setup '
+        raise Error('\n'.join([*issues, f'Upgrade needs the {state["version"]} setup '
                                           'unchanged; run rollback, then setup']))
     patch_source('lock-conversation', read(LOCK) or b'')
     patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
@@ -1443,7 +1455,7 @@ def upgrade():
             name, data = pinned[path]
             if entry['after'] != previous[name]:
                 raise Error(f'Upgrade refuses: {path} is not what companion '
-                            f'{previous["version"]} wrote; run rollback, then setup')
+                            f'{state["version"]} wrote; run rollback, then setup')
             if digest(data) != entry['after']:
                 writes.append((path, data, entry['mode'], *owner()))
                 entry['after'] = digest(data)  # Keep the restore target: absence, for both.
@@ -1456,9 +1468,9 @@ def upgrade():
         if stat.S_IMODE(directory.stat().st_mode) != 0o755:
             raise Error(f'Companion theme directory must be 0755: {directory}; '
                         'run rollback, then setup')
-    state['version'] = VERSION
+    old_version, state['version'] = state['version'], VERSION
     transact('upgrade', state, writes, verify=verify_root, expected=seen)
-    print(f'Root setup upgraded from companion {previous["version"]} to {VERSION}. '
+    print(f'Root setup upgraded from companion {old_version} to {VERSION}. '
           'Reboot, then update the lock plugin.')
 
 
@@ -1915,38 +1927,44 @@ def lock_implementations(plugins):
             (plugin['id'] == 'omarchy.lock' or plugin.get('clonedFrom') == 'omarchy.lock')]
 
 
-def fixed_plugin_files(allow_previous=False):
-    """Check the installed fixed plugin. allow_previous also accepts the previous release."""
-    account, home = canonical_user()
-    info = manifest('fixed-plugin')
-    directory = home / '.config/omarchy/plugins' / info['id']
-    user_path_guard(home, directory)
+def plugin_release(directory, guard=lambda path: None):
+    """The release whose plugin files directory holds exactly: VERSION, a listed older
+    release, or None. guard(path) runs before each path is read."""
+    guard(directory)
     runtime_files = set()
     for path in (directory / 'plugin').rglob('*'):
-        user_path_guard(home, path)
+        guard(path)
         if path.is_symlink() or path.is_dir():
             raise Error('Unexpected directory/symlink in fixed plugin runtime tree')
         runtime_files.add(str(path.relative_to(directory)))
-
-    def release(files):
+    def matches(files):
         if runtime_files != {name for name in files if name.startswith('plugin/')}:
-            return 'tree'
+            return False
         for name, wanted in files.items():
             target = directory / name
-            user_path_guard(home, target)
+            guard(target)
             data = read(target)
             if data is None or digest(data) != wanted:
-                return 'source'
-        return None
+                return False
+        return True
+    if matches(manifest('fixed-plugin')['files']):
+        return VERSION
+    for version in manifest('releases'):
+        if matches(older_release(version)['plugin-files']):
+            return version
+    return None
 
-    mismatch = release(info['files'])
-    if mismatch:
-        previous = manifest('previous-release')
-        if release(previous['plugin-files']):
-            raise Error(f'Fixed plugin {"runtime tree" if mismatch == "tree" else "source"}'
-                        ' differs from companion release')
-        if not allow_previous:
-            raise Error(f'Fixed lock plugin {previous["version"]} needs updating to {info["version"]}')
+
+def fixed_plugin_files(allow_older=False):
+    """Check the installed fixed plugin. allow_older also accepts a listed older release."""
+    account, home = canonical_user()
+    info = manifest('fixed-plugin')
+    directory = home / '.config/omarchy/plugins' / info['id']
+    release = plugin_release(directory, lambda path: user_path_guard(home, path))
+    if release is None:
+        raise Error('Fixed plugin differs from every companion release')
+    if release != VERSION and not allow_older:
+        raise Error(f'Fixed lock plugin {release} needs updating to {info["version"]}')
     for name, wanted in info['upstream'].items():
         target = LOCK.parent / name
         data = read(target)
@@ -1965,10 +1983,10 @@ def lock_prerequisites():
         raise Error('Unsafe dedicated lock PAM metadata')
 
 
-def plugin_status(quiet=False, allow_previous=False):
+def plugin_status(quiet=False, allow_older=False):
     user_required()
     lock_prerequisites()
-    info = fixed_plugin_files(allow_previous)
+    info = fixed_plugin_files(allow_older)
     plugins = native_plugins()
     candidates = [plugin for plugin in plugins if plugin['id'] == info['id']]
     if (len(candidates) != 1 or candidates[0].get('firstParty') is not False
@@ -1982,12 +2000,12 @@ def plugin_status(quiet=False, allow_previous=False):
 
 
 def locker_preflight():
-    """Run by the lock plugin: exit 0 when the fixed plugin can authenticate.
+    """Run by the lock plugin after it locks: a failure shows a warning on the lock screen.
 
-    The previous plugin release passes too: it refuses to lock without this check,
-    so an upgrade that updates the companion first must not stop it locking.
+    A listed older plugin release passes too, so updating the companion before the
+    plugin doesn't warn on every lock.
     """
-    plugin_status(quiet=True, allow_previous=True)
+    plugin_status(quiet=True, allow_older=True)
 
 
 def main(argv=None):
