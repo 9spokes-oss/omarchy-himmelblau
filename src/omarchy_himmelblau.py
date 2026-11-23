@@ -1399,7 +1399,7 @@ def upgrade():
         doctor()
         print(f'Already at companion {VERSION}; no changes')
         return
-    if state['version'] != previous['version'] or previous['version'] == VERSION:
+    if state['version'] != previous['version']:
         raise Error(f'State was written by companion {state["version"]}; upgrade accepts only '
                     f'{previous["version"]}. Run rollback, then setup')
     seen = snapshot(root_targets(state))

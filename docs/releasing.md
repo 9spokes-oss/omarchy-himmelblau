@@ -63,8 +63,14 @@ the release being replaced (its tagged `assets/patches.json`):
 `upgrade` rewrites only the theme copy's `Main.qml` and the lock PAM service. If a
 release changes any other file `setup` writes (the patched `system-auth`, the PIN-change
 service, the SDDM override, the admin rule or the recovery-account policy), `upgrade`
-refuses with "Upgrade cannot change". Extend `upgrade` and its tests for that change,
-or say in the release notes that the release needs `rollback`, then `setup`.
+refuses with "Upgrade cannot change"; if it adds or removes one, `upgrade` refuses the
+managed file set. Extend `upgrade` and its tests for that change, or say in the release
+notes that the release needs `rollback`, then `setup`.
+
+A release that changes `lock-pam.after` also stops the previous plugin locking between
+the package upgrade and `upgrade`: `locker-preflight` accepts only the current release's
+lock PAM service. Say so in its release notes (log out before upgrading the packages),
+or have `lock_prerequisites` accept `previous-release.lock-pam` too.
 
 ## Publishing
 

@@ -2261,10 +2261,12 @@ class CompanionTest(unittest.TestCase):
 
     # In-place upgrade from the previous release.
 
-    def previous_setup(self, theme=b'// previous release theme\n', pam=None):
+    def previous_setup(self, theme=b'// previous release theme\n', pam=None, admin=False, apply_policy=False):
         """A setup as a synthetic previous release left it: its version in the state, and
         its own bytes in each output upgrade may rewrite (None: unchanged this release)."""
-        self.setup()
+        with patch.object(m, 'validate_sudo_rule'): self.setup(admin)
+        if apply_policy:
+            m.policy(True)
         state = m.load_state()
         previous = dict(m.manifest('previous-release'), version='0.0.9')
         for path, name, data in ((m.COPY_THEME / 'Main.qml', 'sddm-conversation', theme),
@@ -2326,6 +2328,28 @@ class CompanionTest(unittest.TestCase):
         self.assertEqual(written, [m.STATE])
         self.assertEqual(m.load_state()['version'], m.VERSION)
         m.doctor()
+
+    def test_upgrade_keeps_the_admin_rule_and_policy(self):
+        self.previous_setup(admin=True, apply_policy=True)
+        rule, config = m.SUDOERS.read_bytes(), m.CONFIG.read_bytes()
+        m.upgrade()
+        state = m.load_state()
+        self.assertTrue(state['admin']); self.assertTrue(state['apply_policy'])
+        self.assertEqual((m.SUDOERS.read_bytes(), m.CONFIG.read_bytes()), (rule, config))
+        m.doctor()
+        m.rollback()
+        self.assertFalse(m.SUDOERS.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_upgrade_refuses_an_unknown_managed_file_set(self):
+        self.previous_setup()
+        state = m.load_state(any_version=True)
+        for name, files in (('admin rule without admin', [*state['files'], {**state['files'][0], 'path': str(m.SUDOERS)}]),
+                            ('missing lock service', [item for item in state['files'] if Path(item['path']) != m.PAM])):
+            with self.subTest(name):
+                m.save_state({**state, 'files': files})
+                self.assert_upgrade_refused('Unsupported managed file set')
+        m.save_state(state)
+        m.upgrade(); m.doctor()
 
     def test_upgrade_rewrites_a_previous_lock_service(self):
         self.previous_setup(theme=None, pam=b'# previous release lock service\n')
