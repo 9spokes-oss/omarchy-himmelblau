@@ -276,16 +276,34 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaisesRegex(m.Error, 'Foreign owner'): self.real_user_path_guard(home, target)
 
     def test_rollback_runtime_guard_refuses_live_unknown_and_allows_recovery_override(self):
-        cases = [('[]', None, 1, False), ('bad', None, 1, True),
-                 ('[{"session":"7"}]','Type=wayland\nClass=user\n',1,True),
-                 ('[{"session":"7"}]','Type=tty\nClass=user\n',0,True),
-                 ('[{"session":"7"}]','Type=tty\nClass=user\n',1,False)]
-        for listing, detail, processes, denied in cases:
+        greeter = 'Type=wayland\nClass=greeter\nUser=961\n'
+        one = '[{"session":"c2"}]'
+        # (listing, show-session output, pgrep status, pgrep pids, {pid: owner or None}, denied)
+        cases = [('[]', None, 1, '', {}, False), ('bad', None, 1, '', {}, True),
+                 ('[{"session":"7"}]','Type=wayland\nClass=user\nUser=1000\n',1,'',{},True),
+                 ('[{"session":"7"}]','Type=tty\nClass=user\nUser=1000\n',0,'42\n',{'42':1000},True),
+                 ('[{"session":"7"}]','Type=tty\nClass=user\nUser=1000\n',1,'',{},False),
+                 ('[{"session":"7"}]','Type=tty\nClass=user\nUser=1000\n',2,'',{},True),
+                 # Omarchy's greeter compositor: Hyprland owned by the greeter's user.
+                 (one, greeter, 0, '42\n43\n', {'42': 961, '43': 961}, False),
+                 (one, greeter, 0, '42\n', {'42': None}, False),
+                 (one, greeter, 0, '42\n43\n', {'42': 961, '43': 1000}, True),
+                 (one, greeter, 0, '42\n', {'42': 0}, True),
+                 (one, greeter, 0, 'x\n', {}, True),
+                 (one, 'Type=wayland\nClass=greeter\n', 1, '', {}, True),
+                 (one, 'Type=wayland\nClass=greeter\nUser=0\n', 1, '', {}, True)]
+        real_stat = Path.stat
+        for listing, detail, processes, pids, owners, denied in cases:
             def command(argv, **kwargs):
                 self.assertEqual(kwargs['env'], m.COMMAND_ENV)
-                if argv[0] == '/usr/bin/pgrep': return SimpleNamespace(returncode=processes)
+                if argv[0] == '/usr/bin/pgrep': return SimpleNamespace(returncode=processes, stdout=pids)
                 return SimpleNamespace(stdout=detail if 'show-session' in argv else listing)
-            with patch.object(m.subprocess, 'run', command):
+            def stat(path, *args, **kwargs):
+                if path.parent == Path('/proc'):
+                    if owners[path.name] is None: raise FileNotFoundError(path)
+                    return SimpleNamespace(st_uid=owners[path.name])
+                return real_stat(path, *args, **kwargs)
+            with patch.object(m.subprocess, 'run', command), patch.object(Path, 'stat', stat):
                 if denied:
                     with self.assertRaises(m.Error): self.real_live_guard()
                 else: self.real_live_guard()

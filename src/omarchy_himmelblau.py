@@ -1630,20 +1630,39 @@ def require_no_live_locker(recovery_only=False):
         sessions = json.loads(result.stdout)
         if not isinstance(sessions, list):
             raise Error('Unknown session enumeration')
+        greeters = set()
         for session in sessions:
             name = session.get('session') if isinstance(session, dict) else None
             if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name):
                 raise Error('Unknown session identifier')
-            detail = run(['/usr/bin/loginctl', 'show-session', name,
-                          '--property=Type', '--property=Class'], text=True, timeout=5)
+            detail = run(['/usr/bin/loginctl', 'show-session', name, '--property=Type',
+                          '--property=Class', '--property=User'], text=True, timeout=5)
             properties = dict(line.split('=', 1) for line in detail.stdout.splitlines() if '=' in line)
             if (properties.get('Type') not in ('tty', 'unspecified', 'x11', 'wayland')
                     or not properties.get('Class')):
                 raise Error('Unknown session state')
-            if properties['Type'] in ('x11', 'wayland') and properties['Class'] != 'greeter':
+            if properties['Class'] == 'greeter':
+                uid = properties.get('User', '')
+                if not re.fullmatch(r'[1-9][0-9]{0,9}', uid):
+                    raise Error('Unknown greeter owner')
+                greeters.add(int(uid))
+            elif properties['Type'] in ('x11', 'wayland'):
                 raise Error('A graphical session remains active')
-        processes = run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'], check=False, timeout=5)
-        if processes.returncode != 1:
+        # Omarchy's SDDM runs its greeter on Hyprland as the greeter user: that compositor
+        # is the login screen, not a session or locker. Any other owner refuses.
+        processes = run(['/usr/bin/pgrep', '-x', 'quickshell|qs|Hyprland'], check=False,
+                        text=True, timeout=5)
+        if processes.returncode == 0:
+            for pid in processes.stdout.split():
+                if not re.fullmatch(r'[1-9][0-9]{0,9}', pid):
+                    raise Error('Unknown process identifier')
+                try:
+                    owner = Path('/proc', pid).stat().st_uid
+                except FileNotFoundError:
+                    continue
+                if owner not in greeters:
+                    raise Error('Locker or compositor processes are running')
+        elif processes.returncode != 1:
             raise Error('Locker or compositor processes are running')
     except (OSError, ValueError, subprocess.SubprocessError, Error):
         raise Error('A graphical session or locker is running, or session state is unknown') from None
