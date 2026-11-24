@@ -2,7 +2,8 @@
 """Pin the independently built native payload into the companion package input.
 
 Usage: finish-release.py RELEASE_DIRECTORY NATIVE_PACKAGE
-Run only on the artifact you built from the reviewed release export. A package's
+Run only on the artifact you built from the reviewed release export or, when
+release.json names native_reused_from, on that release's published native package. A package's
 own metadata is not a signature; published SHA256SUMS and source are the trust
 boundary. This creates inputs for a separately trusted companion artifact.
 """
@@ -51,9 +52,13 @@ with tarfile.open(fileobj=io.BytesIO(data)) as archive:
                          lambda m=m: archive.extractfile(m).read()) for m in members)
     except PayloadError as error:
         raise SystemExit(str(error)) from None
+# A reused native package was built from the previous release's commit.
+source_commit = record.get('native_source_commit', record['commit'])
+if not re.fullmatch(r'[0-9a-f]{40}', source_commit):
+    raise SystemExit('release.json has an invalid native_source_commit')
 manifest = {'package': 'sddm-himmelblau', 'version': version,
             'artifact_sha256': hashlib.sha256(package.read_bytes()).hexdigest(),
-            'source_commit': record['commit'], 'files': files}
+            'source_commit': source_commit, 'files': files}
 payload = (json.dumps(manifest, indent=2) + '\n').encode()
 (directory / 'companion/native-payload.json').write_bytes(payload)
 recipe.write_text(recipe.read_text().replace('@NATIVE_PAYLOAD_SHA256@', hashlib.sha256(payload).hexdigest()))
