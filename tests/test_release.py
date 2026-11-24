@@ -46,6 +46,37 @@ def native_package(path, pkginfo=b'pkgname = sddm-himmelblau\npkgver = ' + NATIV
     path.write_bytes(subprocess.check_output(['/usr/bin/zstd', '-q', '-c'], input=payload.getvalue()))
     return path
 
+def release_repository(root):
+    """A minimal checkout with the release tools and a tagged first release."""
+    (root / 'tools').mkdir()
+    for name in ('prepare-release.py', 'native_inputs.py'):
+        shutil.copyfile(ROOT / 'tools' / name, root / 'tools' / name)
+    (root / 'tools/prepare-native.py').write_text('# fixture\n')
+    (root / 'packaging/sddm-himmelblau').mkdir(parents=True)
+    (root / 'packaging/PKGBUILD').write_text('pkgver=1.0.0\npkgrel=1\nsource=(@SOURCE_SHA256@)\n')
+    native = root / 'packaging/sddm-himmelblau'
+    (native / 'PKGBUILD').write_text('pkgver=0.21.0\npkgrel=5\n')
+    for name in ('0000-arch-cmake4.patch', '0001-native-conversation.patch', '0002-greeter-keep-running.patch',
+                 'sddm-himmelblau-pin-change.pam', 'LGPL-2.1.txt'):
+        (native / name).write_text(name + '\n')
+    (root / 'tests/native-sddm').mkdir(parents=True)
+    (root / 'tests/native-sddm/run.py').write_text('# proofs\n')
+    (root / 'LICENSE').write_text('license\n')
+    (root / 'README.md').write_text('readme\n')
+    git = ['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@example.invalid']
+    subprocess.run([*git, 'init', '-q'], check=True)
+    def commit(message):
+        subprocess.run([*git, 'add', '-A'], check=True)
+        subprocess.run([*git, 'commit', '-q', '-m', message], check=True)
+        return subprocess.check_output([*git, 'rev-parse', 'HEAD']).decode().strip()
+    first = commit('first release')
+    subprocess.run([*git, 'tag', 'v1.0.0'], check=True)
+    return commit, first
+
+def prepare(root, name):
+    return subprocess.run(['python3', str(root / 'tools/prepare-release.py'), str(root.parent / name)],
+                          capture_output=True, timeout=30)
+
 def finish(*arguments):
     return subprocess.run(['python3', str(ROOT / 'tools/finish-release.py'), *map(str, arguments)],
                           capture_output=True, timeout=10)
@@ -55,7 +86,8 @@ class ReleaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / 'tools').mkdir()
-            shutil.copyfile(ROOT / 'tools/prepare-release.py', root / 'tools/prepare-release.py')
+            for name in ('prepare-release.py', 'native_inputs.py'):
+                shutil.copyfile(ROOT / 'tools' / name, root / 'tools' / name)
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             result = subprocess.run(['python3', str(root / 'tools/prepare-release.py'), str(root / 'out')], capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
@@ -88,6 +120,81 @@ class ReleaseTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn(b'no pkgver or pkgrel', result.stderr)
             self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_unchanged_native_inputs_reuse_the_previous_release(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'; root.mkdir()
+            commit, first = release_repository(root)
+            (root / 'README.md').write_text('changed\n')
+            second = commit('companion change')
+            result = prepare(root, 'out')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b'do not build native/', result.stdout)
+            record = json.loads((Path(temp) / 'out/release.json').read_text())
+            self.assertEqual(record['commit'], second)
+            self.assertEqual(record['native_source_commit'], first)
+            self.assertEqual(record['native_reused_from'], 'v1.0.0')
+            self.assertEqual(record['native_version'], '0.21.0-5')
+
+    def test_changed_native_inputs_require_a_pkgrel_bump(self):
+        for path in ('packaging/sddm-himmelblau/0001-native-conversation.patch', 'tests/native-sddm/run.py',
+                     'LICENSE', 'tools/prepare-native.py'):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / 'repo'; root.mkdir()
+                commit, first = release_repository(root)
+                (root / path).write_text('changed\n')
+                commit('native change')
+                result = prepare(root, 'out')
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(b'Native inputs changed since v1.0.0', result.stderr)
+                self.assertIn(b'bump pkgrel', result.stderr)
+                self.assertNotIn(b'Traceback', result.stderr)
+                self.assertFalse((Path(temp) / 'out').exists())
+
+    def test_changed_native_inputs_with_a_bumped_pkgrel_rebuild(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'; root.mkdir()
+            commit, first = release_repository(root)
+            (root / 'packaging/sddm-himmelblau/0001-native-conversation.patch').write_text('changed\n')
+            (root / 'packaging/sddm-himmelblau/PKGBUILD').write_text('pkgver=0.21.0\npkgrel=6\n')
+            second = commit('native change')
+            result = prepare(root, 'out')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b'Build native/ with makepkg', result.stdout)
+            record = json.loads((Path(temp) / 'out/release.json').read_text())
+            self.assertEqual(record['native_source_commit'], second)
+            self.assertNotIn('native_reused_from', record)
+            self.assertEqual(record['native_version'], '0.21.0-6')
+
+    def test_first_release_builds_the_native_package(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'; root.mkdir()
+            commit, first = release_repository(root)
+            subprocess.run(['git', '-C', str(root), 'tag', '-d', 'v1.0.0'], check=True, capture_output=True)
+            (root / 'README.md').write_text('changed\n')
+            second = commit('second')
+            result = prepare(root, 'out')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads((Path(temp) / 'out/release.json').read_text())
+            self.assertEqual(record['native_source_commit'], second)
+            self.assertNotIn('native_reused_from', record)
+
+    @unittest.skipUnless(Path('/usr/bin/zstd').exists(), '/usr/bin/zstd is required for package archive verification')
+    def test_finish_records_the_reused_native_source_commit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            release_directory(root)
+            record = json.loads((root / 'release.json').read_text())
+            for source_commit, code in (('b' * 40, 0), ('not-a-commit', 1)):
+                (root / 'companion/PKGBUILD').write_text('@NATIVE_PAYLOAD_SHA256@')
+                (root / 'release.json').write_text(json.dumps({**record, 'native_source_commit': source_commit}))
+                result = finish(root, native_package(root / 'native.pkg.tar.zst'))
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code == 0:
+                    manifest = json.loads((root / 'companion/native-payload.json').read_text())
+                    self.assertEqual(manifest['source_commit'], source_commit)
+                else:
+                    self.assertIn(b'invalid native_source_commit', result.stderr)
 
     def test_documented_package_glob_skips_the_debug_package(self):
         import fnmatch

@@ -2,6 +2,8 @@
 """Export a clean committed tree and checksum-pinned makepkg inputs.
 
 Build native/ first, then run finish-release.py with its exact package archive.
+When the native inputs are unchanged since the previous release, reuse that
+release's native package instead (see tools/native_inputs.py).
 Nothing installs packages, changes services, or reads private lab files.
 """
 import gzip
@@ -13,6 +15,11 @@ import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
+# The export requires a clean worktree: importing must not write __pycache__ into it.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(root / 'tools'))
+from native_inputs import NativeInputsError, decide  # noqa: E402
+
 def git(*args):
     return subprocess.check_output(['/usr/bin/git', '-C', str(root), *args])
 if git('status', '--porcelain', '--untracked-files=all'):
@@ -21,13 +28,17 @@ commit = git('rev-parse', 'HEAD').decode().strip()
 tree = git('rev-parse', commit + '^{tree}').decode().strip()
 def committed(path):
     return git('show', commit + ':' + path)
+try:
+    native = decide(root, commit)
+except NativeInputsError as error:
+    raise SystemExit(str(error)) from None
 output = Path(sys.argv[1]).resolve()
 output.mkdir(parents=True, exist_ok=False)
 archive = gzip.compress(git('archive', '--format=tar', '--prefix=omarchy-himmelblau/', commit), mtime=0)
 digest = hashlib.sha256(archive).hexdigest()
 (output / 'source.tar.gz').write_bytes(archive)
 version = re.search(r'^pkgver=(\S+)$', committed('packaging/PKGBUILD').decode(), re.M)[1]
-record = {'commit': commit, 'tree': tree, 'source_sha256': digest, 'version': version}
+record = {'commit': commit, 'tree': tree, 'source_sha256': digest, 'version': version, **native}
 (output / 'release.json').write_text(json.dumps(record, indent=2) + '\n')
 for kind, path in [('native', 'packaging/sddm-himmelblau'), ('companion', 'packaging')]:
     directory = output / kind
@@ -40,4 +51,9 @@ for kind, path in [('native', 'packaging/sddm-himmelblau'), ('companion', 'packa
                      'sddm-himmelblau-pin-change.pam', 'LGPL-2.1.txt']:
             (directory / name).write_bytes(committed(path + '/' + name))
 print('Clean source export:', commit)
-print('Build native/ with makepkg, then run tools/finish-release.py against that package.')
+if 'native_reused_from' in native:
+    print(f"Native inputs are unchanged since {native['native_reused_from']} "
+          f"({native['native_source_commit']}): do not build native/. Run tools/finish-release.py "
+          f"against {native['native_reused_from']}'s published sddm-himmelblau {native['native_version']} file.")
+else:
+    print('Build native/ with makepkg, then run tools/finish-release.py against that package.')

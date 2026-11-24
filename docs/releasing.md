@@ -49,6 +49,30 @@ package archives, `source.tar.gz`, `sddm-corresponding-source.tar.gz` and
 source) and `source.tar.gz` (companion, patches, recipes, tests) with the native
 binary, so a release does not depend on the upstream download staying available.
 
+## Reuse or rebuild the native package
+
+The companion pins the exact file hashes of the `sddm-himmelblau` it was built
+against. Native builds are not reproducible, and `pacman -U` of a companion leaves an
+installed native package of the same version in place. So a release must not rebuild
+the native package with the same version: the new companion's pin would not match the
+native files already installed, and `doctor` would fail.
+
+`prepare-release.py` compares the native inputs (listed in `tools/native_inputs.py`:
+the native recipe directory, `tests/native-sddm/`, `LICENSE` and
+`tools/prepare-native.py`) with the previous `v*` tag before HEAD:
+
+- **Unchanged:** it records `native_reused_from` (the tag) and `native_source_commit`
+  (that tag's commit) in `release.json` and tells you not to build `native/`. Run
+  `finish-release.py` against that release's published `sddm-himmelblau` file; it
+  records the tag's commit as the payload's `source_commit`. Publish the same native
+  file and the same `sddm-corresponding-source.tar.gz` (`corresponding-source.py`
+  produces identical bytes) as the previous release.
+- **Changed, same `pkgver-pkgrel`:** it refuses. Bump `pkgrel` in
+  `packaging/sddm-himmelblau/PKGBUILD`, the AUR native recipe and `NATIVE_VERSION` in
+  `src/omarchy_himmelblau.py`; the tests check they match.
+- **Changed, new version:** build `native/` as above. Users reinstall both packages
+  and reboot.
+
 ## Releases upgrade accepts
 
 `upgrade` moves a setup from any release listed under `releases` in
