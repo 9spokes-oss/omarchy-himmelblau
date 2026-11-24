@@ -1,0 +1,6 @@
+#!/bin/bash
+# Per-user omarchy update hook. Install it with:
+#   omarchy hook install post-update /usr/share/omarchy-himmelblau/post-update/omarchy-himmelblau
+# The logic ships with the package, so it stays current, and does nothing once removed.
+[[ -x /usr/lib/omarchy-himmelblau/post-update ]] || exit 0
+exec /usr/lib/omarchy-himmelblau/post-update "$@"

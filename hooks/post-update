@@ -1,0 +1,52 @@
+#!/bin/bash
+# Run by omarchy update as the desktop user (omarchy-hook post-update): after its
+# package upgrade and shell restart, before its reboot prompt, while it keeps sudo
+# authorized. Each step only reports what it could not do; none blocks the update.
+set -uo pipefail
+
+companion=/usr/bin/omarchy-himmelblau
+plugin_id=9spokes.himmelblau-lock
+
+say() { printf '\e[1momarchy-himmelblau:\e[0m %s\n' "$*"; }
+alert() {
+  say "$1"
+  notify-send -u critical -a omarchy-himmelblau "Work sign-in" "$1" >/dev/null 2>&1 || true
+}
+
+[[ -x $companion ]] || exit 0
+version=$("$companion" --version) || exit 0
+# The companion accepts a symlinked home (it resolves it) but no symlink below it.
+home=$(realpath -e -- "$HOME") || exit 0
+plugin_dir=$home/.config/omarchy/plugins/$plugin_id
+
+# 1. The root upgrade. -n: never prompt; without the update's authorization, just say so.
+if output=$(sudo -n "$companion" upgrade 2>&1); then
+  say "$output"
+elif [[ $output == *'No root setup state'* ]]; then
+  exit 0 # Work sign-in isn't set up on this machine.
+elif [[ $output == sudo:* ]]; then
+  alert 'The work sign-in setup may need upgrading: run sudo omarchy-himmelblau upgrade'
+else
+  say "$output"
+  alert "Work sign-in upgrade did not run: ${output##*$'\n'}"
+fi
+
+# 2. The lock plugin. The hook never updates it: omarchy plugin update installs the
+# origin's HEAD and can reload it into the running shell before anything here could
+# check it. It only says when the installed plugin isn't this companion's release.
+plugin_current=1
+if [[ -d $plugin_dir ]] && ! "$companion" check-plugin "$plugin_dir" >/dev/null 2>&1; then
+  plugin_current=0
+  alert "Update the lock plugin to $version from an unlocked desktop: omarchy plugin update $plugin_id (review the diff), then omarchy-restart-shell and omarchy-himmelblau status"
+fi
+
+# 3. A replaced display manager needs a reboot; omarchy update offers one after its hooks.
+if "$companion" reboot-required >/dev/null 2>&1; then
+  command -v omarchy-state >/dev/null && omarchy-state set reboot-required
+  say 'sddm-himmelblau changed: reboot (not just log out) to start it.'
+fi
+
+if (( plugin_current )) && ! output=$("$companion" status 2>&1); then
+  alert "Lock plugin check: $output"
+fi
+exit 0

@@ -141,7 +141,7 @@ class M365PolicyTest(unittest.TestCase):
 
     def test_staged_install_ships_generator_and_unchanged_preset(self):
         checkout = self.root / 'checkout'; checkout.mkdir()
-        for name in ('assets', 'docs', 'LICENSES', 'bin', 'src', 'tools', 'examples'):
+        for name in ('assets', 'docs', 'LICENSES', 'bin', 'src', 'tools', 'examples', 'hooks'):
             shutil.copytree(ROOT / name, checkout / name)
         for name in ('Makefile', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'README.md'):
             shutil.copyfile(ROOT / name, checkout / name)
@@ -157,6 +157,12 @@ class M365PolicyTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(script.stat().st_mode), 0o755)
         self.assertEqual(preset.read_bytes(), (ROOT / 'examples/chromium-m365-sso.json').read_bytes())
         self.assertEqual(stat.S_IMODE(preset.stat().st_mode), 0o644)
+        # The upgrade hooks: pacman's notice, and omarchy update's per-user hook and its logic.
+        for path, source, mode in (('usr/share/libalpm/hooks/omarchy-himmelblau.hook', 'hooks/omarchy-himmelblau.hook', 0o644),
+                                   ('usr/lib/omarchy-himmelblau/post-update', 'hooks/post-update', 0o755),
+                                   ('usr/share/omarchy-himmelblau/post-update/omarchy-himmelblau', 'hooks/omarchy-himmelblau', 0o755)):
+            self.assertEqual((stage / path).read_bytes(), (ROOT / source).read_bytes(), path)
+            self.assertEqual(stat.S_IMODE((stage / path).stat().st_mode), mode, path)
 
     def test_cli_install_reports_new_or_identical_policy(self):
         for installed, expected in [(True, 'M365 SSO policy installed.'),

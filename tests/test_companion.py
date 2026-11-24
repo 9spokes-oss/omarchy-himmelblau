@@ -707,7 +707,7 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaises(m.Error): action()
             listing.pop()
             service = directory / 'plugin/Service.qml'; service.write_bytes(service.read_bytes()+b'// drift\n')
-            with self.assertRaisesRegex(m.Error, 'differs from companion release'): m.plugin_status()
+            with self.assertRaisesRegex(m.Error, 'differs from every companion release'): m.plugin_status()
         m.PAM.unlink()
         with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing'): m.lock_prerequisites()
 
@@ -729,42 +729,51 @@ class CompanionTest(unittest.TestCase):
             with self.assertRaises(m.Error):
                 m.locker_preflight()
 
-    def test_previous_plugin_release_still_locks_but_must_be_updated(self):
+    def test_older_plugin_releases_still_pass_preflight_but_must_be_updated(self):
         directory, listing = self.fixed_plugin_fixture()
         listing[0]['enabled'] = False; listing[1]['enabled'] = True
         service = directory / 'plugin/Service.qml'
-        service.write_bytes(service.read_bytes() + b'// previous release\n')
+        original = service.read_bytes()
         current = m.manifest('fixed-plugin')
-        previous = dict(m.manifest('previous-release'))
-        previous['plugin-files'] = dict(current['files'], **{'plugin/Service.qml': m.digest(service.read_bytes())})
+        releases = {}
+        for version in ('0.0.7', '0.0.8'):
+            data = original + f'// release {version}\n'.encode()
+            releases[version] = {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64,
+                                 'plugin-files': dict(current['files'], **{'plugin/Service.qml': m.digest(data)})}
         manifest = m.manifest
-        with patch.object(m, 'manifest', lambda name: previous if name == 'previous-release' else manifest(name)), \
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)), \
                 patch.object(m, 'lock_prerequisites'), patch.object(m, 'native_plugins', return_value=listing), \
                 patch.object(m.subprocess, 'run') as run:
-            m.locker_preflight()
-            m.main(['locker-preflight'])
-            needs = f'{previous["version"]} needs updating to {current["version"]}'
-            for action in (m.plugin_status, lambda: m.main(['status'])):
-                with self.assertRaisesRegex(m.Error, needs): action()
+            for version in releases:
+                with self.subTest(version):
+                    service.write_bytes(original + f'// release {version}\n'.encode())
+                    m.locker_preflight()
+                    m.main(['locker-preflight'])
+                    needs = f'{version} needs updating to {current["version"]}'
+                    for action in (m.plugin_status, lambda: m.main(['status'])):
+                        with self.assertRaisesRegex(m.Error, needs): action()
             run.assert_not_called()
-            # Neither release: refused everywhere, the preflight included.
-            service.write_bytes(service.read_bytes() + b'// drift\n')
+            # No release: refused everywhere, the preflight included.
+            service.write_bytes(original + b'// drift\n')
             for action in (m.locker_preflight, m.plugin_status):
-                with self.assertRaisesRegex(m.Error, 'differs from companion release'): action()
+                with self.assertRaisesRegex(m.Error, 'differs from every companion release'): action()
 
-    def test_previous_plugin_release_record_matches_current_layout(self):
+    def test_older_plugin_release_records_match_current_layout(self):
         current = m.manifest('fixed-plugin')['files']
-        previous = m.manifest('previous-release')['plugin-files']
-        self.assertEqual(set(previous), set(current))
-        # Files that never change between releases must agree; the rest must differ.
-        for name in ('plugin/UPSTREAM-LICENSE', 'plugin/FingerprintModel.js', 'plugin/poster.sh', 'plugin/LICENSE'):
-            self.assertEqual(previous[name], current[name], name)
-        self.assertNotEqual(previous['manifest.json'], current['manifest.json'])
+        self.assertEqual(list(m.manifest('releases')), ['0.6.0', '0.6.1'])
+        for version in m.manifest('releases'):
+            with self.subTest(version):
+                older = m.older_release(version)['plugin-files']
+                self.assertEqual(set(older), set(current))
+                # Files that never change between releases must agree; the rest must differ.
+                for name in ('plugin/UPSTREAM-LICENSE', 'plugin/FingerprintModel.js', 'plugin/poster.sh', 'plugin/LICENSE'):
+                    self.assertEqual(older[name], current[name], name)
+                self.assertNotEqual(older['manifest.json'], current['manifest.json'])
 
     def test_fixed_plugin_rejects_unlisted_and_symlink_runtime_files(self):
         directory, listing = self.fixed_plugin_fixture()
         extra = directory / 'plugin/Extra.qml'; extra.write_text('unlisted')
-        with self.assertRaisesRegex(m.Error, 'runtime tree'): m.fixed_plugin_files()
+        with self.assertRaisesRegex(m.Error, 'differs from every companion release'): m.fixed_plugin_files()
         extra.unlink(); extra.symlink_to(directory / 'plugin/Service.qml')
         with self.assertRaises(m.Error): m.fixed_plugin_files()
 
@@ -2258,5 +2267,325 @@ class CompanionTest(unittest.TestCase):
                 with self.assertRaisesRegex(m.Error, 'Invalid state'): m.check_state(state)
         m.check_state(good)
 
+
+    # In-place upgrade from the previous release.
+
+    def previous_setup(self, theme=b'// previous release theme\n', pam=None, admin=False, apply_policy=False):
+        """A setup as a synthetic previous release left it: its version in the state, and
+        its own bytes in each output upgrade may rewrite (None: unchanged this release)."""
+        with patch.object(m, 'validate_sudo_rule'): self.setup(admin)
+        if apply_policy:
+            m.policy(True)
+        state = m.load_state()
+        previous = {'plugin-files': m.manifest('fixed-plugin')['files'], 'version': '0.0.9'}
+        for path, name, data in ((m.COPY_THEME / 'Main.qml', 'sddm-conversation', theme),
+                                 (m.PAM, 'lock-pam', pam)):
+            entry = next(item for item in state['files'] if Path(item['path']) == path)
+            if data is not None:
+                path.write_bytes(data)
+                entry['after'] = m.digest(data)
+            previous[name] = entry['after']
+        state['version'] = previous['version']
+        m.save_state(state)
+        self.releases = {'0.0.9': previous}
+        manifest = m.manifest
+        replaced = patch.object(m, 'manifest', lambda name: self.releases if name == 'releases' else manifest(name))
+        replaced.start(); self.addCleanup(replaced.stop)
+        return previous
+
+    def assert_upgrade_refused(self, message):
+        paths = (m.STATE, m.PAM, m.PIN_PAM, m.CONFIG, m.COPY_THEME / 'Main.qml')
+        before = {path: m.read(path) for path in paths}
+        with self.assertRaisesRegex(m.Error, message): m.upgrade()
+        self.assertEqual({path: m.read(path) for path in paths}, before)
+        self.assertFalse(m.journal_path().exists())
+
+    def test_upgrade_moves_the_previous_release_in_place(self):
+        previous = self.previous_setup()
+        before = m.load_state(any_version=True)
+        for action in (m.doctor, m.repair, lambda: m.policy(True), self.setup):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(m.Error, f'written by companion {previous["version"]}.*run upgrade$'):
+                    action()
+        m.upgrade()
+        m.require_no_live_locker.assert_not_called()  # Only the theme copy changed.
+        state = m.load_state()
+        self.assertEqual(state['version'], m.VERSION)
+        theme = m.COPY_THEME / 'Main.qml'
+        self.assertEqual(theme.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
+        self.assertEqual(theme.stat().st_mode & 0o777, 0o644)
+        # Only the theme copy's hash moved: every restore target is as setup recorded it.
+        self.assertEqual({key: value for key, value in state.items() if key not in ('version', 'files')},
+                         {key: value for key, value in before.items() if key not in ('version', 'files')})
+        self.assertEqual([new['path'] for old, new in zip(before['files'], state['files']) if old != new],
+                         [str(theme)])
+        new_theme = next(item for item in state['files'] if item['path'] == str(theme))
+        self.assertIsNone(new_theme['restore'])
+        m.doctor()
+        m.upgrade()  # Already this release: verified, nothing written.
+        self.assertIn(f'Already at companion {m.VERSION}; no changes', m.sys.stdout.getvalue())
+        m.rollback()
+        self.assertFalse(m.STATE.exists()); self.assertFalse(m.COPY_THEME.exists()); self.assertFalse(m.PAM.exists())
+        self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_upgrade_skips_releases_from_any_listed_one(self):
+        previous = self.previous_setup()
+        # Two releases since the one that wrote this setup: each is listed with its own outputs.
+        self.releases = {'0.0.7': previous,
+                         '0.0.8': dict(previous, **{'sddm-conversation': 'c' * 64}),
+                         '0.0.9': dict(previous, **{'sddm-conversation': 'd' * 64})}
+        state = m.load_state(any_version=True); state['version'] = '0.0.7'; m.save_state(state)
+        with self.assertRaisesRegex(m.Error, r'written by companion 0\.0\.7, not .*; run upgrade$'): m.doctor()
+        m.upgrade()
+        self.assertEqual(m.load_state()['version'], m.VERSION)
+        m.doctor()
+        self.assertIn('upgraded from companion 0.0.7', m.sys.stdout.getvalue())
+
+    def test_upgrade_moves_a_real_0_6_0_setup(self):
+        """0.6.0 wrote the same state format and managed files; only its theme copy differs."""
+        self.setup()
+        work = self.base / 'theme-0.6.0'; work.mkdir()
+        (work / 'Main.qml').write_bytes((ROOT / 'tests/fixtures/Main.qml').read_bytes())
+        subprocess.run(['/usr/bin/patch', '--batch', '--fuzz=0', '-p1', '-d', str(work)], check=True,
+                       capture_output=True, input=(ROOT / 'tests/fixtures/sddm-conversation-0.6.0.patch').read_bytes())
+        old_theme = (work / 'Main.qml').read_bytes()
+        listed = m.older_release('0.6.0')
+        self.assertEqual(m.digest(old_theme), listed['sddm-conversation'])
+        self.assertEqual(listed['lock-pam'], m.manifest('lock-pam')['after'])
+        theme = m.COPY_THEME / 'Main.qml'
+        theme.write_bytes(old_theme)
+        state = m.load_state()
+        before = [dict(item) for item in state['files']]
+        next(item for item in state['files'] if item['path'] == str(theme))['after'] = m.digest(old_theme)
+        state['version'] = '0.6.0'; m.save_state(state)
+        with self.assertRaisesRegex(m.Error, 'written by companion 0.6.0, not .*; run upgrade$'): m.doctor()
+        m.require_no_live_locker.side_effect = m.Error('A graphical session remains active')
+        m.upgrade()  # Live: the lock service is unchanged.
+        self.assertEqual(theme.read_bytes(), m.patch_source('sddm-conversation', (m.THEME / 'Main.qml').read_bytes()))
+        self.assertEqual(m.load_state()['files'], before)
+        m.doctor()
+        m.require_no_live_locker.side_effect = None
+        m.rollback()
+        self.assertFalse(m.COPY_THEME.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_upgrade_with_unchanged_outputs_only_restamps_the_state(self):
+        self.previous_setup(theme=None)
+        atomic, written = m.atomic, []
+        def record(path, *args):
+            written.append(path)
+            return atomic(path, *args)
+        with patch.object(m, 'atomic', record): m.upgrade()
+        self.assertEqual(written, [m.STATE])
+        self.assertEqual(m.load_state()['version'], m.VERSION)
+        m.doctor()
+
+    def test_upgrade_keeps_the_admin_rule_and_policy(self):
+        self.previous_setup(admin=True, apply_policy=True)
+        rule, config = m.SUDOERS.read_bytes(), m.CONFIG.read_bytes()
+        m.upgrade()
+        state = m.load_state()
+        self.assertTrue(state['admin']); self.assertTrue(state['apply_policy'])
+        self.assertEqual((m.SUDOERS.read_bytes(), m.CONFIG.read_bytes()), (rule, config))
+        m.doctor()
+        m.rollback()
+        self.assertFalse(m.SUDOERS.exists()); self.assertEqual(m.CONFIG.read_bytes(), self.before[m.CONFIG])
+
+    def test_upgrade_refuses_an_unknown_managed_file_set(self):
+        self.previous_setup()
+        state = m.load_state(any_version=True)
+        for name, files in (('admin rule without admin', [*state['files'], {**state['files'][0], 'path': str(m.SUDOERS)}]),
+                            ('missing lock service', [item for item in state['files'] if Path(item['path']) != m.PAM])):
+            with self.subTest(name):
+                m.save_state({**state, 'files': files})
+                self.assert_upgrade_refused('Unsupported managed file set')
+        m.save_state(state)
+        m.upgrade(); m.doctor()
+
+    def test_live_upgrade_needs_a_logout_only_to_replace_the_lock_service(self):
+        live = m.Error('A graphical session or locker is running, or session state is unknown')
+        for name, pam, refused in (('theme copy only', None, False),
+                                   ('lock service too', b'# previous release lock service\n', True)):
+            with self.subTest(name):
+                self.previous_setup(pam=pam)
+                m.require_no_live_locker.side_effect = live
+                if refused:
+                    self.assert_upgrade_refused('replaces the lock PAM service: log out of every '
+                                                'graphical session and run it from a text console')
+                    m.require_no_live_locker.side_effect = None
+                m.upgrade(); m.doctor()
+                m.require_no_live_locker.side_effect = None
+                m.rollback()
+
+    def test_reboot_is_required_only_after_a_native_change_since_boot(self):
+        newest = max(path.lstat().st_ctime for path in (*m.NATIVE_EXECUTABLES, *(file for directory in m.NATIVE_COMPONENTS for file in directory.rglob('*'))))
+        with patch.object(m, 'boot_time', return_value=int(newest) + 1):
+            self.assertFalse(m.native_changed_since_boot())
+            with self.assertRaises(SystemExit) as exit: m.main(['reboot-required'])
+            self.assertEqual(exit.exception.code, 1)
+        with patch.object(m, 'boot_time', return_value=int(newest) - 1):
+            self.assertTrue(m.native_changed_since_boot())
+            m.main(['reboot-required'])
+            self.previous_setup()
+            m.upgrade()
+            self.assertIn("reboot (don't just log out)", m.sys.stdout.getvalue())
+
+    def test_upgrade_rewrites_a_previous_lock_service(self):
+        self.previous_setup(theme=None, pam=b'# previous release lock service\n')
+        m.upgrade()
+        m.require_no_live_locker.assert_called_once_with()
+        self.assertEqual(m.digest(m.PAM.read_bytes()), m.manifest('lock-pam')['after'])
+        m.doctor()
+        m.rollback()
+        self.assertFalse(m.PAM.exists())
+
+    def test_upgrade_refuses_state_from_any_other_release(self):
+        self.previous_setup()
+        state = m.load_state(any_version=True); state['version'] = '0.0.1'; m.save_state(state)
+        self.assert_upgrade_refused(r'written by companion 0\.0\.1; upgrade accepts 0\.0\.9\. '
+                                    'Run rollback, then setup')
+        with self.assertRaisesRegex(m.Error, 'run rollback, then setup'): m.doctor()
+
+    def test_upgrade_refuses_anything_the_previous_release_did_not_write(self):
+        previous = self.previous_setup()
+        theme = m.COPY_THEME / 'Main.qml'
+        old_theme, old_pin, old_login = theme.read_bytes(), m.PIN_PAM.read_bytes(), m.SYSTEM_LOGIN.read_bytes()
+        extra = m.COPY_THEME / 'unexpected.qml'
+        cases = [
+            ('theme copy edited', f'managed drift: {theme}',
+             lambda: theme.write_bytes(b'edited'), lambda: theme.write_bytes(old_theme)),
+            ('theme copy mode', f'managed drift: {theme}', lambda: theme.chmod(0o600), lambda: theme.chmod(0o644)),
+            ('other managed file', f'managed drift: {m.PIN_PAM}',
+             lambda: m.PIN_PAM.write_bytes(b'edited'), lambda: m.PIN_PAM.write_bytes(old_pin)),
+            ('deleted managed file', f'managed drift: {m.PIN_PAM}',
+             m.PIN_PAM.unlink, lambda: (m.PIN_PAM.write_bytes(old_pin), m.PIN_PAM.chmod(0o644))),
+            ('recorded theme from another release', f'{theme} is not what companion 0.0.9 wrote',
+             lambda: previous.update({'sddm-conversation': 'f' * 64}),
+             lambda: previous.update({'sddm-conversation': m.digest(old_theme)})),
+            ('extra theme file', 'Unexpected companion theme entry',
+             lambda: extra.write_bytes(b'operator asset'), extra.unlink),
+            ('watched system-login', 'Watched file changed(.|\n)*run rollback, then setup',
+             lambda: m.SYSTEM_LOGIN.write_bytes(old_login + b'# aad-tool\n'),
+             lambda: m.SYSTEM_LOGIN.write_bytes(old_login)),
+            ('pambase upgraded too', 'pambase 20990101-1 is installed',
+             lambda: setattr(self, 'pambase', '20990101-1'), lambda: setattr(self, 'pambase', '20260616-1')),
+            ('output this release cannot change', f'Upgrade cannot change {m.PIN_PAM}',
+             lambda: setattr(m, 'PIN_PAM_CONTENT', b'# a new service\n'),
+             lambda: setattr(m, 'PIN_PAM_CONTENT', old_pin)),
+        ]
+        for name, message, apply, undo in cases:
+            with self.subTest(name):
+                apply()
+                try:
+                    self.assert_upgrade_refused(message)
+                finally:
+                    undo()
+        m.upgrade(); m.doctor()
+
+    def test_upgrade_refuses_files_changed_after_its_checks(self):
+        self.previous_setup()
+        before = m.CONFIG.read_bytes()
+        state = m.STATE.read_bytes()
+        with self.changed_before_transaction(m.CONFIG, before + b'# edited\n'):
+            with self.assertRaisesRegex(m.Error, f'{m.CONFIG} changed while upgrade was checking it'):
+                m.upgrade()
+        self.assertEqual(m.STATE.read_bytes(), state)
+        m.CONFIG.write_bytes(before)
+        m.upgrade(); m.doctor()
+
+    def test_failed_or_interrupted_upgrade_is_undone(self):
+        self.previous_setup()
+        theme = m.COPY_THEME / 'Main.qml'
+        old = (m.STATE.read_bytes(), theme.read_bytes())
+        atomic, failed = m.atomic, []
+        def fail(path, *args):
+            if path == m.STATE and not failed:
+                failed.append(path)
+                raise OSError('synthetic upgrade failure')
+            return atomic(path, *args)
+        with patch.object(m, 'atomic', fail):
+            with self.assertRaisesRegex(m.Error, 'Upgrade failed and was undone'): m.upgrade()
+        self.assertEqual((m.STATE.read_bytes(), theme.read_bytes()), old)
+        self.crash_at_journal_unlink(m.upgrade)
+        self.assertNotEqual(theme.read_bytes(), old[1])
+        with self.assertRaisesRegex(m.Error, 'run recover'): m.upgrade()
+        m.recover()
+        self.assertEqual((m.STATE.read_bytes(), theme.read_bytes()), old)
+        m.upgrade(); m.doctor()
+
+    def test_upgrade_is_a_root_command(self):
+        with patch.object(m, 'upgrade') as upgrade, patch.object(m.os, 'geteuid', return_value=1000):
+            with self.assertRaisesRegex(m.Error, 'Run this command as root'): m.main(['upgrade'])
+            upgrade.assert_not_called()
+        with patch.object(m, 'upgrade') as upgrade, patch.object(m.os, 'geteuid', return_value=0):
+            m.main(['upgrade'])
+            upgrade.assert_called_once_with()
+
+    # Notices and the plugin check behind omarchy update's hook.
+
+    def notice(self):
+        before = m.sys.stdout.getvalue()
+        m.upgrade_notice()  # Never raises.
+        return m.sys.stdout.getvalue()[len(before):]
+
+    def test_upgrade_notice_names_the_step_left_and_never_fails(self):
+        self.assertEqual(self.notice(), '')  # Not set up.
+        self.setup()
+        later = patch.object(m, 'boot_time', return_value=2 ** 40)
+        with later:
+            self.assertEqual(self.notice(), '')
+        self.assertIn('reboot (not just log out)', self.notice())  # Fixture files postdate any boot.
+        state = m.load_state(); state['version'] = '0.0.9'; m.save_state(state)
+        self.releases = {'0.0.9': {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64, 'plugin-files': {}}}
+        manifest = m.manifest
+        with patch.object(m, 'manifest', lambda name: self.releases if name == 'releases' else manifest(name)):
+            self.assertIn('setup is from 0.0.9. Run sudo omarchy-himmelblau upgrade before rebooting', self.notice())
+            state['version'] = '0.0.1'; m.save_state(state)
+            self.assertIn('from 0.0.1, which this companion cannot upgrade. Run sudo omarchy-himmelblau rollback, then setup',
+                          self.notice())
+        m.journal_path().write_text('{}'); m.journal_path().chmod(0o600)
+        self.assertIn('run sudo omarchy-himmelblau recover', self.notice())
+        m.journal_path().unlink()
+        m.STATE.write_text('not json')
+        self.assertIn('could not check the setup', self.notice())
+
+    def test_check_plugin_accepts_only_this_release(self):
+        directory, listing = self.fixed_plugin_fixture()
+        m.check_plugin(directory)
+        m.main(['check-plugin', str(directory)])
+        with patch.object(m.os, 'geteuid', return_value=0):
+            with self.assertRaisesRegex(m.Error, 'not root'): m.main(['check-plugin', str(directory)])
+        service = directory / 'plugin/Service.qml'
+        original = service.read_bytes()
+        older = original + b'// release 0.0.8\n'
+        releases = {'0.0.8': {'sddm-conversation': 'a' * 64, 'lock-pam': 'b' * 64,
+                              'plugin-files': dict(m.manifest('fixed-plugin')['files'],
+                                                   **{'plugin/Service.qml': m.digest(older)})}}
+        manifest = m.manifest
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)):
+            service.write_bytes(older)
+            with self.assertRaisesRegex(m.Error, f'is plugin release 0.0.8, not {m.VERSION}'): m.check_plugin(directory)
+            service.write_bytes(original + b'// drift\n')
+            with self.assertRaisesRegex(m.Error, 'is plugin release unknown'): m.check_plugin(directory)
+            service.unlink(); service.symlink_to(directory / 'plugin/LockView.qml')
+            with self.assertRaisesRegex(m.Error, 'Symlink refused'): m.check_plugin(directory)
+
+    def test_status_says_when_the_lock_service_waits_for_a_root_upgrade(self):
+        self.setup()
+        old = b'# an older release lock service\n'
+        releases = {'0.0.9': {'sddm-conversation': 'a' * 64, 'lock-pam': m.digest(old), 'plugin-files': {}}}
+        manifest = m.manifest
+        stat = Path.stat
+        def root_owned(path, *args, **kwargs):
+            result = stat(path, *args, **kwargs)
+            return SimpleNamespace(st_uid=0, st_mode=result.st_mode) if path == m.PAM else result
+        with patch.object(m, 'manifest', lambda name: releases if name == 'releases' else manifest(name)), \
+                patch.object(Path, 'stat', root_owned):
+            m.lock_prerequisites()
+            m.PAM.write_bytes(old)
+            with self.assertRaisesRegex(m.Error, 'Root upgrade pending: run sudo omarchy-himmelblau upgrade'):
+                m.lock_prerequisites()
+            m.PAM.write_bytes(old + b'# drift\n')
+            with self.assertRaisesRegex(m.Error, 'Dedicated lock PAM is missing or changed'):
+                m.lock_prerequisites()
 
 if __name__ == '__main__': unittest.main()

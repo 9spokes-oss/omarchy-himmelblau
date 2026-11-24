@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = '0.6.1'
+VERSION = '0.6.2'
 # The one sddm-himmelblau release this companion supports (tests/test_versions.py).
 NATIVE_VERSION = '0.21.0-5'
 ASSETS = Path('/usr/share/omarchy-himmelblau')
@@ -74,6 +74,7 @@ PIN_PAM = Path('/etc/pam.d/omarchy-himmelblau-pin-change')
 PIN_PAM_CONTENT = (b'# Dedicated current-user PIN replacement; no session unlock.\n'
                    b'account [success=ok default=die] pam_himmelblau.so\n'
                    b'password required pam_himmelblau.so\n')
+OVERRIDE_CONTENT = b'[Theme]\nCurrent=omarchy-himmelblau\n'
 SDDM_PIN_PAM = Path('/etc/pam.d/sddm-himmelblau-pin-change')
 SDDM_PIN_PAM_CONTENT = (b'# Native SDDM PIN replacement; a successful change never starts a session.\n'
                         b'account [success=ok default=die] pam_himmelblau.so\n'
@@ -205,14 +206,26 @@ def manifest(name):
         required = {'id': str, 'files': dict, 'upstream': dict}
     elif name == 'pambase':
         required = {}  # Supported releases by version; pambase_release() checks each.
-    elif name == 'previous-release':
-        # The one release whose plugin locker-preflight still accepts.
-        required = {'version': str, 'sddm-conversation': str, 'plugin-files': dict}
+    elif name == 'releases':
+        required = {}  # Older releases by version; older_release() checks each.
     else:
         required = {'filename': str, 'before': str, 'after': str}
     if not isinstance(entry, dict) or any(not isinstance(entry.get(key), kind)
                                           for key, kind in required.items()):
         raise Error(f'Invalid {path} entry: {name}')
+    return entry
+
+
+def older_release(version):
+    """What an older release, listed in patches.json, wrote for each output upgrade may
+    rewrite, and its plugin files; None for any other version."""
+    entry = manifest('releases').get(version) if version != VERSION else None
+    if entry is None:
+        return None
+    if (not isinstance(entry, dict)
+            or any(not isinstance(entry.get(key), str) for key in ('sddm-conversation', 'lock-pam'))
+            or not isinstance(entry.get('plugin-files'), dict)):
+        raise Error(f'Invalid {ASSETS / "patches.json"} release entry: {version}')
     return entry
 
 
@@ -531,7 +544,7 @@ def check_state_file():
 
 
 def load_state(any_version=False):
-    """Load schema-1 state. Only rollback accepts a state from another version."""
+    """Load schema-1 state. Only rollback and upgrade accept a state from another version."""
     check_state_directory()
     data = read(STATE)
     if data is None:
@@ -539,6 +552,9 @@ def load_state(any_version=False):
     check_state_file()
     state = check_state(parse_json(data, STATE))
     if not any_version and state['version'] != VERSION:
+        if older_release(state['version']) is not None:
+            raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
+                        'run upgrade')
         raise Error(f'State was written by companion {state["version"]}, not {VERSION}; '
                     'run rollback, then setup')
     return state
@@ -767,7 +783,7 @@ def setup(domain, user, admin=False):
         raise Error('Original theme Main.qml missing')
     if read(OVERRIDE) is not None:
         raise Error(f'{OVERRIDE} exists but is not managed')
-    add(OVERRIDE, b'[Theme]\nCurrent=omarchy-himmelblau\n')
+    add(OVERRIDE, OVERRIDE_CONTENT)
     if admin:
         if read(SUDOERS) is not None:
             raise Error(f'{SUDOERS} exists but is not managed')
@@ -1378,6 +1394,150 @@ def repair():
     print('Root repair complete.')
 
 
+@exclusive
+def upgrade():
+    """Move a setup written by an older companion release to this one, in place.
+
+    Accepts state from any release listed in patches.json (each uses the current state
+    format), and only while every managed file is still what that release wrote (bytes,
+    owner and mode). Rewrites only the outputs that may change between releases, each
+    from the hash that release records for it; every other managed file must already be
+    what this release would write. Restore targets are kept, so rollback still restores
+    what setup found.
+
+    It runs from a live desktop unless it would replace the lock PAM service: the greeter
+    reads the theme copy only when it starts, but a running locker uses the lock service
+    on its next authentication, and root cannot tell which plugin code a running shell has
+    loaded. Then, like rollback, it needs every graphical session ended."""
+    state = load_state(any_version=True)
+    if state['version'] == VERSION:
+        doctor()
+        print(f'Already at companion {VERSION}; no changes')
+        return
+    previous = older_release(state['version'])
+    if previous is None:
+        accepted = ', '.join(sorted(manifest('releases'))) or 'none'
+        raise Error(f'State was written by companion {state["version"]}; upgrade accepts '
+                    f'{accepted}. Run rollback, then setup')
+    seen = snapshot(root_targets(state))
+    native_sddm_contract()
+    require_no_autologin()
+    principal = check_identity(state)
+    check_admin_identity(state)
+    configuration_scope(state['domain'], state['user'], state['apply_policy'])
+    require_complete_configuration(state['domain'], state['user'], state['apply_policy'])
+    issues = pambase_issues(state)
+    if issues:
+        # repair cannot run on another version's state: nothing here may be fixed in place.
+        raise Error('\n'.join([*issues, f'Upgrade needs the {state["version"]} setup '
+                                          'unchanged; run rollback, then setup']))
+    patch_source('lock-conversation', read(LOCK) or b'')
+    patch_source('lock-view', read(LOCK.parent / 'LockView.qml') or b'')
+    auth = system_auth_entry(state)
+    # Outputs that may change between releases, and what this release writes for each.
+    pinned = {COPY_THEME / 'Main.qml': ('sddm-conversation',
+                                        patch_source('sddm-conversation', read(THEME / 'Main.qml') or b'')),
+              PAM: ('lock-pam', patch_source('lock-pam', stock_pam()))}
+    # Outputs that must not: the same inputs give the same bytes in both releases.
+    fixed = {RECOVERY_ACCOUNT: identity_file(principal), PIN_PAM: PIN_PAM_CONTENT,
+             OVERRIDE: OVERRIDE_CONTENT,
+             SYSTEM_AUTH: patched_system_auth(pambase_release(state['pambase']), auth['restore_kind'],
+                                              base64.b64decode(auth['restore']))}
+    if state['admin']:
+        fixed[SUDOERS] = admin_rule(principal)
+    recorded = [Path(entry['path']) for entry in state['files']]
+    if (set(pinned) | set(fixed)) - set(recorded) or (not state['admin'] and SUDOERS in recorded):
+        raise Error('Unsupported managed file set; run rollback, then setup')
+    writes = []
+    for entry in state['files']:
+        path = Path(entry['path'])
+        current = file_record(path)
+        if (current is None or digest(base64.b64decode(current['data'])) != entry['after']
+                or (current['mode'], current['uid'], current['gid']) != (entry['mode'], *owner())):
+            raise Error(f'Upgrade refuses managed drift: {path}; run rollback, then setup')
+        if path in pinned:
+            name, data = pinned[path]
+            if entry['after'] != previous[name]:
+                raise Error(f'Upgrade refuses: {path} is not what companion '
+                            f'{state["version"]} wrote; run rollback, then setup')
+            if digest(data) != entry['after']:
+                writes.append((path, data, entry['mode'], *owner()))
+                entry['after'] = digest(data)  # Keep the restore target: absence, for both.
+        elif path in fixed:
+            if digest(fixed[path]) != entry['after']:
+                raise Error(f'Upgrade cannot change {path}; run rollback, then setup')
+        elif path != CONFIG and not path.is_relative_to(COPY_THEME):
+            raise Error(f'Upgrade refuses unknown managed file: {path}')
+    for directory in checked_theme_directories(state['files']):
+        if stat.S_IMODE(directory.stat().st_mode) != 0o755:
+            raise Error(f'Companion theme directory must be 0755: {directory}; '
+                        'run rollback, then setup')
+    if any(path == PAM for path, *_ in writes):
+        try:
+            require_no_live_locker()
+        except Error as error:
+            raise Error(f'{error}. This upgrade replaces the lock PAM service: log out of every '
+                        'graphical session and run it from a text console') from None
+    old_version, state['version'] = state['version'], VERSION
+    transact('upgrade', state, writes, verify=verify_root, expected=seen)
+    print(f'Root setup upgraded from companion {old_version} to {VERSION}. Update the lock '
+          'plugin if omarchy-himmelblau status asks for it.')
+    if native_changed_since_boot():
+        print('sddm-himmelblau changed since boot: reboot (don\'t just log out) to start it.')
+
+
+def upgrade_notice():
+    """Run by pacman after either package changes: say what step, if any, is left.
+    Read-only, takes no lock, and never fails the transaction."""
+    def say(message):
+        print(f'omarchy-himmelblau: {message}')
+    try:
+        check_state_directory(allow_journal=True)
+        if journal_path().exists() or journal_path().is_symlink():
+            say('a root change was interrupted; run sudo omarchy-himmelblau recover')
+            return
+        if read(STATE) is None:
+            return  # Not set up.
+        version = load_state(any_version=True)['version']
+        if version != VERSION and older_release(version) is not None:
+            say(f'the work sign-in setup is from {version}. Run sudo omarchy-himmelblau upgrade '
+                'before rebooting (omarchy update runs it if its post-update hook is installed)')
+        elif version != VERSION:
+            say(f'the work sign-in setup is from {version}, which this companion cannot upgrade. '
+                'Run sudo omarchy-himmelblau rollback, then setup')
+        elif native_changed_since_boot():
+            say('sddm-himmelblau changed: reboot (not just log out) to start it')
+    except Exception as error:  # A notice must never fail the package transaction.
+        say(f'could not check the setup ({error}); run sudo omarchy-himmelblau doctor')
+
+
+def check_plugin(directory):
+    """Exit 0 when directory holds exactly this release's plugin files (any user)."""
+    def no_symlink(path):
+        if path.is_symlink():
+            raise Error(f'Symlink refused: {path}')
+    release = plugin_release(Path(directory).absolute(), no_symlink)
+    if release != VERSION:
+        raise Error(f'{directory} is plugin release {release or "unknown"}, not {VERSION}')
+    print(f'{directory} is the {VERSION} plugin release.')
+
+
+def boot_time():
+    for line in Path('/proc/stat').read_text().splitlines():
+        if line.startswith('btime '):
+            return int(line.split()[1])
+    raise Error('Unknown boot time')
+
+
+def native_changed_since_boot():
+    """Whether an installed native SDDM file was replaced after this boot, so the running
+    display manager is older than the greeter it would start next. Any user may ask."""
+    boot = boot_time()
+    paths = [*NATIVE_EXECUTABLES, *(path for directory in NATIVE_COMPONENTS if directory.is_dir()
+                                    for path in directory.rglob('*'))]
+    return any(path.lstat().st_ctime >= boot for path in paths if path.exists())
+
+
 
 # Transactions. Every root change (setup, policy, repair, rollback) runs through
 # transact(): one journal, written once before the first change, records each
@@ -1387,7 +1547,7 @@ def repair():
 # checks every target against before or after, then puts every one back.
 
 OPERATION_LABELS = {'setup': 'Setup', 'policy': 'Policy change', 'repair': 'Repair',
-                    'rollback': 'Rollback'}
+                    'upgrade': 'Upgrade', 'rollback': 'Rollback'}
 
 
 def b64(data):
@@ -1831,38 +1991,44 @@ def lock_implementations(plugins):
             (plugin['id'] == 'omarchy.lock' or plugin.get('clonedFrom') == 'omarchy.lock')]
 
 
-def fixed_plugin_files(allow_previous=False):
-    """Check the installed fixed plugin. allow_previous also accepts the previous release."""
-    account, home = canonical_user()
-    info = manifest('fixed-plugin')
-    directory = home / '.config/omarchy/plugins' / info['id']
-    user_path_guard(home, directory)
+def plugin_release(directory, guard=lambda path: None):
+    """The release whose plugin files directory holds exactly: VERSION, a listed older
+    release, or None. guard(path) runs before each path is read."""
+    guard(directory)
     runtime_files = set()
     for path in (directory / 'plugin').rglob('*'):
-        user_path_guard(home, path)
+        guard(path)
         if path.is_symlink() or path.is_dir():
             raise Error('Unexpected directory/symlink in fixed plugin runtime tree')
         runtime_files.add(str(path.relative_to(directory)))
-
-    def release(files):
+    def matches(files):
         if runtime_files != {name for name in files if name.startswith('plugin/')}:
-            return 'tree'
+            return False
         for name, wanted in files.items():
             target = directory / name
-            user_path_guard(home, target)
+            guard(target)
             data = read(target)
             if data is None or digest(data) != wanted:
-                return 'source'
-        return None
+                return False
+        return True
+    if matches(manifest('fixed-plugin')['files']):
+        return VERSION
+    for version in manifest('releases'):
+        if matches(older_release(version)['plugin-files']):
+            return version
+    return None
 
-    mismatch = release(info['files'])
-    if mismatch:
-        previous = manifest('previous-release')
-        if release(previous['plugin-files']):
-            raise Error(f'Fixed plugin {"runtime tree" if mismatch == "tree" else "source"}'
-                        ' differs from companion release')
-        if not allow_previous:
-            raise Error(f'Fixed lock plugin {previous["version"]} needs updating to {info["version"]}')
+
+def fixed_plugin_files(allow_older=False):
+    """Check the installed fixed plugin. allow_older also accepts a listed older release."""
+    account, home = canonical_user()
+    info = manifest('fixed-plugin')
+    directory = home / '.config/omarchy/plugins' / info['id']
+    release = plugin_release(directory, lambda path: user_path_guard(home, path))
+    if release is None:
+        raise Error('Fixed plugin differs from every companion release')
+    if release != VERSION and not allow_older:
+        raise Error(f'Fixed lock plugin {release} needs updating to {info["version"]}')
     for name, wanted in info['upstream'].items():
         target = LOCK.parent / name
         data = read(target)
@@ -1875,16 +2041,19 @@ def lock_prerequisites():
     # The lock uses only the dedicated service; stock PAM matters to setup/repair.
     data = read(PAM)
     if data is None or digest(data) != manifest('lock-pam')['after']:
+        if data is not None and any(older_release(version)['lock-pam'] == digest(data)
+                                    for version in manifest('releases')):
+            raise Error('Root upgrade pending: run sudo omarchy-himmelblau upgrade')
         raise Error('Dedicated lock PAM is missing or changed')
     metadata = PAM.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o644:
         raise Error('Unsafe dedicated lock PAM metadata')
 
 
-def plugin_status(quiet=False, allow_previous=False):
+def plugin_status(quiet=False, allow_older=False):
     user_required()
     lock_prerequisites()
-    info = fixed_plugin_files(allow_previous)
+    info = fixed_plugin_files(allow_older)
     plugins = native_plugins()
     candidates = [plugin for plugin in plugins if plugin['id'] == info['id']]
     if (len(candidates) != 1 or candidates[0].get('firstParty') is not False
@@ -1898,12 +2067,12 @@ def plugin_status(quiet=False, allow_previous=False):
 
 
 def locker_preflight():
-    """Run by the lock plugin: exit 0 when the fixed plugin can authenticate.
+    """Run by the lock plugin after it locks: a failure shows a warning on the lock screen.
 
-    The previous plugin release passes too: it refuses to lock without this check,
-    so an upgrade that updates the companion first must not stop it locking.
+    A listed older plugin release passes too, so updating the companion before the
+    plugin doesn't warn on every lock.
     """
-    plugin_status(quiet=True, allow_previous=True)
+    plugin_status(quiet=True, allow_older=True)
 
 
 def main(argv=None):
@@ -1920,6 +2089,13 @@ def main(argv=None):
     # status is the same check as plugin-status; existing post-update hooks call it.
     for command in ('doctor', 'status', 'repair', 'plugin-status', 'locker-preflight'):
         sub.add_parser(command)
+    sub.add_parser('upgrade', help='move an older release\'s setup to this release (root)')
+    sub.add_parser('reboot-required',
+                   help='exit 0 when sddm-himmelblau changed since boot (any user)')
+    sub.add_parser('upgrade-notice', help='print the step a package change left (root, pacman hook)')
+    check_parser = sub.add_parser('check-plugin',
+                                  help='exit 0 when a directory holds this release\'s plugin (user)')
+    check_parser.add_argument('directory')
     for command in ('rollback', 'recover'):
         recovery_parser = sub.add_parser(command)
         recovery_parser.add_argument('--recovery-only', action='store_true',
@@ -1940,6 +2116,13 @@ def main(argv=None):
         plugin_status()
     elif args.command == 'locker-preflight':
         locker_preflight()
+    elif args.command == 'check-plugin':
+        user_required()
+        check_plugin(args.directory)
+    elif args.command == 'reboot-required':
+        if not native_changed_since_boot():
+            sys.exit(1)
+        print('sddm-himmelblau changed since boot: reboot to start it')
     else:
         root_required()
         if args.command == 'doctor':
@@ -1950,6 +2133,10 @@ def main(argv=None):
             policy(args.policy_enabled)
         elif args.command == 'repair':
             repair()
+        elif args.command == 'upgrade':
+            upgrade()
+        elif args.command == 'upgrade-notice':
+            upgrade_notice()
         elif args.command == 'rollback':
             rollback(args.recovery_only)
         elif args.command == 'recover':

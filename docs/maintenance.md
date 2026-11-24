@@ -21,8 +21,8 @@ Releases and marketplace submission are currently draft/withdrawn while polishin
 
 ## Controlled upgrade to 0.5.3
 
-Historical: this `repair`-based upgrade no longer exists. Versions after `0.5.3` change
-by `rollback`, package upgrade, then `setup`.
+Historical: this `repair`-based upgrade no longer exists. See
+[upgrading between releases](#upgrading-between-releases) for the current procedure.
 
 Version `0.5.3` with native `0.21.0-4` completed the controlled lab acceptance
 below on 2026-11-08. The `0.5.2` results above remain historical.
@@ -76,7 +76,7 @@ observations. Local recovery SSH/sudo worked, but local recovery GUI login was n
 repeated on this build. A silent MFA wait longer than 60 seconds was not
 independently timed. Core-limit runtime causality remains inconclusive as described
 above. These results do not establish offline sign-in or every MFA method/policy.
-Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3`, `0.6.0` and `0.6.1` are unpublished.
+Existing `0.5.1` and `0.5.2` releases remain draft prereleases; `0.5.3`, `0.6.0`, `0.6.1` and `0.6.2` are unpublished.
 Marketplace submission remains withdrawn.
 
 ## 0.6.0 fresh-install acceptance
@@ -144,6 +144,88 @@ Before privileged rollback, disable the user clone and log out of **all sessions
 
 Native SDDM replacement has its own package rollback. The companion's root rollback does not remove or downgrade the native display manager. Restore compatible SDDM/companion packages and their matching configuration together using the separate SDDM procedure; do not mix a conversation theme with an incompatible daemon.
 
+## Upgrading between releases
+
+`sudo omarchy-himmelblau upgrade` moves a setup from any release listed under `releases`
+in `assets/patches.json` to the installed companion's version. Apart from `rollback`, it
+is the only command that accepts state written by another release.
+
+### With omarchy update
+
+The per-user hook (`omarchy hook install post-update
+/usr/share/omarchy-himmelblau/post-update/omarchy-himmelblau`) is a two-line wrapper
+around `/usr/lib/omarchy-himmelblau/post-update`, so the logic updates with the package.
+Nothing root-owned writes into `$HOME`. `omarchy update` runs it as the user after its
+package upgrade and shell restart, before its reboot prompt, while it keeps sudo
+authorized (Omarchy 4.5.0-3 and the lock-lifecycle branch both do this). It:
+
+1. Runs `sudo -n omarchy-himmelblau upgrade`. It never prompts: without the update's
+   authorization, or for a user who can't use sudo, it only says to run it.
+2. Checks the installed lock plugin with `omarchy-himmelblau check-plugin` (every file
+   against this release's hashes, in the resolved home) and, if it isn't this release,
+   tells you to update it. It never updates the plugin itself. `omarchy plugin update`
+   installs whatever the origin's HEAD is, not a given commit, and Omarchy can reload
+   the plugin into the running shell as part of that update, before any check the hook
+   could run afterwards. Omarchy has no way to install a verified commit without
+   reloading it, so the plugin update stays a step you take and review.
+3. Runs `omarchy-himmelblau reboot-required`. It exits 0 when a native SDDM file was
+   replaced after this boot; the hook then sets Omarchy's `reboot-required` marker.
+4. Runs `status` and reports a failure, when the plugin is already this release.
+
+The hook doesn't install itself: nothing a package does as root should write into a
+user's configuration, and a plugin that changed its own update path would be surprising.
+
+### Notices
+
+- A pacman PostTransaction hook (`/usr/share/libalpm/hooks/omarchy-himmelblau.hook`)
+  runs `omarchy-himmelblau upgrade-notice` after either package is installed or
+  upgraded. It is read-only, takes no lock and never fails the transaction. It prints
+  the step left, if any: `upgrade` (before rebooting), `rollback` then `setup`,
+  `recover`, or a reboot.
+- The post-update hook sends a desktop notification for anything it couldn't do.
+- `status` says "Root upgrade pending" when the lock PAM service is an older listed
+  release's. The lock screen's existing setup warning then points to `status`. This
+  covers only releases that change the lock service. The state is root-only, so an
+  upgrade that changes nothing the user can read (0.6.1 to 0.6.2 only restamps the
+  state) shows up only in the pacman and hook notices.
+
+### What upgrade checks
+
+Before writing anything, `upgrade` checks that:
+
+- the state's version is a listed release. State already at this release is verified
+  with `doctor` and left alone; any other version is refused;
+- every managed file still has exactly the bytes, owner and mode the state records,
+  with no repair: a missing or edited file is refused;
+- the recorded theme copy `Main.qml` and lock PAM service are exactly what that release
+  wrote (its `sddm-conversation` and `lock-pam`);
+- every other generated file (recovery-account policy, PIN-change service, SDDM
+  override, admin rule, patched `system-auth`) is what this release would write too;
+- identity, configuration, native payload, upstream sources, the theme copy's tree
+  and pambase pass the same checks as `doctor`. A pambase upgrade in the same update
+  is refused, because `repair` cannot run on another release's state.
+
+It then writes only the outputs that changed, sets the state's version, and checks the
+result with `doctor`'s checks in one journalled transaction: a failure undoes it, and
+an interrupted one needs `recover`. Each file's rollback target is unchanged, so a
+later `rollback` still restores what `setup` found.
+
+### What still needs a logout or a reboot
+
+- **Replacing the lock PAM service.** A running locker uses it on its next
+  authentication, and root can't tell which plugin code a running shell has loaded
+  (files on disk aren't the loaded QML). So `upgrade` then refuses while a graphical
+  session, locker or compositor other than the login screen's runs, or when it can't
+  tell, and says to log out. No release so far has changed that service.
+- **A new `sddm-himmelblau`.** The running display manager starts the greeter from the
+  new files after a logout, and its own code changes only when it restarts, which ends
+  every session. Reboot rather than just log out, and run `upgrade` first: a new daemon
+  with an old theme copy may not offer sign-in.
+- **The plugin** needs a shell restart (no logout), after you update and review it
+  yourself; the hook only tells you when.
+- **Anything `upgrade` refuses**: `rollback` with the new companion, then `setup`.
+- **The theme copy** needs neither: the greeter reads it when it next starts.
+
 ## System PAM and pambase upgrades
 
 `setup` owns `/etc/pam.d/system-auth` and watches `/etc/pam.d/system-login`; the design
@@ -184,7 +266,7 @@ patched stack on Arch's libpam.
   As a backstop, `atomic()` checks each temporary file before renaming it into place.
   `make_directory()` checks a new directory just after creating it, so for that moment a
   directory with an inherited ACL exists before the change is undone.
-- **Changes during a command.** `setup`, `policy`, `repair` and `rollback` snapshot every
+- **Changes during a command.** `setup`, `policy`, `repair`, `upgrade` and `rollback` snapshot every
   file they may write or delete (bytes, owner and mode, or absence) before their checks.
   The transaction refuses to start if any of them changed since, including a file that
   appeared or a permission-only change. The comparison runs just before the journal is
@@ -253,7 +335,7 @@ companion's accepted build. Trust the release source/checksums and package insta
 channel; the manifest is not a package signature and does not defend against root
 replacing both trusted packages. See [release builds](releasing.md).
 
-Every root change (`setup`, `policy`, `repair`, `rollback`) first writes one journal,
+Every root change (`setup`, `policy`, `repair`, `upgrade`, `rollback`) first writes one journal,
 `/var/lib/omarchy-himmelblau/transaction.json` (root, `0600`), with each target's
 exact before bytes, owner and mode (or absence) and its expected after hash, owner and
 mode, plus the state file's before bytes and after hash. Replacements fsync file contents
@@ -262,7 +344,7 @@ command except `recover` refuses while the journal exists. Preserve it and run
 `sudo omarchy-himmelblau recover` from recovery access. Recovery always undoes, never
 completes, the change, and accepts each target only at its before or after value,
 including owner and mode; unknown edits need manual investigation. Any other `*.json`
-in that directory makes every command refuse. `setup`, `policy`, `repair`, `rollback` and
+in that directory makes every command refuse. `setup`, `policy`, `repair`, `upgrade`, `rollback` and
 `recover` each hold an exclusive lock (`.lock` in the same directory) for their whole run,
 so a second one is refused rather than interleaved, and the journal is created without
 ever replacing an existing one. File owners are set on the temporary file before it

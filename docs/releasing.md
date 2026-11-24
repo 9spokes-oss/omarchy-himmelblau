@@ -49,6 +49,40 @@ package archives, `source.tar.gz`, `sddm-corresponding-source.tar.gz` and
 source) and `source.tar.gz` (companion, patches, recipes, tests) with the native
 binary, so a release does not depend on the upstream download staying available.
 
+## Releases upgrade accepts
+
+`upgrade` moves a setup from any release listed under `releases` in
+`assets/patches.json`. When you bump `VERSION`, add the release being replaced, from
+its tagged `assets/patches.json`:
+
+```json
+"X.Y.Z": {
+  "sddm-conversation": "<its sddm-conversation.after>",
+  "lock-pam": "<its lock-pam.after>",
+  "plugin-files": { "<its fixed-plugin.files>": "..." }
+}
+```
+
+Keep the older entries, so skipped releases still upgrade. List only releases whose
+state uses the current format (`SCHEMA`), from 0.6.0 on.
+
+`upgrade` rewrites only the theme copy's `Main.qml` and the lock PAM service. If a
+release changes any other file `setup` writes (the patched `system-auth`, the PIN-change
+service, the SDDM override, the admin rule or the recovery-account policy), `upgrade`
+refuses with "Upgrade cannot change"; if it adds or removes one, `upgrade` refuses the
+managed file set. Extend `upgrade` and its tests for that change, or say in the release
+notes that the release needs `rollback`, then `setup`.
+
+A release that changes `lock-pam.after` makes `upgrade` refuse while a graphical
+session runs, so it needs a logout. Between the package upgrade and `upgrade`, the
+lock's setup check warns (`status` says "Root upgrade pending"), but the lock still
+locks. Say so in its release notes.
+
+Users update the plugin from GitHub themselves (the hook only tells them to), and
+`status` passes only for exactly this release's files. Publish the release's plugin
+(merge and tag) with the packages, and don't merge plugin changes to `main` ahead of
+their companion release: `omarchy plugin update` installs `main`'s HEAD.
+
 ## Publishing
 
 - Publish from the reviewed commit as an experimental prerelease, listing what was

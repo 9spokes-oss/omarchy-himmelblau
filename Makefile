@@ -31,6 +31,9 @@ install: build/pin-change
 	install -Dm755 tools/m365-sso-policy.py $(DESTDIR)$(PREFIX)/lib/omarchy-himmelblau/m365-sso-policy.py
 	install -Dm644 examples/chromium-m365-sso.json $(DESTDIR)$(PREFIX)/share/omarchy-himmelblau/chromium-m365-sso.json
 	install -Dm644 src/omarchy_himmelblau.py $(DESTDIR)$(PREFIX)/lib/omarchy-himmelblau/omarchy_himmelblau.py
+	install -Dm755 hooks/post-update $(DESTDIR)$(PREFIX)/lib/omarchy-himmelblau/post-update
+	install -Dm755 hooks/omarchy-himmelblau $(DESTDIR)$(PREFIX)/share/omarchy-himmelblau/post-update/omarchy-himmelblau
+	install -Dm644 hooks/omarchy-himmelblau.hook $(DESTDIR)$(PREFIX)/share/libalpm/hooks/omarchy-himmelblau.hook
 	install -dm755 $(DESTDIR)$(PREFIX)/share/omarchy-himmelblau
 	install -m644 assets/*.patch assets/patches.json $(DESTDIR)$(PREFIX)/share/omarchy-himmelblau/
 	install -Dm644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/omarchy-himmelblau/LICENSE
